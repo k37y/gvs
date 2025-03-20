@@ -1,7 +1,3 @@
 [build]
+  command = "make gvs"
   functions = "netlify-functions"
-
-[[redirects]]
-  from = "/scan"
-  to = "/.netlify/functions/scan"
-  status = 200
