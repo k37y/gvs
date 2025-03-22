@@ -49,6 +49,22 @@ type Sarif struct {
 	} `json:"runs"`
 }
 
+func installGovulncheck() (int, error) {
+	fmt.Println("Installing govulncheck...")
+	cmd := exec.Command("go", "install", "golang.org/x/vuln/cmd/govulncheck@latest")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	exitCode := cmd.ProcessState.ExitCode()
+	if err != nil {
+		return exitCode, fmt.Errorf("failed to install govulncheck: %v\n%s", err, stderr.String())
+	}
+
+	fmt.Println("govulncheck installed successfully.")
+	return exitCode, nil
+}
+
 func cloneRepo(repoURL, branch, cloneDir string) error {
 	cmd := exec.Command("git", "clone", "--branch", branch, "--single-branch", repoURL, cloneDir)
 	var stderr bytes.Buffer
@@ -87,6 +103,16 @@ func scanHandler(request events.APIGatewayProxyRequest) (events.APIGatewayProxyR
 		return events.APIGatewayProxyResponse{
 			StatusCode: http.StatusBadRequest,
 			Body:       `{"error": "Invalid JSON format"}`,
+		}, nil
+	}
+
+	// Install govulncheck at runtime
+	exitCode, err := installGovulncheck()
+	if err != nil {
+		response, _ := json.Marshal(ScanResponse{Success: false, ExitCode: exitCode, Error: err.Error()})
+		return events.APIGatewayProxyResponse{
+			StatusCode: http.StatusInternalServerError,
+			Body:       string(response),
 		}, nil
 	}
 
@@ -143,12 +169,17 @@ func scanHandler(request events.APIGatewayProxyRequest) (events.APIGatewayProxyR
 }
 
 func runScan(scanRequest ScanRequest) ScanResponse {
+	exitCode, err := installGovulncheck()
+	if err != nil {
+		return ScanResponse{Success: false, ExitCode: exitCode, Error: err.Error()}
+	}
+
 	cloneDir := "/tmp/repo_scan"
 	target := "./..."
 
 	_ = os.RemoveAll(cloneDir) // Clean temp directory
 
-	err := cloneRepo(scanRequest.Repo, scanRequest.Branch, cloneDir)
+	err = cloneRepo(scanRequest.Repo, scanRequest.Branch, cloneDir)
 	if err != nil {
 		return ScanResponse{Success: false, Error: err.Error()}
 	}
