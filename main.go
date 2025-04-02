@@ -138,8 +138,11 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	os.Setenv("GOCACHE", "/tmp/go-build")
+	os.MkdirAll("/tmp/go-build", os.ModePerm)
 	http.HandleFunc("/scan", scanHandler)
 	http.HandleFunc("/healthz", healthHandler)
+	http.Handle("/", http.FileServer(http.Dir("./")))
 	port := "8082"
 	fmt.Printf("Server started on port %s\n", port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))

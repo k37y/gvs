@@ -8,14 +8,16 @@ RUN go build -o /usr/bin/gvs -buildvcs=false .
 FROM registry.access.redhat.com/ubi9:latest
 ENV GOPATH=/go
 ENV PATH=${PATH}:${GOPATH}/bin
+ENV PATH=${PATH}:/go/src/github.com/k37y/gvs
 
-# Install dependencies and govulncheck
+WORKDIR /go/src/github.com/k37y/gvs
+
 RUN yum install -y git golang && \
     go install golang.org/x/vuln/cmd/govulncheck@latest
 
 EXPOSE 8082
 
-# Copy the built binary
-COPY --from=builder /usr/bin/gvs /usr/bin/gvs
+COPY --from=builder /usr/bin/gvs /go/src/github.com/k37y/gvs/gvs
+COPY --from=builder /go/src/github.com/k37y/gvs/index.html /go/src/github.com/k37y/gvs/index.html
 
-ENTRYPOINT ["/usr/bin/gvs"]
+ENTRYPOINT ["/go/src/github.com/k37y/gvs/gvs"]
