@@ -1,3 +1,3 @@
-module github.com/k37y/gvs
+module github.com/k37y/govulcheck
 
 go 1.21
