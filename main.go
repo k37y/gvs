@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sync"
 	"time"
 )
 
@@ -37,7 +38,26 @@ type Sarif struct {
 	} `json:"runs"`
 }
 
+var (
+	scanMutex      sync.Mutex // Ensures only one scan runs at a time
+	scanInProgress bool       // Tracks if a scan is currently running
+)
+
+// cloneRepo checks if the repo is public before cloning
 func cloneRepo(repoURL, branch, cloneDir string) error {
+	// Prevent Git from prompting for credentials
+	os.Setenv("GIT_TERMINAL_PROMPT", "0")
+
+	// Check if the repository is publicly accessible
+	checkCmd := exec.Command("git", "ls-remote", "--exit-code", repoURL)
+	var checkStderr bytes.Buffer
+	checkCmd.Stderr = &checkStderr
+
+	if err := checkCmd.Run(); err != nil {
+		return fmt.Errorf("repository is not publicly accessible: %s", checkStderr.String())
+	}
+
+	// Proceed with cloning if the repo is accessible
 	cmd := exec.Command("git", "clone", "--branch", branch, "--single-branch", repoURL, cloneDir)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -46,10 +66,10 @@ func cloneRepo(repoURL, branch, cloneDir string) error {
 	if err != nil {
 		return fmt.Errorf("git clone failed: %v\n%s", err, stderr.String())
 	}
-
 	return nil
 }
 
+// runGovulncheck executes the vulnerability check
 func runGovulncheck(directory, target string) (string, int, error) {
 	cmd := exec.Command("govulncheck", "-format", "sarif", "-C", directory, target)
 	var out bytes.Buffer
@@ -58,17 +78,33 @@ func runGovulncheck(directory, target string) (string, int, error) {
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
-	exitCode := cmd.ProcessState.ExitCode()
+	exitCode := 1 // Default to 1 on failure
+	if cmd.ProcessState != nil {
+		exitCode = cmd.ProcessState.ExitCode()
+	}
 
 	if err != nil && exitCode != 3 {
 		log.Printf("govulncheck failed: %v\nSTDERR:\n%s", err, stderr.String())
-		return stderr.String(), exitCode, fmt.Errorf("govulncheck failed: %v", err)
+		return stderr.String(), 1, fmt.Errorf("govulncheck failed: %v", err)
 	}
 
 	return out.String(), exitCode, nil
 }
 
+// scanHandler handles incoming scan requests
 func scanHandler(w http.ResponseWriter, r *http.Request) {
+	if scanInProgress {
+		http.Error(w, `{"error": "Another scan is in progress. Please wait."}`, http.StatusTooManyRequests)
+		return
+	}
+
+	scanMutex.Lock()
+	scanInProgress = true
+	defer func() {
+		scanInProgress = false
+		scanMutex.Unlock()
+	}()
+
 	startTime := time.Now()
 	clientIP := r.RemoteAddr
 
@@ -89,7 +125,7 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 	err = cloneRepo(scanRequest.Repo, scanRequest.Branch, cloneDir)
 	if err != nil {
 		log.Printf("Clone failed for Repo: %s, Branch: %s, Error: %s", scanRequest.Repo, scanRequest.Branch, err.Error())
-		response, _ := json.Marshal(ScanResponse{Success: false, Error: err.Error()})
+		response, _ := json.Marshal(ScanResponse{Success: false, ExitCode: 1, Error: err.Error()})
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write(response)
 		return
@@ -98,7 +134,7 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 	output, exitCode, err := runGovulncheck(cloneDir, target)
 	if err != nil && exitCode != 3 {
 		log.Printf("Govulncheck failed for Repo: %s, Branch: %s, Exit Code: %d, Error: %s", scanRequest.Repo, scanRequest.Branch, exitCode, err.Error())
-		response, _ := json.Marshal(ScanResponse{Success: false, ExitCode: exitCode, Error: err.Error()})
+		response, _ := json.Marshal(ScanResponse{Success: false, ExitCode: 1, Error: err.Error()})
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write(response)
 		return
@@ -108,7 +144,7 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 	err = json.Unmarshal([]byte(output), &sarif)
 	if err != nil {
 		log.Printf("Failed to parse govulncheck output for Repo: %s, Branch: %s", scanRequest.Repo, scanRequest.Branch)
-		response, _ := json.Marshal(ScanResponse{Success: false, Error: "Failed to parse govulncheck output"})
+		response, _ := json.Marshal(ScanResponse{Success: false, ExitCode: 1, Error: "Failed to parse govulncheck output"})
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write(response)
 		return
@@ -132,6 +168,7 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Request completed - Time Taken: %s", timeTaken)
 }
 
+// healthHandler provides a simple health check endpoint
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))
