@@ -12,7 +12,7 @@ ENV PATH=${PATH}:/go/src/github.com/k37y/gvs
 
 WORKDIR /go/src/github.com/k37y/gvs
 
-RUN yum install -y git golang && \
+RUN yum install -y git golang gpgme-devel && \
     go install golang.org/x/vuln/cmd/govulncheck@latest
 
 EXPOSE 8082

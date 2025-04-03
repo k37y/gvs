@@ -6,23 +6,22 @@
     <title>Govulncheck Scanner</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
-        #output {
+        .result-card {
             display: none;
-            border-left: 5px solid #007bff;
-            background: #f8f9fa;
             padding: 15px;
+            border-radius: 8px;
             font-family: monospace;
             white-space: pre-wrap;
             word-break: break-word;
+            margin-top: 20px; /* Extra space between input and output */
+            border-left: 5px solid #bbb;
         }
-        .highlight-key {
-            color: #d63384;
-            font-weight: bold;
-        }
-        .highlight-value {
-            color: #198754;
-            font-weight: bold;
-        }
+        .alert-success { background-color: #d4edda; border-left-color: #5cb85c; } /* Light Green */
+        .alert-warning { background-color: #fff3cd; border-left-color: #f0ad4e; color: #856404; } /* Light Yellow */
+        .alert-danger  { background-color: #f8d7da; border-left-color: #d9534f; color: #721c24; } /* Light Red */
+
+        .highlight-key { color: #b30000; font-weight: bold; }
+        .highlight-value { color: #007b00; font-weight: bold; }
     </style>
 </head>
 <body class="container mt-5">
@@ -45,7 +44,8 @@
         </div>
     </div>
 
-    <div id="output" class="mt-4 p-3 rounded"></div>
+    <!-- Output card with spacing -->
+    <div id="output" class="result-card"></div>
 
     <script>
         let scanInProgress = false;
@@ -67,11 +67,12 @@
             const scanButton = document.getElementById("scanButton");
 
             outputDiv.style.display = "none";
+            outputDiv.className = "result-card"; // Reset class
             scanButton.disabled = true;
             scanButton.innerText = "Scanning...";
 
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 90000);
+            const timeoutId = setTimeout(() => controller.abort(), 180000);
 
             fetch("/scan", {
                 method: "POST",
@@ -81,17 +82,28 @@
             })
             .then(response => response.json())
             .then(data => {
-                if (data.exit_code === 1) {
-                    outputDiv.innerHTML = `<div class='alert alert-danger'><strong>Error:</strong> ${data.error || "Unknown error occurred."}</div>`;
+                let message = "";
+                let alertClass = "alert-success"; // Default green
+
+                if (data.error === "Another scan is in progress. Please wait.") {
+                    message = `<strong>${data.error}</strong>`;
+                    alertClass = "alert-warning"; // Light Yellow for in-progress scans
+                } else if (data.exit_code === 1) {
+                    message = `<strong>Error:</strong> ${data.error || "Unknown error occurred."}`;
+                    alertClass = "alert-danger"; // Light Red for errors
                 } else {
-                    outputDiv.innerHTML = `<div class='alert alert-success'><strong>Scan Completed!</strong></div>`;
-                    outputDiv.innerHTML += `<pre class='text-break'>${syntaxHighlight(JSON.stringify(data, null, 2))}</pre>`;
+                    // message = "<strong>Scan Completed!</strong>";
+                    message = `<pre class='text-break'>${syntaxHighlight(JSON.stringify(data, null, 2))}</pre>`;
                 }
+
+                outputDiv.innerHTML = message;
+                outputDiv.classList.add(alertClass); // Apply the colored card
                 outputDiv.style.display = "block";
             })
             .catch(error => {
-                outputDiv.innerHTML = `<div class='alert alert-danger'><strong>Error:</strong> ` +
-                    (error.name === "AbortError" ? "Request timed out (90 sec)" : error) + `</div>`;
+                outputDiv.innerHTML = `<strong>Error:</strong> ` +
+                    (error.name === "AbortError" ? "Request timed out (180 sec)" : error);
+                outputDiv.classList.add("alert-danger");
                 outputDiv.style.display = "block";
             })
             .finally(() => {
