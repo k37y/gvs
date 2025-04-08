@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -39,16 +41,14 @@ type Sarif struct {
 }
 
 var (
-	scanMutex      sync.Mutex // Ensures only one scan runs at a time
-	scanInProgress bool       // Tracks if a scan is currently running
+	scanMutex      sync.Mutex
+	scanInProgress bool
 )
 
 // cloneRepo checks if the repo is public before cloning
 func cloneRepo(repoURL, branch, cloneDir string) error {
-	// Prevent Git from prompting for credentials
 	os.Setenv("GIT_TERMINAL_PROMPT", "0")
 
-	// Check if the repository is publicly accessible
 	checkCmd := exec.Command("git", "ls-remote", "--exit-code", repoURL)
 	var checkStderr bytes.Buffer
 	checkCmd.Stderr = &checkStderr
@@ -57,7 +57,6 @@ func cloneRepo(repoURL, branch, cloneDir string) error {
 		return fmt.Errorf("repository is not publicly accessible: %s", checkStderr.String())
 	}
 
-	// Proceed with cloning if the repo is accessible
 	cmd := exec.Command("git", "clone", "--branch", branch, "--single-branch", repoURL, cloneDir)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -69,6 +68,24 @@ func cloneRepo(repoURL, branch, cloneDir string) error {
 	return nil
 }
 
+// findGoModDirs finds directories containing go.mod, excluding vendor
+func findGoModDirs(root string) ([]string, error) {
+	var dirs []string
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && d.Name() == "vendor" {
+			return filepath.SkipDir
+		}
+		if d.Name() == "go.mod" {
+			dirs = append(dirs, filepath.Dir(path))
+		}
+		return nil
+	})
+	return dirs, err
+}
+
 // runGovulncheck executes the vulnerability check
 func runGovulncheck(directory, target string) (string, int, error) {
 	cmd := exec.Command("govulncheck", "-format", "sarif", "-C", directory, target)
@@ -78,7 +95,7 @@ func runGovulncheck(directory, target string) (string, int, error) {
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
-	exitCode := 1 // Default to 1 on failure
+	exitCode := 1
 	if cmd.ProcessState != nil {
 		exitCode = cmd.ProcessState.ExitCode()
 	}
@@ -118,8 +135,6 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Received request - Repo: %s, Branch: %s, Client IP: %s", scanRequest.Repo, scanRequest.Branch, clientIP)
 
 	cloneDir := "/tmp/repo_scan"
-	target := "./..."
-
 	_ = os.RemoveAll(cloneDir)
 
 	err = cloneRepo(scanRequest.Repo, scanRequest.Branch, cloneDir)
@@ -131,41 +146,62 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	output, exitCode, err := runGovulncheck(cloneDir, target)
-	if err != nil && exitCode != 3 {
-		log.Printf("Govulncheck failed for Repo: %s, Branch: %s, Exit Code: %d, Error: %s", scanRequest.Repo, scanRequest.Branch, exitCode, err.Error())
-		response, _ := json.Marshal(ScanResponse{Success: false, ExitCode: 1, Error: err.Error()})
+	moduleDirs, err := findGoModDirs(cloneDir)
+	if err != nil || len(moduleDirs) == 0 {
+		log.Printf("No go.mod files found in Repo: %s", scanRequest.Repo)
+		response, _ := json.Marshal(ScanResponse{Success: false, ExitCode: 1, Error: "No Go modules found"})
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write(response)
 		return
 	}
 
-	var sarif Sarif
-	err = json.Unmarshal([]byte(output), &sarif)
-	if err != nil {
-		log.Printf("Failed to parse govulncheck output for Repo: %s, Branch: %s", scanRequest.Repo, scanRequest.Branch)
-		response, _ := json.Marshal(ScanResponse{Success: false, ExitCode: 1, Error: "Failed to parse govulncheck output"})
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write(response)
-		return
-	}
+	var combinedOutput []map[string]interface{}
+	finalExitCode := 0
 
-	var findings []map[string]interface{}
-	for _, run := range sarif.Runs {
-		for _, result := range run.Results {
-			findings = append(findings, map[string]interface{}{
-				"ruleId":  result.RuleID,
-				"message": result.Message.Text,
-			})
+	for _, modDir := range moduleDirs {
+		output, exitCode, err := runGovulncheck(modDir, "./...")
+		if exitCode > finalExitCode {
+			finalExitCode = exitCode
 		}
+
+		if err != nil && exitCode != 3 {
+			log.Printf("govulncheck failed in %s: %v", modDir, err)
+			continue
+		}
+
+		var sarif Sarif
+		err = json.Unmarshal([]byte(output), &sarif)
+		if err != nil {
+			log.Printf("Failed to parse govulncheck output in %s", modDir)
+			continue
+		}
+
+		var findings []map[string]interface{}
+		for _, run := range sarif.Runs {
+			for _, result := range run.Results {
+				findings = append(findings, map[string]interface{}{
+					"ruleId":  result.RuleID,
+					"message": result.Message.Text,
+				})
+			}
+		}
+
+		relativePath := strings.TrimPrefix(modDir, cloneDir+"/")
+		combinedOutput = append(combinedOutput, map[string]interface{}{
+			"directory": relativePath,
+			"results":   findings,
+		})
 	}
 
-	response, _ := json.Marshal(ScanResponse{Success: true, ExitCode: exitCode, Output: findings})
+	response, _ := json.Marshal(ScanResponse{
+		Success:  true,
+		ExitCode: finalExitCode,
+		Output:   combinedOutput,
+	})
 	w.WriteHeader(http.StatusOK)
 	w.Write(response)
 
-	timeTaken := time.Since(startTime)
-	log.Printf("Request completed - Time Taken: %s", timeTaken)
+	log.Printf("Request completed - Time Taken: %s", time.Since(startTime))
 }
 
 // healthHandler provides a simple health check endpoint
