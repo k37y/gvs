@@ -134,7 +134,8 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Received request - Repo: %s, Branch: %s, Client IP: %s", scanRequest.Repo, scanRequest.Branch, clientIP)
 
-	cloneDir := "/tmp/repo_scan"
+	repoName := filepath.Base(scanRequest.Repo)
+	cloneDir := filepath.Join("/tmp", repoName)
 	_ = os.RemoveAll(cloneDir)
 
 	err = cloneRepo(scanRequest.Repo, scanRequest.Branch, cloneDir)
@@ -186,7 +187,13 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		relativePath := strings.TrimPrefix(modDir, cloneDir+"/")
+		var relativePath string
+		if modDir == cloneDir {
+			relativePath = repoName
+		} else {
+			relativePath = filepath.Join(repoName, strings.TrimPrefix(modDir, cloneDir+"/"))
+		}
+
 		combinedOutput = append(combinedOutput, map[string]interface{}{
 			"directory": relativePath,
 			"results":   findings,
