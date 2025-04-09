@@ -1,18 +1,17 @@
 # Golang Vulnerability Scanner (GVS)
 Analyze your Golang-based repository for vulnerabilities
 
-### Build
+### Build and run
+```
+make
+```
+### Build and run as a container image
 ```
 make image
 ```
 
-### Usage
+### Request using Curl
 ```
-# Server
-$ make run
-```
-```
-# Client
 $ curl --silent \
        --location \
        --request "POST" \
