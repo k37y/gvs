@@ -18,6 +18,6 @@ RUN yum install -y git golang gpgme-devel && \
 EXPOSE 8082
 
 COPY --from=builder /usr/bin/gvs /go/src/github.com/k37y/gvs/gvs
-COPY --from=builder /go/src/github.com/k37y/gvs/index.html /go/src/github.com/k37y/gvs/index.html
+COPY --from=builder /go/src/github.com/k37y/gvs/site/index.html /go/src/github.com/k37y/gvs/site/index.html
 
 ENTRYPOINT ["/go/src/github.com/k37y/gvs/gvs"]
