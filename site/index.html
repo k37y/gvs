@@ -102,7 +102,7 @@
             })
             .catch(error => {
                 outputDiv.innerHTML = `<strong>Error:</strong> ` +
-                    (error.name === "AbortError" ? "Request timed out (180 sec)" : error);
+                    (error.name === "AbortError" ? "Request timed out (360 sec)" : error);
                 outputDiv.classList.add("alert-danger");
                 outputDiv.style.display = "block";
             })
