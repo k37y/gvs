@@ -72,7 +72,7 @@
             scanButton.innerText = "Scanning...";
 
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 180000);
+            const timeoutId = setTimeout(() => controller.abort(), 360000);
 
             fetch("/scan", {
                 method: "POST",
