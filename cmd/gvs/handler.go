@@ -42,6 +42,14 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Received request - Repo: %s, Branch: %s, Client IP: %s", scanRequest.Repo, scanRequest.Branch, clientIP)
 
+	cacheKey := scanRequest.Repo + "@" + scanRequest.Branch
+	if cachedData, err := retrieveCacheFromDisk(cacheKey); err == nil {
+		w.WriteHeader(http.StatusOK)
+		w.Write(cachedData)
+		log.Print("Retrieved from cache")
+		return
+	}
+
 	repoName := filepath.Base(scanRequest.Repo)
 	cloneDir := filepath.Join("/tmp", repoName)
 	_ = os.RemoveAll(cloneDir)
@@ -115,6 +123,10 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 	})
 	w.WriteHeader(http.StatusOK)
 	w.Write(response)
+
+        if err = saveCacheToDisk(cacheKey, response); err != nil {
+                log.Printf("Error saving the cache to disk: %v", err)
+        }
 
 	log.Printf("Request completed - Time Taken: %s", time.Since(startTime))
 }
