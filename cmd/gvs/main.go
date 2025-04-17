@@ -8,27 +8,26 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	"path/filepath"
+	"strings"
 )
 
 var (
 	port    string = "8082"
 	version string
+	cacheDir = "/tmp/gvs-cache"
 )
 
 func main() {
-	// Set up cache directory
 	os.Setenv("GOCACHE", "/tmp/go-build")
 	os.MkdirAll("/tmp/go-build", os.ModePerm)
 
-	// Register handlers
 	http.HandleFunc("/scan", scanHandler)
 	http.HandleFunc("/healthz", healthHandler)
 	http.Handle("/", http.FileServer(http.Dir("./site")))
 
-	// Create server
 	srv := &http.Server{Addr: ":" + port}
 
-	// Start server in a goroutine
 	go func() {
 		log.Printf("Starting gvs, version %s\n", version)
 		log.Printf("Server started on port %s\n", port)
@@ -37,7 +36,6 @@ func main() {
 		}
 	}()
 
-	// Graceful shutdown
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
@@ -52,4 +50,21 @@ func main() {
 	}
 
 	log.Println("Server exiting")
+}
+
+func retrieveCacheFromDisk(key string) ([]byte, error) {
+	path := filepath.Join(cacheDir, keyToFilename(key))
+	if info, err := os.Stat(path); err == nil && time.Since(info.ModTime()) < 24*time.Hour {
+		return os.ReadFile(path)
+	}
+	return nil, os.ErrNotExist
+}
+
+func saveCacheToDisk(key string, data []byte) error {
+	os.MkdirAll(cacheDir, 0755)
+	return os.WriteFile(filepath.Join(cacheDir, keyToFilename(key)), data, 0644)
+}
+
+func keyToFilename(key string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(key, "/", "_"), ":", "_") + ".json"
 }
