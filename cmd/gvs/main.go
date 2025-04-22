@@ -20,7 +20,10 @@ var (
 
 func main() {
 	os.Setenv("GOCACHE", "/tmp/go-build")
-	os.MkdirAll("/tmp/go-build", os.ModePerm)
+	err := os.MkdirAll("/tmp/go-build", os.ModePerm)
+	if err != nil {
+		log.Fatalf("Failed to create directory: %v", err)
+	}
 
 	http.HandleFunc("/scan", scanHandler)
 	http.HandleFunc("/healthz", healthHandler)
@@ -61,7 +64,10 @@ func retrieveCacheFromDisk(key string) ([]byte, error) {
 }
 
 func saveCacheToDisk(key string, data []byte) error {
-	os.MkdirAll(cacheDir, 0755)
+	err := os.MkdirAll(cacheDir, 0755)
+	if err != nil {
+		log.Fatalf("Failed to create directory: %v", err)
+	}
 	return os.WriteFile(filepath.Join(cacheDir, keyToFilename(key)), data, 0644)
 }
 
