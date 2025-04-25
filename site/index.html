@@ -1,121 +1,162 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Golang Vulnerability Scanner</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <style>
-        .result-card {
-            display: none;
-            padding: 15px;
-            border-radius: 8px;
-            font-family: monospace;
-            white-space: pre-wrap;
-            word-break: break-word;
-            margin-top: 20px; /* Extra space between input and output */
-            border-left: 5px solid #bbb;
-        }
-        .alert-success { background-color: #d4edda; border-left-color: #5cb85c; } /* Light Green */
-        .alert-warning { background-color: #fff3cd; border-left-color: #f0ad4e; color: #856404; } /* Light Yellow */
-        .alert-danger  { background-color: #f8d7da; border-left-color: #d9534f; color: #721c24; } /* Light Red */
+	<head>
+		<meta charset="UTF-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+		<title>Golang Vulnerability Scanner</title>
+		<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+		<style>
+.result-card {
+	display: none;
+	padding: 15px;
+	border-radius: 8px;
+	font-family: monospace;
+	white-space: pre-wrap;
+	word-break: break-word;
+	margin-top: 20px;
+	border-left: 5px solid #bbb;
+	overflow-y: auto;
+}
+    .alert-success { background-color: #d4edda; border-left-color: #5cb85c; }
+    .alert-warning { background-color: #fff3cd; border-left-color: #f0ad4e; color: #856404; }
+    .alert-danger  { background-color: #f8d7da; border-left-color: #d9534f; color: #721c24; }
+    .highlight-key { color: #b30000; font-weight: bold; }
+    .highlight-value { color: #007b00; font-weight: bold; }
+		</style>
+	</head>
+	<body class="container mt-5">
+		<h2 class="text-center">Golang Vulnerability Scanner</h2>
+		<p class="text-center text-muted">Analyze your Golang-based repository for vulnerabilities</p>
+		<div class="card p-4 shadow-sm">
+			<div class="row mb-3 align-items-end">
+				<div class="col-md-5">
+					<label for="repo" class="form-label">Repository URL</label>
+					<input type="text" id="repo" class="form-control" placeholder="Enter repo URL" value="https://github.com/openshift/metallb">
+				</div>
+				<div class="col-md-3">
+					<label for="branch" class="form-label">Branch</label>
+					<input type="text" id="branch" class="form-control" placeholder="Enter branch name" value="release-4.18">
+				</div>
+				<div class="col-md-2">
+					<label for="cve" class="form-label">CVE ID (optional)</label>
+					<input type="text" id="cve" class="form-control" placeholder="Enter CVE ID">
+				</div>
+				<div class="col-md-2 text-end">
+					<button id="scanButton" class="btn btn-primary w-100" onclick="runScan()">Run Scan</button>
+				</div>
+			</div>
+		</div>
+		<div id="output" class="result-card"></div>
+		<script>
+			let scanInProgress = false;
+			let websocket = null;
 
-        .highlight-key { color: #b30000; font-weight: bold; }
-        .highlight-value { color: #007b00; font-weight: bold; }
-    </style>
-</head>
-<body class="container mt-5">
-    <h2 class="text-center">Golang Vulnerability Scanner</h2>
-    <p class="text-center text-muted">Analyze your Golang-based repository for vulnerabilities</p>
+			function syntaxHighlight(json) {
+				json = json.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+				return json.replace(/("(\w+)":)/g, '<span class="highlight-key">$1</span>')
+					.replace(/(:\s*"(.*?)")/g, ': <span class="highlight-value">$2</span>')
+					.replace(/(:\s*(\d+))/g, ': <span class="highlight-value">$2</span>');
+			}
 
-    <div class="card p-4 shadow-sm">
-        <div class="row mb-3 align-items-end">
-            <div class="col-md-6">
-                <label for="repo" class="form-label">Repository URL</label>
-                <input type="text" id="repo" class="form-control" placeholder="Enter repo URL" value="https://github.com/openshift/metallb">
-            </div>
-            <div class="col-md-4">
-                <label for="branch" class="form-label">Branch</label>
-                <input type="text" id="branch" class="form-control" placeholder="Enter branch name" value="release-4.18">
-            </div>
-            <div class="col-md-2 text-end">
-                <button id="scanButton" class="btn btn-primary w-100" onclick="runScan()">Run Scan</button>
-            </div>
-        </div>
-    </div>
+			function runScan() {
+				if (scanInProgress) return;
+				scanInProgress = true;
 
-    <!-- Output card with spacing -->
-    <div id="output" class="result-card"></div>
+				const repo = document.getElementById("repo").value.trim();
+				const branch = document.getElementById("branch").value.trim();
+				const cve = document.getElementById("cve").value.trim();
+				const outputDiv = document.getElementById("output");
+				const scanButton = document.getElementById("scanButton");
 
-    <script>
-        let scanInProgress = false;
+				outputDiv.style.display = "none";
+				outputDiv.className = "result-card";
+				outputDiv.innerHTML = "";
+				scanButton.disabled = true;
+				scanButton.innerText = "Scanning...";
 
-        function syntaxHighlight(json) {
-            json = json.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-            return json.replace(/("(\w+)":)/g, '<span class="highlight-key">$1</span>')
-                        .replace(/(:\s*"(.*?)")/g, ': <span class="highlight-value">$2</span>')
-                        .replace(/(:\s*(\d+))/g, ': <span class="highlight-value">$2</span>');
-        }
+				if (repo && branch && cve) {
+					const outputDiv = document.getElementById("output");
 
-        function runScan() {
-            if (scanInProgress) return;
+					const eventSource = new EventSource(`/events?repo=${encodeURIComponent(repo)}&branch=${encodeURIComponent(branch)}&cve=${encodeURIComponent(cve)}`);
+					const hostUrl = `${location.protocol}//${location.host}`;
 
-            scanInProgress = true;
-            const repo = document.getElementById("repo").value;
-            const branch = document.getElementById("branch").value;
-            const outputDiv = document.getElementById("output");
-            const scanButton = document.getElementById("scanButton");
+					outputDiv.innerHTML = `<strong>You can view the callgraphs at <a href="${hostUrl}/callgraph" target="_blank">${hostUrl}/callgraph</a> once it is generated.</strong><br><br>`;
+					outputDiv.classList.add("alert-warning");
+					outputDiv.style.display = "block";
 
-            outputDiv.style.display = "none";
-            outputDiv.className = "result-card"; // Reset class
-            scanButton.disabled = true;
-            scanButton.innerText = "Scanning...";
+					eventSource.onmessage = function(event) {
+						const message = event.data;
 
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 360000);
+						if (message.startsWith("Clone failed") || message.startsWith("Failed")) {
+							outputDiv.innerHTML += `<strong>Error:</strong> ${message}<br>`;
+							outputDiv.classList.add("alert-danger");
+						} else if (message.includes("Completed!")) {
+							outputDiv.innerHTML += `<br><strong>${message}</strong><br>`;
+							outputDiv.classList.remove("alert-warning");
+							outputDiv.classList.add("alert-success");
+							eventSource.close();
+							scanButton.disabled = false;
+							scanButton.innerText = "Run Scan";
+							scanInProgress = false;
+						} else {
+							outputDiv.innerHTML += message + "<br>";
+						}
+						outputDiv.scrollTop = outputDiv.scrollHeight;
+					};
 
-            fetch("/scan", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ repo, branch }),
-                signal: controller.signal,
-            })
-            .then(response => response.json())
-            .then(data => {
-                let message = "";
-                let alertClass = "alert-success"; // Default green
+					eventSource.onerror = function(event) {
+						outputDiv.innerHTML += "<br><strong>Error occurred while scanning.</strong>";
+						outputDiv.classList.add("alert-danger");
+						eventSource.close();
+						scanButton.disabled = false;
+						scanButton.innerText = "Run Scan";
+						scanInProgress = false;
+					};
+				} else {
+					const controller = new AbortController();
+					const timeoutId = setTimeout(() => controller.abort(), 360000);
 
-                if (data.error === "Another scan is in progress. Please wait.") {
-                    message = `<strong>${data.error}</strong>`;
-                    alertClass = "alert-warning"; // Light Yellow for in-progress scans
-                } else if (data.exit_code === 1) {
-                    message = `<strong>Error:</strong> ${data.error || "Unknown error occurred."}`;
-                    alertClass = "alert-danger"; // Light Red for errors
-                } else {
-                    // message = "<strong>Scan Completed!</strong>";
-                    message = `<pre class='text-break'>${syntaxHighlight(JSON.stringify(data, null, 2))}</pre>`;
-                }
+					fetch("/scan", {
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({ repo, branch }),
+						signal: controller.signal,
+					})
+						.then(response => response.json())
+						.then(data => {
+							let message = "";
+							let alertClass = "alert-success";
 
-                outputDiv.innerHTML = message;
-                outputDiv.classList.add(alertClass); // Apply the colored card
-                outputDiv.style.display = "block";
-            })
-            .catch(error => {
-                outputDiv.innerHTML = `<strong>Error:</strong> ` +
-                    (error.name === "AbortError" ? "Request timed out (360 sec)" : error);
-                outputDiv.classList.add("alert-danger");
-                outputDiv.style.display = "block";
-            })
-            .finally(() => {
-                clearTimeout(timeoutId);
-                scanInProgress = false;
-                scanButton.disabled = false;
-                scanButton.innerText = "Run Scan";
-            });
-        }
-    </script>
+							if (data.error === "Another scan is in progress. Please wait.") {
+								message = `<strong>${data.error}</strong>`;
+								alertClass = "alert-warning";
+							} else if (data.exit_code === 1) {
+								message = `<strong>Error:</strong> ${data.error || "Unknown error occurred."}`;
+								alertClass = "alert-danger";
+							} else {
+								message = `<pre class='text-break'>${syntaxHighlight(JSON.stringify(data, null, 2))}</pre>`;
+								}
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <footer class="mt-5 pb-4 text-center text-muted">&copy; 2025 Golang Vulnerability Scanner</footer>
-</body>
+								outputDiv.innerHTML = message;
+								outputDiv.classList.add(alertClass);
+								outputDiv.style.display = "block";
+								})
+								.catch(error => {
+								outputDiv.innerHTML = `<strong>Error:</strong> ` +
+								(error.name === "AbortError" ? "Request timed out (360 sec)" : error);
+								outputDiv.classList.add("alert-danger");
+								outputDiv.style.display = "block";
+								})
+								.finally(() => {
+								clearTimeout(timeoutId);
+								scanButton.disabled = false;
+								scanButton.innerText = "Run Scan";
+								scanInProgress = false;
+								});
+								}
+								}
+		</script>
+		<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+		<footer class="mt-5 pb-4 text-center text-muted">&copy; 2025 Golang Vulnerability Scanner</footer>
+	</body>
 </html>

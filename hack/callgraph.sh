@@ -32,12 +32,12 @@ done < <(
   done | awk -F: '{files[$1]=(files[$1] ? files[$1] " " : "") $2} END {for (d in files) print files[d]}'
 )
 
-rm -rf /tmp/gvs-cache/img && mkdir /tmp/gvs-cache/img
+mkdir -p /tmp/gvs-cache/img && rm -rf /tmp/gvs-cache/img/*
 
 # Print the array contents properly
 for file in "${!files[@]}"; do
   while read LIB; do
-  echo "Scanning ${LIB} using ${files[$file]} ..."
+	  echo "Generating callgraph of ${LIB}, starting from main(), using ${files[$file]} entry point file(s) ..."
   if ! callgraph -format=digraph ${files[$file]} | digraph somepath command-line-arguments.main ${LIB} 2>&1 | grep -q "digraph:"; then
 	  callgraph -format=digraph ${files[$file]} | digraph somepath command-line-arguments.main ${LIB} | digraph to dot > /tmp/gvs-cache/${LIB//[\/.]/-}-$file.dot
 	  cat /tmp/gvs-cache/${LIB//[\/.]/-}-$file.dot | sfdp -T svg -o/tmp/gvs-cache/img/${LIB//[\/.]/-}-$file.svg -Goverlap=scale
