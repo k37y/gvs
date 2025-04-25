@@ -28,6 +28,7 @@ func main() {
 	http.HandleFunc("/scan", scanHandler)
 	http.HandleFunc("/healthz", healthHandler)
 	http.Handle("/", http.FileServer(http.Dir("./site")))
+	http.HandleFunc("/ws", wsHandler)
 
 	srv := &http.Server{Addr: ":" + port}
 
