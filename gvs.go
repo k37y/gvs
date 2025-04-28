@@ -12,6 +12,7 @@ import (
 type ScanRequest struct {
 	Repo   string `json:"repo"`
 	Branch string `json:"branch"`
+	CVE    string `json:"cve"`
 }
 
 type ScanResponse struct {
@@ -90,4 +91,17 @@ func RunGovulncheck(directory, target string) (string, int, error) {
 	}
 
 	return out.String(), exitCode, nil
+}
+
+func RunCallgraphScript(repoDir, cveID string) (string, error) {
+	scriptPath := "hack/callgraph.sh"
+
+	cmd := exec.Command("bash", scriptPath, cveID, repoDir)
+
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+
+	err := cmd.Run()
+	return output.String(), err
 }

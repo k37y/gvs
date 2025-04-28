@@ -25,9 +25,11 @@ func main() {
 		log.Fatalf("Failed to create directory: %v", err)
 	}
 
+	http.Handle("/callgraph/", logFileAccess(http.StripPrefix("/callgraph/", http.FileServer(http.Dir("/tmp/gvs-cache/img")))))
+	http.Handle("/", http.FileServer(http.Dir("./site")))
 	http.HandleFunc("/scan", scanHandler)
 	http.HandleFunc("/healthz", healthHandler)
-	http.Handle("/", http.FileServer(http.Dir("./site")))
+	http.HandleFunc("/events", sseHandler)
 
 	srv := &http.Server{Addr: ":" + port}
 
@@ -73,4 +75,11 @@ func saveCacheToDisk(key string, data []byte) error {
 
 func keyToFilename(key string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(key, "/", "_"), ":", "_") + ".json"
+}
+
+func logFileAccess(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("Accessed: %s", r.URL.Path)
+		handler.ServeHTTP(w, r)
+	})
 }

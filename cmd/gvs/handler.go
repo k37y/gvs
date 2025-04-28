@@ -1,14 +1,17 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 	"sync"
+	"time"
 	"github.com/k37y/gvs"
 )
 
@@ -124,9 +127,9 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write(response)
 
-        if err = saveCacheToDisk(cacheKey, response); err != nil {
-                log.Printf("Error saving the cache to disk: %v", err)
-        }
+	if err = saveCacheToDisk(cacheKey, response); err != nil {
+		log.Printf("Error saving the cache to disk: %v", err)
+	}
 
 	log.Printf("Request completed - Time Taken: %s", time.Since(startTime))
 }
@@ -134,4 +137,61 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))
+}
+
+func sseHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported!", http.StatusInternalServerError)
+		return
+	}
+
+	repo := r.URL.Query().Get("repo")
+	branch := r.URL.Query().Get("branch")
+	cve := r.URL.Query().Get("cve")
+
+	if repo == "" || branch == "" || cve == "" {
+		http.Error(w, "Missing query parameters", http.StatusBadRequest)
+		return
+	}
+
+	repoName := filepath.Base(repo)
+	cloneDir := filepath.Join("/tmp", repoName)
+	_ = os.RemoveAll(cloneDir)
+
+	err := gvs.CloneRepo(repo, branch, cloneDir)
+	if err != nil {
+		fmt.Fprintf(w, "data: Clone failed: %s\n\n", err.Error())
+		flusher.Flush()
+		return
+	}
+
+	cmd := exec.Command("bash", "hack/callgraph.sh", cve, cloneDir)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		fmt.Fprint(w, "data: Failed to get stdout\n\n")
+		flusher.Flush()
+		return
+	}
+
+	if err := cmd.Start(); err != nil {
+		fmt.Fprint(w, "data: Failed to start script\n\n")
+		flusher.Flush()
+		return
+	}
+
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fmt.Fprintf(w, "data: %s\n\n", line)
+		flusher.Flush()
+	}
+
+	cmd.Wait()
+	fmt.Fprint(w, "data: Completed!\n\n")
+	flusher.Flush()
 }
