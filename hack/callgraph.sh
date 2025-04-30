@@ -32,30 +32,27 @@ done < <(
   done | awk -F: '{files[$1]=(files[$1] ? files[$1] " " : "") $2} END {for (d in files) print files[d]}'
 )
 
-mkdir -p /tmp/gvs-cache/img && rm -rf /tmp/gvs-cache/img/*
+mkdir -p /tmp/gvs-cache/img
 
-# Print the array contents properly
 for file in "${!files[@]}"; do
   while read LIB; do
-	  echo "Generating callgraph of ${LIB}, starting from main(), using ${files[$file]} entry point file(s) ..."
-  if ! callgraph -format=digraph ${files[$file]} | digraph somepath command-line-arguments.main ${LIB} 2>&1 | grep -q "digraph:"; then
-	  callgraph -format=digraph ${files[$file]} | digraph somepath command-line-arguments.main ${LIB} | digraph to dot > /tmp/gvs-cache/${LIB//[\/.]/-}-$file.dot
-	  cat /tmp/gvs-cache/${LIB//[\/.]/-}-$file.dot | sfdp -T svg -o/tmp/gvs-cache/img/${LIB//[\/.]/-}-$file.svg -Goverlap=scale
-	  echo "Found usage!"
-	  echo "Generated /tmp/gvs-cache/img/${LIB//[\/.]/-}-$file.svg"
-	  rm /tmp/gvs-cache/${LIB//[\/.]/-}-$file.dot
-  fi
+	  echo "Finding usage of ${LIB}, starting from main(), using ${files[$file]} entry point file(s) ..."
+	  if ! callgraph -format=digraph ${files[$file]} | digraph somepath command-line-arguments.main ${LIB} 2>&1 | grep -q "digraph:"; then
+		  mkdir -p /tmp/gvs-cache/img/${CVE}-${DIR##*/}
+		  echo "Generating callgraph of ${LIB}, starting from main(), using ${files[$file]} entry point file(s) ..."
+		  callgraph -format=digraph ${files[$file]} | digraph somepath command-line-arguments.main ${LIB} | digraph to dot > /tmp/gvs-cache/${LIB//[\/.]/-}-$file.dot
+		  cat /tmp/gvs-cache/${LIB//[\/.]/-}-$file.dot | sfdp -T svg -o/tmp/gvs-cache/img/${CVE}-${DIR##*/}/${LIB//[\/.]/-}-$file.svg -Goverlap=scale
+		  rm /tmp/gvs-cache/${LIB//[\/.]/-}-$file.dot
+	  fi
   done < <(curl -sL "https://vuln.go.dev/ID/${ID}.json" | \
 jq -r '.affected[] | select(.ecosystem_specific.imports != null) | .ecosystem_specific.imports[] | [.path as $p | .symbols[] | "\($p).\(.)"] | .[]' | \
 while read -r line; do
-  echo "$line"
-  prefix="${line%.*}"    # everything before the last dot
-  suffix="${line##*.}"   # everything after the last dot
-  echo "(${prefix}).${suffix}"
-  echo "(*${prefix}).${suffix}"
+	echo "$line"
+	prefix="${line%.*}"
+	suffix="${line##*.}"
+	echo "(${prefix}).${suffix}"
+	echo "(*${prefix}).${suffix}"
 done)
 done
 
 pushd > /dev/null
-
-echo "Scanning completed!"
