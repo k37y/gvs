@@ -39,6 +39,13 @@ for file in "${!files[@]}"; do
 	  echo "Finding usage of ${LIB}, starting from main(), using ${files[$file]} entry point file(s) ..."
 	  if ! callgraph -format=digraph ${files[$file]} | digraph somepath command-line-arguments.main ${LIB} 2>&1 | grep -q "digraph:"; then
 		  mkdir -p /tmp/gvs-cache/img/${CVE}-${DIR##*/}
+		  echo "Found usage: <strong>${LIB}</strong>"
+		  echo -n "Current version: <strong>"
+		  go list -f '{{.Module.Path}}@{{.Module.Version}}' ${LIB%.*}
+		  echo -n "</strong>Fixed version: <strong>"
+		  LIBPATH=$(go list -f '{{.Module.Path}}' ${LIB%.*})
+		  curl -sL "https://vuln.go.dev/ID/${ID}.json" | jq -r --arg lib "$LIBPATH" '.affected[] | select(.package.name == $lib) | .package.name + "@" + (.ranges[] | select(.type == "SEMVER") | .events[] | select(.fixed != null) | .fixed)'
+		  echo -n "</strong>"
 		  echo "Generating callgraph of ${LIB}, starting from main(), using ${files[$file]} entry point file(s) ..."
 		  callgraph -format=digraph ${files[$file]} | digraph somepath command-line-arguments.main ${LIB} | digraph to dot > /tmp/gvs-cache/${LIB//[\/.]/-}-$file.dot
 		  cat /tmp/gvs-cache/${LIB//[\/.]/-}-$file.dot | sfdp -T svg -o/tmp/gvs-cache/img/${CVE}-${DIR##*/}/${LIB//[\/.]/-}-$file.svg -Goverlap=scale
