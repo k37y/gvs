@@ -67,7 +67,7 @@ for file in "${!files[@]}"; do
 		  CURRENT_MOD_VERION=$(go list -f '{{.Module.Path}}@{{.Module.Version}}' ${LIB%.*})
 		  echo "Current version: <strong>${CURRENT_MOD_VERION}</strong>"
 		  CURRENT_MOD_PATH=$(go list -f '{{.Module.Path}}' ${LIB%.*})
-		  FIXED_MOD_VERSION=$(curl -sL "https://vuln.go.dev/ID/${ID}.json" | jq -r --arg lib "${CURRENT_MOD_PATH}" '.affected[] | select(.package.name == $lib) | .package.name + "@" + (.ranges[] | select(.type == "SEMVER") | .events[] | select(.fixed != null) | .fixed)')
+		  FIXED_MOD_VERSION=$(curl -sL "https://vuln.go.dev/ID/${ID}.json" | jq -r --arg lib "${CURRENT_MOD_PATH}" '.affected[] | select(.package.name == $lib) | .package.name + "@v" + (.ranges[] | select(.type == "SEMVER") | .events[] | select(.fixed != null) | .fixed)')
 		  echo "Fixed version: <strong>${FIXED_MOD_VERSION}</strong>"
 		  CMV=${CURRENT_MOD_VERION##*@}
                   FMV=${FIXED_MOD_VERSION##*@}
