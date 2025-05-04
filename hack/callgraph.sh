@@ -8,25 +8,7 @@ DIR=${2}
 files=()
 
 version_ge() {
-  cat << EOF | tee /tmp/semver.go > /dev/null && go run /tmp/semver.go "$@"
-package main
-
-import (
-  "fmt"
-  "os"
-  "golang.org/x/mod/semver"
-)
-
-func main() {
-  cmv := os.Args[1]
-  fmv := os.Args[2]
-  if semver.Compare(cmv, fmv) >= 0 {
-    fmt.Println("yes")
-  } else {
-    fmt.Println("no")
-  }
-}
-EOF
+  semver "$@"
 }
 
 ID=$(curl -s "https://vuln.go.dev/index/vulns.json" | jq -r --arg cve "$CVE" '.[] | select(.aliases != null and (.aliases[] == $cve)) | .id')
@@ -64,19 +46,32 @@ for file in "${!files[@]}"; do
 		  mkdir -p /tmp/gvs-cache/img/${CVE}-${DIR##*/}
 		  echo ""
 		  echo "Found usage: <strong>${LIB}</strong>"
-		  CURRENT_MOD_VERION=$(go list -f '{{.Module.Path}}@{{.Module.Version}}' ${LIB%.*})
-		  echo "Current version: <strong>${CURRENT_MOD_VERION}</strong>"
+		  # CURRENT_MOD_VERSION=$(go list -f '{{.Module.Path}}@{{.Module.Version}}' ${LIB%.*})
 		  CURRENT_MOD_PATH=$(go list -f '{{.Module.Path}}' ${LIB%.*})
+		  CURRENT_REPLACE_VERSION=$(go mod edit -json | jq -r --arg MOD "${CURRENT_MOD_PATH}" '.Replace[] | select(.Old.Path == $MOD) | "\(.New.Path)@\(.New.Version)"')
+		  [[ -z "${CURRENT_REPLACE_VERSION}" ]] && CURRENT_MOD_VERSION=$(go list -f '{{.Module.Path}}@{{.Module.Version}}' "${LIB%.*}")
+		  echo "Current version: <strong>${CURRENT_REPLACE_VERSION:-$CURRENT_MOD_VERSION}</strong>"
 		  FIXED_MOD_VERSION=$(curl -sL "https://vuln.go.dev/ID/${ID}.json" | jq -r --arg lib "${CURRENT_MOD_PATH}" '.affected[] | select(.package.name == $lib) | .package.name + "@v" + (.ranges[] | select(.type == "SEMVER") | .events[] | select(.fixed != null) | .fixed)')
 		  echo "Fixed version: <strong>${FIXED_MOD_VERSION}</strong>"
-		  CMV=${CURRENT_MOD_VERION##*@}
+		  CMV=${CURRENT_MOD_VERSION##*@}
                   FMV=${FIXED_MOD_VERSION##*@}
 
                   if [[ $(version_ge "$CMV" "$FMV") == "yes" ]]; then
 			  echo
 			  echo "No action required"
 			  echo
-                  else
+		  elif [[ -n "${CURRENT_REPLACE_VERSION}" ]]; then
+			  echo
+			  echo "Commands to fix it:"
+			  echo "<strong>go mod edit -replace=${CURRENT_REPLACE_VERSION}=${FIXED_MOD_VERSION}</strong>"
+			  echo "<strong>go mod tidy</strong>"
+			  echo "<strong>go mod vendor</strong>"
+			  echo
+			  echo "Generating callgraph of ${LIB}, starting from main(), using ${files[$file]} entry point file(s) ..."
+		          callgraph -format=digraph ${files[$file]} | digraph somepath command-line-arguments.main ${LIB} | digraph to dot > /tmp/gvs-cache/${LIB//[\/.]/-}-$file.dot
+		          cat /tmp/gvs-cache/${LIB//[\/.]/-}-$file.dot | sfdp -T svg -o/tmp/gvs-cache/img/${CVE}-${DIR##*/}/${LIB//[\/.]/-}-$file.svg -Goverlap=scale
+		          rm /tmp/gvs-cache/${LIB//[\/.]/-}-$file.dot
+		  else
 			  echo
                           echo "Commands to fix it:"
                           echo "<strong>go get ${FIXED_MOD_VERSION}</strong>"
