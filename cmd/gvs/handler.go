@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+
 	"github.com/k37y/gvs"
 )
 
@@ -169,6 +170,7 @@ func sseHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log.Printf("Running hack/callgraph.sh %s %s ...", cve, cloneDir)
 	cmd := exec.Command("bash", "hack/callgraph.sh", cve, cloneDir)
 
 	stdout, err := cmd.StdoutPipe()
@@ -178,18 +180,33 @@ func sseHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		log.Printf("Failed to get stderr: %v", err)
+		return
+	}
+
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			log.Printf("[stderr] %s", scanner.Text())
+		}
+	}()
+
 	if err := cmd.Start(); err != nil {
 		fmt.Fprint(w, "data: Failed to start script\n\n")
 		flusher.Flush()
 		return
 	}
 
-	scanner := bufio.NewScanner(stdout)
-	for scanner.Scan() {
-		line := scanner.Text()
-		fmt.Fprintf(w, "data: %s\n\n", line)
-		flusher.Flush()
-	}
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			fmt.Fprintf(w, "data: %s\n\n", line)
+			flusher.Flush()
+		}
+	}()
 
 	cmd.Wait()
 	fmt.Fprint(w, "data: Completed!\n\n")
