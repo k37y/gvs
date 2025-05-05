@@ -63,7 +63,7 @@ for file in "${!files[@]}"; do
 		  elif [[ -n "${CURRENT_REPLACE_VERSION}" ]]; then
 			  echo
 			  echo "Commands to fix it:"
-			  echo "<strong>go mod edit -replace=${CURRENT_REPLACE_VERSION}=${FIXED_MOD_VERSION}</strong>"
+			  echo "<strong>go mod edit -replace=${CURRENT_REPLACE_VERSION%@*}=${FIXED_MOD_VERSION}</strong>"
 			  echo "<strong>go mod tidy</strong>"
 			  echo "<strong>go mod vendor</strong>"
 			  echo
