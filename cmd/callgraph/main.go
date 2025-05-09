@@ -19,6 +19,13 @@ import (
 	"golang.org/x/mod/semver"
 )
 
+const (
+	colorReset  = "\033[0m"
+	colorRed    = "\033[31m"
+	colorGreen  = "\033[32m"
+	colorYellow = "\033[33m"
+)
+
 type Vuln struct {
 	ID      string   `json:"id"`
 	Aliases []string `json:"aliases"`
@@ -32,6 +39,16 @@ type VulnDetail struct {
 type Affected struct {
 	Package Package `json:"package"`
 	Ranges  []Range `json:"ranges"`
+	EcosystemSpecific EcosystemSpecific `json:"ecosystem_specific"`
+}
+
+type EcosystemSpecific struct {
+	Imports []Import `json:"imports"`
+}
+
+type Import struct {
+	Path    string   `json:"path"`
+	Symbols []string `json:"symbols"`
 }
 
 type Package struct {
@@ -80,18 +97,23 @@ type GoMod struct {
 
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Printf("Usage: %s <CVE ID> <directory>\n", os.Args[0])
+		PrintError("Usage: %s <CVE ID> <directory>", os.Args[0])
 		os.Exit(0)
 	}
 	cve := os.Args[1]
 	dir := os.Args[2]
 
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		PrintError("Invalid directory: %s", dir)
+		os.Exit(1)
+	}
+
 	id := fetchGoVulnID(cve)
 	if id == "" {
-		fmt.Printf("No Go CVE ID found for %s\n", cve)
-		os.Exit(0)
+		PrintError("No Go CVE ID found for %s", cve)
+		os.Exit(1)
 	}
-	fmt.Printf("Go CVE ID found: %s\n", id)
+	PrintSuccess("Go CVE ID found: %s", id)
 
 	files := findMainGoFiles(dir)
 
@@ -126,20 +148,14 @@ func main() {
 
 	for res := range results {
 		if res.Vulnerable {
-			fmt.Printf("Vulnerable symbol found: %s in files: %v\n", res.Symbol, res.Files)
-			fmt.Printf("Current version: %s\nFixed version: %s\n", res.CurrentVer, res.FixedVer)
 			if semver.Compare(res.FixedVer, res.CurrentVer) >= 0 {
-				fmt.Println("No action required")
+				PrintSuccess("Vulnerable symbol found: %s in files: %v\nCurrent version: %s\nFixed version: %s\nNo action required", res.Symbol, res.Files, res.CurrentVer, res.FixedVer)
 			} else if res.ReplaceVer != "" {
 				pkgPath := strings.TrimSuffix(res.Symbol, "."+strings.Split(res.Symbol, ".")[1])
-				fmt.Println("Commands to fix it:")
-				fmt.Printf("go mod edit -replace=%s=%s@%s\n", getModPath(trimAfterLastDot(pkgPath), dir), getModPath(trimAfterLastDot(pkgPath), dir), res.FixedVer)
-				fmt.Println("go mod tidy\ngo mod vendor")
+				PrintWarning("Vulnerable symbol found: %s in files: %v\nCurrent version: %s\nFixed version: %s\nCommands to fix it:\ngo mod edit -replace=%s=%s@%s\ngo mod tidy\ngo mod vendor", res.Symbol, res.Files, res.ReplaceVer, res.FixedVer, getModPath(trimAfterLastDot(pkgPath), dir), getModPath(trimAfterLastDot(pkgPath), dir), res.FixedVer)
 			} else {
 				pkgPath := strings.TrimSuffix(res.Symbol, "."+strings.Split(res.Symbol, ".")[1])
-				fmt.Println("Commands to fix it:")
-				fmt.Printf("go get %s@%s\n", pkgPath, res.FixedVer)
-				fmt.Println("go mod tidy\ngo mod vendor")
+				PrintWarning("Vulnerable symbol found: %s in files: %v\nCurrent version: %s\nFixed version: %s\nCommands to fix it:\ngo get %s@%s\ngo mod tidy\ngo mod vendor", res.Symbol, res.Files, res.CurrentVer, res.FixedVer, pkgPath, res.FixedVer)
 			}
 		}
 	}
@@ -148,12 +164,12 @@ func main() {
 func worker(id int, dir string, jobs <-chan Job, results chan<- Result, wg *sync.WaitGroup, vulnID string) {
 	defer wg.Done()
 	for job := range jobs {
-		vuln := isVulnerable(job.Symbol, dir + "/" + job.Dir, job.Files)
+		vuln := isVulnerable(job.Symbol, dir+"/"+job.Dir, job.Files)
 		if vuln {
 			pkgPath := trimAfterLastDot(strings.NewReplacer("(", "", ")", "", "*", "").Replace(job.Symbol))
-			curVer := getCurrentVersion(pkgPath, dir + "/" + job.Dir)
-			modPath := getModPath(pkgPath, dir + "/" + job.Dir)
-			repVer := getReplaceVersion(modPath, dir + "/" + job.Dir)
+			curVer := getCurrentVersion(pkgPath, dir+"/"+job.Dir)
+			modPath := getModPath(pkgPath, dir+"/"+job.Dir)
+			repVer := getReplaceVersion(modPath, dir+"/"+job.Dir)
 			fixVer := getFixedVersion(vulnID, pkgPath)
 			results <- Result{job.Symbol, job.Files, true, curVer, fixVer, repVer}
 		} else {
@@ -211,12 +227,11 @@ func findMainGoFiles(root string) map[string][][]string {
 	}
 
 	for _, modDir := range modDirs {
-		cmd := exec.Command("go", "list", "-f", "{{.Name}}: {{.Dir}}", "./...")
-		cmd.Dir = modDir
-
-		out, err := cmd.Output()
+		cmd := "go"
+		args := []string{"list", "-f", "{{.Name}}: {{.Dir}}", "./..."}
+		out, err := runCommand(modDir, cmd, args...)
 		if err != nil {
-			fmt.Printf("Error running go list in %s: %v\n", modDir, err)
+			PrintError("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), modDir, string(out))
 			continue
 		}
 
@@ -241,10 +256,10 @@ func findMainGoFiles(root string) map[string][][]string {
 			files, _ := filepath.Glob(filepath.Join(dirPath, "*.go"))
 			var group []string
 			for _, file := range files {
-				if strings.HasSuffix(file, "_test.go") {
+				if strings.HasSuffix(file, "_test.go") || strings.Contains(filepath.Base(file), "windows") {
 					continue
 				}
-				rel, _ := filepath.Rel(root, file)
+				rel, _ := filepath.Rel(modDir, file)
 				group = append(group, rel)
 			}
 			if len(group) > 0 {
@@ -265,7 +280,7 @@ func fetchAffectedSymbols(id string) []string {
 
 	resp, err := client.Get(url)
 	if err != nil {
-		log.Fatalf("HTTP request failed: %v", err)
+		PrintError("HTTP request failed: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -273,16 +288,7 @@ func fetchAffectedSymbols(id string) []string {
 		log.Fatalf("failed to fetch vulnerability data: %s", resp.Status)
 	}
 
-	var detail struct {
-		Affected []struct {
-			EcosystemSpecific struct {
-				Imports []struct {
-					Path    string   `json:"path"`
-					Symbols []string `json:"symbols"`
-				} `json:"imports"`
-			} `json:"ecosystem_specific"`
-		} `json:"affected"`
-	}
+	var detail VulnDetail
 
 	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
 		log.Fatalf("failed to parse JSON: %v", err)
@@ -303,13 +309,11 @@ func fetchAffectedSymbols(id string) []string {
 }
 
 func isVulnerable(symbol, dir string, files []string) bool {
+	cmd := "callgraph"
 	args := append([]string{"-format=digraph"}, files...)
-	fmt.Printf("\n[CALLGRAPH] Starting callgraph for symbol: %s\n", symbol)
-	fmt.Printf("[CALLGRAPH] Command: callgraph %s\n", strings.Join(args, " "))
-	cmd := exec.Command("callgraph", args...)
-	cmd.Dir = dir
-	out, err := cmd.Output()
+	out, err := runCommand(dir, cmd, args...)
 	if err != nil {
+		PrintError("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), dir, string(out))
 		return false
 	}
 
@@ -318,7 +322,7 @@ func isVulnerable(symbol, dir string, files []string) bool {
 	result, err := grep.CombinedOutput()
 
 	if !bytes.Contains(result, []byte("digraph: no such")) {
-		fmt.Printf("Symbol found: %s\n", symbol)
+		// PrintSuccess("Symbol found: %s", symbol)
 		return true
 	}
 
@@ -326,10 +330,11 @@ func isVulnerable(symbol, dir string, files []string) bool {
 }
 
 func getCurrentVersion(pkg string, dir string) string {
-	cmd := exec.Command("go", "list", "-f", "{{.Module.Path}}@{{.Module.Version}}", pkg)
-	cmd.Dir = dir
-	out, err := cmd.Output()
+	cmd := "go"
+	args := []string{"list", "-mod=mod", "-f", "{{.Module.Path}}@{{.Module.Version}}", pkg}
+	out, err := runCommand(dir, cmd, args...)
 	if err != nil {
+		PrintError("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), dir, string(out))
 		return ""
 	}
 	parts := strings.Split(string(out), "@")
@@ -340,10 +345,11 @@ func getCurrentVersion(pkg string, dir string) string {
 }
 
 func getReplaceVersion(pkg string, dir string) string {
-	cmd := exec.Command("go", "mod", "edit", "-json")
-	cmd.Dir = dir
-	out, err := cmd.Output()
+	cmd := "go"
+	args := []string{"mod", "edit", "-json"}
+	out, err := runCommand(dir, cmd, args...)
 	if err != nil {
+		PrintError("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), dir, string(out))
 		return ""
 	}
 
@@ -405,11 +411,43 @@ func trimAfterLastDot(input string) string {
 }
 
 func getModPath(pkg, dir string) string {
-	cmd := exec.Command("go", "list", "-f", "{{.Module.Path}}", pkg)
-	cmd.Dir = dir
-	out, err := cmd.Output()
+	cmd := "go"
+	args := []string{"list", "-mod=mod", "-f", "{{.Module.Path}}", pkg}
+	out, err := runCommand(dir, cmd, args...)
 	if err != nil {
+		PrintError("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), dir, string(out))
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	return string(out)
+}
+
+func runCommand(dir string, command string, args ...string) ([]byte, error) {
+	cmd := exec.Command(command, args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	return out, err
+}
+
+func PrintError(format string, a ...interface{}) {
+	if os.Getenv("GVS_MODE") != "cli" {
+		fmt.Printf("Error: "+format+"\n", a...)
+	} else {
+		fmt.Printf(colorRed+"Error: "+format+colorReset+"\n", a...)
+	}
+}
+
+func PrintWarning(format string, a ...interface{}) {
+	if os.Getenv("GVS_MODE") != "cli" {
+		fmt.Printf(format+"\n", a...)
+	} else {
+		fmt.Printf(colorYellow+format+colorReset+"\n", a...)
+	}
+}
+
+func PrintSuccess(format string, a ...interface{}) {
+	if os.Getenv("GVS_MODE") != "cli" {
+		fmt.Printf(format+"\n", a...)
+	} else {
+		fmt.Printf(colorGreen+format+colorReset+"\n", a...)
+	}
 }
