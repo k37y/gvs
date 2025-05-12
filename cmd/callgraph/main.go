@@ -236,7 +236,7 @@ func findMainGoFiles(root string) map[string][][]string {
 		args := []string{"list", "-f", "{{.Name}}: {{.Dir}}", "./..."}
 		out, err := runCommand(modDir, cmd, args...)
 		if err != nil {
-			PrintError("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), modDir, string(out))
+			PrintError("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), modDir, strings.TrimSpace(string(out)))
 			continue
 		}
 
@@ -318,7 +318,7 @@ func isVulnerable(symbol, dir string, files []string) bool {
 	args := append([]string{"-format=digraph"}, files...)
 	out, err := runCommand(dir, cmd, args...)
 	if err != nil {
-		PrintError("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), dir, string(out))
+		PrintError("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
 		return false
 	}
 
@@ -338,7 +338,7 @@ func getCurrentVersion(pkg string, dir string) string {
 	args := []string{"list", "-mod=mod", "-f", "{{.Module.Path}}@{{.Module.Version}}", pkg}
 	out, err := runCommand(dir, cmd, args...)
 	if err != nil {
-		PrintError("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), dir, string(out))
+		PrintError("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
 		return ""
 	}
 	parts := strings.Split(string(out), "@")
@@ -353,7 +353,7 @@ func getReplaceVersion(pkg string, dir string) string {
 	args := []string{"mod", "edit", "-json"}
 	out, err := runCommand(dir, cmd, args...)
 	if err != nil {
-		PrintError("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), dir, string(out))
+		PrintError("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
 		return ""
 	}
 
@@ -419,10 +419,10 @@ func getModPath(pkg, dir string) string {
 	args := []string{"list", "-mod=mod", "-f", "{{.Module.Path}}", pkg}
 	out, err := runCommand(dir, cmd, args...)
 	if err != nil {
-		PrintError("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), dir, string(out))
+		PrintError("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
 		return ""
 	}
-	return string(out)
+	return strings.TrimSpace(string(out))
 }
 
 func runCommand(dir string, command string, args ...string) ([]byte, error) {
