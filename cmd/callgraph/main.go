@@ -35,10 +35,15 @@ type Job struct {
 type Result struct {
 	Symbol     string
 	Files      []string
-	Vulnerable bool
+	IsVulnerable bool
 	CurrentVer string
 	FixedVer   string
 	ReplaceVer string
+	Directory  string
+	Repository string
+	Branch     string
+	CVE        string
+	GoCVE      string
 }
 
 type VulnReport struct {
@@ -100,15 +105,27 @@ func main() {
 	cve := os.Args[1]
 	dir := os.Args[2]
 
-	tools := []string{"go", "digraph", "callgraph"}
+	tools := []string{"go", "digraph", "callgraph", "git"}
 	if !validateTools(tools) {
 		os.Exit(0)
 	}
 
+	repository := getGitURL(dir)
+	branch := getGitBranch(dir)
+
 	validateDir(dir)
 
 	id := fetchGoVulnID(cve)
-	validateVulnID(id, cve)
+
+	result := Result{
+		CVE:        cve,
+		Directory:  dir,
+		Repository: repository,
+		Branch:     branch,
+		GoCVE:      id,
+	}
+
+	result.validateVulnID()
 
 	files := findMainGoFiles(dir)
 
@@ -122,7 +139,7 @@ func main() {
 
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
-		go worker(dir, jobs, results, &wg, id)
+		go worker(jobs, results, &wg, &result)
 	}
 
 	go func() {
@@ -141,17 +158,33 @@ func main() {
 		close(results)
 	}()
 
+	var finalResults []Result
+
 	for res := range results {
-		if res.Vulnerable {
-			PrintWarning(res.FixInstructions(dir))
+		if res.IsVulnerable {
+			finalResults = append(finalResults, res)
 		}
+	}
+
+	if len(finalResults) > 0 {
+		jsonOutput, err := json.MarshalIndent(finalResults, "", "  ")
+		if err != nil {
+			PrintError("Failed to marshal results to JSON: %v", err)
+		}
+		fmt.Println(string(jsonOutput))
+	} else {
+		jsonOutput, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			PrintError("Failed to marshal results to JSON: %v", err)
+		}
+		fmt.Println(string(jsonOutput))
 	}
 }
 
-func worker(dir string, jobs <-chan Job, results chan<- Result, wg *sync.WaitGroup, vulnID string) {
+func worker(jobs <-chan Job, results chan<- Result, wg *sync.WaitGroup, result *Result) {
 	defer wg.Done()
 	for job := range jobs {
-		res := job.Run(vulnID, dir)
+		res := job.isVulnerable(result)
 		results <- res
 	}
 }
@@ -168,19 +201,62 @@ func (r Result) FixInstructions(modDir string) string {
 	return fmt.Sprintf("Vulnerable symbol found: %s in files: %v\nCurrent version: %s\nFixed version: %s\nCommands to fix it:\ngo get %s@%s\ngo mod tidy\ngo mod vendor", r.Symbol, r.Files, r.CurrentVer, r.FixedVer, pkgPath, r.FixedVer)
 }
 
-func (j Job) Run(vulnID, dir string) Result {
-	vuln := isVulnerable(j.Symbol, filepath.Join(dir, j.Dir), j.Files)
-	if !vuln {
-		return Result{Symbol: j.Symbol, Files: j.Files}
+func (j Job) isVulnerable(result *Result) Result {
+	pkgPath := trimAfterLastDot(strings.NewReplacer("(", "", ")", "", "*", "").Replace(j.Symbol))
+	curVer := getCurrentVersion(pkgPath, filepath.Join(result.Directory, j.Dir))
+	modPath := getModPath(pkgPath, filepath.Join(result.Directory, j.Dir))
+	repVer := getReplaceVersion(modPath, filepath.Join(result.Directory, j.Dir))
+	fixVer := getFixedVersion(result.GoCVE, pkgPath)
+	isUsed := isSymbolUsed(j.Symbol, filepath.Join(result.Directory, j.Dir), j.Files)
+	if !isUsed {
+		if semver.Compare(result.FixedVer, result.CurrentVer) >= 0 {
+			return Result{
+				Symbol:     j.Symbol,
+				Files:      j.Files,
+				IsVulnerable: false,
+				CurrentVer: curVer,
+				FixedVer:   fixVer,
+				ReplaceVer: repVer,
+				CVE:        result.CVE,
+				GoCVE:      result.GoCVE,
+				Directory:  result.Directory,
+				Branch:     result.Branch,
+				Repository: result.Repository,
+			}
+		}
+
+		if result.ReplaceVer != "" {
+			return Result{
+				Symbol:     j.Symbol,
+				Files:      j.Files,
+				IsVulnerable: true,
+				CurrentVer: curVer,
+				FixedVer:   fixVer,
+				ReplaceVer: repVer,
+				CVE:        result.CVE,
+				GoCVE:      result.GoCVE,
+				Directory:  result.Directory,
+				Branch:     result.Branch,
+				Repository: result.Repository,
+			}
+
+		}
+
 	}
 
-	pkgPath := trimAfterLastDot(strings.NewReplacer("(", "", ")", "", "*", "").Replace(j.Symbol))
-	curVer := getCurrentVersion(pkgPath, filepath.Join(dir, j.Dir))
-	modPath := getModPath(pkgPath, filepath.Join(dir, j.Dir))
-	repVer := getReplaceVersion(modPath, filepath.Join(dir, j.Dir))
-	fixVer := getFixedVersion(vulnID, pkgPath)
-
-	return Result{j.Symbol, j.Files, true, curVer, fixVer, repVer}
+	return Result{
+		Symbol:     j.Symbol,
+		Files:      j.Files,
+		IsVulnerable: true,
+		CurrentVer: curVer,
+		FixedVer:   fixVer,
+		ReplaceVer: repVer,
+		CVE:        result.CVE,
+		GoCVE:      result.GoCVE,
+		Directory:  result.Directory,
+		Branch:     result.Branch,
+		Repository: result.Repository,
+	}
 }
 
 func fetchGoVulnID(cve string) string {
@@ -313,7 +389,7 @@ func fetchAffectedSymbols(id string) []string {
 	return imports
 }
 
-func isVulnerable(symbol, dir string, files []string) bool {
+func isSymbolUsed(symbol, dir string, files []string) bool {
 	cmd := "callgraph"
 	args := append([]string{"-format=digraph"}, files...)
 	out, err := runCommand(dir, cmd, args...)
@@ -432,7 +508,7 @@ func runCommand(dir string, command string, args ...string) ([]byte, error) {
 	return out, err
 }
 
-func PrintError(format string, a ...interface{}) {
+func PrintError(format string, a ...any) {
 	if os.Getenv("GVS_MODE") != "cli" {
 		fmt.Printf("Error: "+format+"\n", a...)
 	} else {
@@ -440,7 +516,7 @@ func PrintError(format string, a ...interface{}) {
 	}
 }
 
-func PrintWarning(format string, a ...interface{}) {
+func PrintWarning(format string, a ...any) {
 	if os.Getenv("GVS_MODE") != "cli" {
 		fmt.Printf(format+"\n", a...)
 	} else {
@@ -448,7 +524,7 @@ func PrintWarning(format string, a ...interface{}) {
 	}
 }
 
-func PrintSuccess(format string, a ...interface{}) {
+func PrintSuccess(format string, a ...any) {
 	if os.Getenv("GVS_MODE") != "cli" {
 		fmt.Printf(format+"\n", a...)
 	} else {
@@ -463,12 +539,22 @@ func validateDir(dir string) {
 	}
 }
 
-func validateVulnID(id, cve string) {
-	if id == "" {
-		PrintError("No Go CVE ID found for %s", cve)
-		os.Exit(1)
+func (r *Result) validateVulnID() {
+	if r.GoCVE == "" {
+		r = &Result{
+			GoCVE:      "No Go CVE ID found",
+			CVE:        r.CVE,
+			Directory:  r.Directory,
+			Branch:     r.Branch,
+			Repository: r.Repository,
+		}
+		jsonOutput, err := json.MarshalIndent(r, "", "  ")
+		if err != nil {
+			PrintError("Failed to marshal results to JSON: %v", err)
+		}
+		fmt.Println(string(jsonOutput))
+		os.Exit(0)
 	}
-	PrintSuccess("Go CVE ID found: %s", id)
 }
 
 func validateTools(tools []string) bool {
@@ -481,4 +567,24 @@ func validateTools(tools []string) bool {
 		}
 	}
 	return allAvailable
+}
+
+func getGitBranch(dir string) string {
+	cmd := "git"
+	args := []string{"rev-parse", "--abbrev-ref", "HEAD"}
+	out, err := runCommand(dir, cmd, args...)
+	if err != nil {
+		PrintError("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func getGitURL(dir string) string {
+	cmd := "git"
+	args := []string{"remote", "get-url", "origin"}
+	out, err := runCommand(dir, cmd, args...)
+	if err != nil {
+		PrintError("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out))
 }
