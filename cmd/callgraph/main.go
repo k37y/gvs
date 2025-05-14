@@ -11,34 +11,44 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/mod/semver"
 )
 
 type Job struct {
-	Symbol string
-	Dir    string
-	Files  []string
+	Package string
+	Symbol  string
+	Dir     string
+	Files   []string
+}
+
+type AffectedImportsDetails struct {
+	Symbols      []string
+	FixedVersion string
+}
+
+type UsedImportsDetails struct {
+	Symbols        []string
+	CurrentVersion string
+	ReplaceVersion string
 }
 
 type Result struct {
-	Symbol       string
-	Files        []string
-	IsVulnerable string
-	CurrentVer   string
-	FixedVer     string
-	ReplaceVer   string
-	Directory    string
-	Repository   string
-	Branch       string
-	CVE          string
-	GoCVE        string
-	Errors       []string
-	FixCommands  []string
+	AffectedImports map[string]AffectedImportsDetails
+	UsedImports     map[string]UsedImportsDetails
+	Symbols         []string
+	Files           map[string][][]string
+	IsVulnerable    string
+	Directory       string
+	Repository      string
+	Branch          string
+	CVE             string
+	GoCVE           string
+	Errors          []string
+	FixCommands     []string
 }
 
 type VulnReport struct {
@@ -110,9 +120,6 @@ func main() {
 
 	result := InitResult(os.Args[1], os.Args[2])
 
-	files := result.findMainGoFiles()
-	imports := fetchAffectedSymbols(result.GoCVE)
-
 	jobs := make(chan Job)
 	results := make(chan Result)
 
@@ -125,10 +132,12 @@ func main() {
 	}
 
 	go func() {
-		for modDir, sets := range files {
+		for modDir, sets := range result.Files {
 			for _, fset := range sets {
-				for _, sym := range imports {
-					jobs <- Job{Symbol: sym, Dir: modDir, Files: fset}
+				for pkg, syms := range result.AffectedImports {
+					for _, sym := range syms.Symbols {
+						jobs <- Job{Package: pkg, Symbol: sym, Dir: modDir, Files: fset}
+					}
 				}
 			}
 		}
@@ -140,46 +149,91 @@ func main() {
 		close(results)
 	}()
 
-	var finalResults []Result
+	mergedImports := make(map[string]UsedImportsDetails)
 
 	for res := range results {
-		if res.IsVulnerable == "true" {
-			finalResults = append(finalResults, res)
+		if res.IsVulnerable != "true" {
+			continue
+		}
+
+		for pkg, symbols := range res.UsedImports {
+			for _, sym := range symbols.Symbols {
+				if strings.HasPrefix(sym, pkg+".") {
+					sym = strings.TrimPrefix(sym, pkg+".")
+				}
+
+				var mu sync.Mutex
+				mu.Lock()
+				entry := mergedImports[pkg]
+				entry.Symbols = append(entry.Symbols, sym)
+
+				if entry.CurrentVersion == "" {
+					entry.CurrentVersion = symbols.CurrentVersion
+				}
+				if entry.ReplaceVersion == "" {
+					entry.ReplaceVersion = symbols.ReplaceVersion
+				}
+				mergedImports[pkg] = entry
+				mu.Unlock()
+			}
 		}
 	}
 
-	if len(finalResults) > 0 {
-		jsonOutput, err := json.MarshalIndent(finalResults, "", "  ")
+	for pkg, details := range mergedImports {
+		deduped := uniqueStrings(details.Symbols)
+		sort.Strings(deduped)
+		details.Symbols = deduped
+		mergedImports[pkg] = details
+	}
+
+	if len(mergedImports) > 0 {
+		result.IsVulnerable = "true"
+		result.UsedImports = mergedImports
+		jsonOutput, err := json.MarshalIndent(result, "", "  ")
 		if err != nil {
-			fmt.Printf("Failed to marshal results to JSON: %v", err)
+			fmt.Printf("Failed to marshal result to JSON: %v\n", err)
+		} else {
+			fmt.Println(string(jsonOutput))
 		}
-		fmt.Println(string(jsonOutput))
 	} else {
 		jsonOutput, err := json.MarshalIndent(result, "", "  ")
 		if err != nil {
-			fmt.Printf("Failed to marshal results to JSON: %v", err)
+			fmt.Printf("Failed to marshal empty result: %v\n", err)
+		} else {
+			fmt.Println(string(jsonOutput))
 		}
-		fmt.Println(string(jsonOutput))
 	}
+}
+
+func uniqueStrings(input []string) []string {
+	seen := make(map[string]struct{})
+	var result []string
+	for _, s := range input {
+		if _, exists := seen[s]; !exists {
+			seen[s] = struct{}{}
+			result = append(result, s)
+		}
+	}
+	return result
 }
 
 func InitResult(cve, dir string) *Result {
 	r := &Result{
-		CVE:        cve,
-		Directory:  dir,
+		CVE:          cve,
+		Directory:    dir,
 		IsVulnerable: "unknown",
-		Repository: getGitURL(dir),
-		Branch:     getGitBranch(dir),
-		GoCVE:      fetchGoVulnID(cve),
+		Repository:   getGitURL(dir),
+		Branch:       getGitBranch(dir),
+		GoCVE:        fetchGoVulnID(cve),
 	}
 	if r.GoCVE == "" {
 		r = &Result{
-			GoCVE:      "No Go CVE ID found",
+			GoCVE:        "No Go CVE ID found",
 			IsVulnerable: "unknown",
-			CVE:        r.CVE,
-			Directory:  r.Directory,
-			Branch:     r.Branch,
-			Repository: r.Repository,
+			CVE:          r.CVE,
+			Directory:    r.Directory,
+			Branch:       r.Branch,
+			Repository:   r.Repository,
 		}
 		jsonOutput, err := json.MarshalIndent(r, "", "  ")
 		if err != nil {
@@ -188,6 +242,8 @@ func InitResult(cve, dir string) *Result {
 		fmt.Println(string(jsonOutput))
 		os.Exit(0)
 	}
+	r.fetchAffectedSymbols(r.GoCVE)
+	r.findMainGoFiles()
 	return r
 }
 
@@ -200,63 +256,62 @@ func worker(jobs <-chan Job, results chan<- Result, wg *sync.WaitGroup, result *
 }
 
 func (j Job) isVulnerable(result *Result) Result {
-	pkgPath := trimAfterLastDot(strings.NewReplacer("(", "", ")", "", "*", "").Replace(j.Symbol))
-	curVer := getCurrentVersion(pkgPath, filepath.Join(result.Directory, j.Dir))
-	modPath := getModPath(pkgPath, filepath.Join(result.Directory, j.Dir))
+	curVer := getCurrentVersion(j.Package, filepath.Join(result.Directory, j.Dir))
+	modPath := getModPath(j.Package, filepath.Join(result.Directory, j.Dir))
 	repVer := getReplaceVersion(modPath, filepath.Join(result.Directory, j.Dir))
-	fixVer := getFixedVersion(result.GoCVE, pkgPath)
-	isUsed := isSymbolUsed(j.Symbol, filepath.Join(result.Directory, j.Dir), j.Files)
-	if !isUsed {
-		if semver.Compare(fixVer, curVer) >= 0 {
-			return Result{
-				Symbol:       j.Symbol,
-				Files:        j.Files,
-				IsVulnerable: "false",
-				CurrentVer:   curVer,
-				FixedVer:     fixVer,
-				ReplaceVer:   repVer,
-				CVE:          result.CVE,
-				GoCVE:        result.GoCVE,
-				Directory:    result.Directory,
-				Branch:       result.Branch,
-				Repository:   result.Repository,
-			}
-		}
+	fixVer := getFixedVersion(result.GoCVE, modPath)
 
-		if repVer != "" {
-			return Result{
-				Symbol:       j.Symbol,
-				Files:        j.Files,
-				IsVulnerable: "true",
-				CurrentVer:   curVer,
-				FixedVer:     fixVer,
-				ReplaceVer:   repVer,
-				CVE:          result.CVE,
-				GoCVE:        result.GoCVE,
-				Directory:    result.Directory,
-				Branch:       result.Branch,
-				Repository:   result.Repository,
-				FixCommands:  []string{fmt.Sprintf("go mod edit -replace=%s=%s@%s", modPath, modPath, fixVer), "go mod tidy", "go mod vendor",},
-			}
+	used := false
+	unknown := false
 
-		}
-
+	isUsed := result.isSymbolUsed(j.Package, j.Symbol, filepath.Join(result.Directory, j.Dir), j.Files)
+	switch isUsed {
+	case "true":
+		used = true
+	case "unknown":
+		unknown = true
 	}
 
-	return Result{
-		Symbol:       j.Symbol,
-		Files:        j.Files,
-		IsVulnerable: "true",
-		CurrentVer:   curVer,
-		FixedVer:     fixVer,
-		ReplaceVer:   repVer,
-		CVE:          result.CVE,
-		GoCVE:        result.GoCVE,
-		Directory:    result.Directory,
-		Branch:       result.Branch,
-		Repository:   result.Repository,
-		FixCommands:  []string{fmt.Sprintf("go get %s@%s", modPath, fixVer), "go mod tidy", "go mod vendor",},
+	if result.AffectedImports == nil {
+		result.AffectedImports = make(map[string]AffectedImportsDetails)
 	}
+
+	aentry := result.AffectedImports[j.Package]
+	aentry.FixedVersion = fixVer
+	result.AffectedImports[j.Package] = aentry
+
+	if result.UsedImports == nil {
+		result.UsedImports = make(map[string]UsedImportsDetails)
+	}
+
+	uentry := result.UsedImports[j.Package]
+	uentry.CurrentVersion = curVer
+	uentry.ReplaceVersion = repVer
+	result.UsedImports[j.Package] = uentry
+
+	if used {
+		result.IsVulnerable = "true"
+	} else if unknown {
+		result.IsVulnerable = "unknown"
+	} else {
+		result.IsVulnerable = "false"
+	}
+
+	if repVer != "" {
+		result.FixCommands = []string{
+			fmt.Sprintf("go mod edit -replace=%s=%s@%s", modPath, modPath, fixVer),
+			"go mod tidy",
+			"go mod vendor",
+		}
+	} else if result.IsVulnerable == "true" {
+		result.FixCommands = []string{
+			fmt.Sprintf("go get %s@%s", modPath, fixVer),
+			"go mod tidy",
+			"go mod vendor",
+		}
+	}
+
+	return *result
 }
 
 func fetchGoVulnID(cve string) string {
@@ -277,17 +332,15 @@ func fetchGoVulnID(cve string) string {
 	}
 
 	for _, v := range vulns {
-		for _, alias := range v.Aliases {
-			if alias == cve {
-				return v.ID
-			}
+		if slices.Contains(v.Aliases, cve) {
+			return v.ID
 		}
 	}
 
 	return ""
 }
 
-func (r *Result) findMainGoFiles() map[string][][]string {
+func (r *Result) findMainGoFiles() {
 	result := make(map[string][][]string)
 	var modDirs []string
 
@@ -353,10 +406,11 @@ func (r *Result) findMainGoFiles() map[string][][]string {
 		result[modKey] = sets
 	}
 
-	return result
+	r.Files = make(map[string][][]string)
+	r.Files = result
 }
 
-func fetchAffectedSymbols(id string) []string {
+func (r *Result) fetchAffectedSymbols(id string) {
 	client := http.Client{Timeout: 10 * time.Second}
 	url := fmt.Sprintf("https://vuln.go.dev/ID/%s.json", id)
 
@@ -376,43 +430,57 @@ func fetchAffectedSymbols(id string) []string {
 		log.Fatalf("failed to parse JSON: %v", err)
 	}
 
-	var imports []string
+	imports := make(map[string]AffectedImportsDetails)
+
 	for _, aff := range detail.Affected {
 		for _, imp := range aff.EcosystemSpecific.Imports {
-			for _, sym := range imp.Symbols {
-				imports = append(imports, fmt.Sprintf("%s.%s", imp.Path, sym))
-				imports = append(imports, fmt.Sprintf("(%s).%s", imp.Path, sym))
-				imports = append(imports, fmt.Sprintf("(*%s).%s", imp.Path, sym))
-			}
+			entry := imports[imp.Path]
+			entry.Symbols = append(entry.Symbols, imp.Symbols...)
+			imports[imp.Path] = entry
 		}
-	}
 
-	return imports
+		r.AffectedImports = imports
+	}
 }
 
-func isSymbolUsed(symbol, dir string, files []string) bool {
+func (r *Result) isSymbolUsed(pkg, symbol, dir string, files []string) string {
+	var symbols []string
+	symbols = append(symbols, fmt.Sprintf("%s.%s", pkg, symbol))
+	symbols = append(symbols, fmt.Sprintf("(%s).%s", pkg, symbol))
+	symbols = append(symbols, fmt.Sprintf("(*%s).%s", pkg, symbol))
 	cmd := "callgraph"
 	args := append([]string{"-format=digraph"}, files...)
 	out, err := runCommand(dir, cmd, args...)
 	if err != nil {
-		fmt.Printf("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
-		return false
+		fmt.Printf("Failed running %s %s in %s: %s\n", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
+		return "unknown"
 	}
 
-	grep := exec.Command("digraph", "somepath", "command-line-arguments.main", symbol)
-	grep.Stdin = bytes.NewReader(out)
-	result, err := grep.CombinedOutput()
+	for _, symbol := range symbols {
+		grep := exec.Command("digraph", "somepath", "command-line-arguments.main", symbol)
+		grep.Stdin = bytes.NewReader(out)
+		result, _ := grep.CombinedOutput()
+		//	if err != nil {
+		//		fmt.Printf("Failed running grep in %s: %s\n", dir, strings.TrimSpace(string(result)))
+		//		return "unknown"
+		//	}
 
-	if !bytes.Contains(result, []byte("digraph: no such")) {
-		return true
+		if !bytes.Contains(result, []byte("digraph: no such")) {
+			if r.UsedImports == nil {
+				r.UsedImports = make(map[string]UsedImportsDetails)
+			}
+			entry := r.UsedImports[pkg]
+			entry.Symbols = append(entry.Symbols, symbol)
+			r.UsedImports[pkg] = entry
+			return "true"
+		}
 	}
-
-	return false
+	return "false"
 }
 
 func getCurrentVersion(pkg string, dir string) string {
 	cmd := "go"
-	args := []string{"list", "-mod=mod", "-f", "{{.Module.Path}}@{{.Module.Version}}", pkg}
+	args := []string{"list", "-mod=mod", "-f", "{{if .Module}}{{.Module.Path}}{{.Module.Version}}{{end}}", pkg}
 	out, err := runCommand(dir, cmd, args...)
 	if err != nil {
 		fmt.Printf("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
@@ -470,11 +538,13 @@ func getFixedVersion(id, pkg string) string {
 	}
 
 	for _, a := range detail.Affected {
-		for _, r := range a.Ranges {
-			if r.Type == "SEMVER" {
-				for _, e := range r.Events {
-					if e.Fixed != "" {
-						return e.Fixed
+		if a.Package.Name == pkg {
+			for _, r := range a.Ranges {
+				if r.Type == "SEMVER" {
+					for _, e := range r.Events {
+						if e.Fixed != "" {
+							return e.Fixed
+						}
 					}
 				}
 			}
@@ -484,16 +554,9 @@ func getFixedVersion(id, pkg string) string {
 	return ""
 }
 
-func trimAfterLastDot(input string) string {
-	if i := strings.LastIndex(input, "."); i != -1 {
-		return input[:i]
-	}
-	return input
-}
-
 func getModPath(pkg, dir string) string {
 	cmd := "go"
-	args := []string{"list", "-mod=mod", "-f", "{{.Module.Path}}", pkg}
+	args := []string{"list", "-mod=mod", "-f", "{{if .Module}}{{.Module.Path}}{{end}}", pkg}
 	out, err := runCommand(dir, cmd, args...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
