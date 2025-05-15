@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -27,6 +28,7 @@ type Job struct {
 
 type AffectedImportsDetails struct {
 	Symbols      []string
+	Type         string
 	FixedVersion string
 }
 
@@ -34,12 +36,12 @@ type UsedImportsDetails struct {
 	Symbols        []string `json:"Symbols,omitempty"`
 	CurrentVersion string   `json:"CurrentVersion,omitempty"`
 	ReplaceVersion string   `json:"ReplaceVersion,omitempty"`
+	FixCommands    []string `json:"FixCommands,omitempty"`
 }
 
 type Result struct {
 	IsVulnerable    string
 	UsedImports     map[string]UsedImportsDetails
-	FixCommands     []string
 	Files           map[string][][]string
 	AffectedImports map[string]AffectedImportsDetails
 	GoCVE           string
@@ -172,6 +174,9 @@ func main() {
 				if entry.ReplaceVersion == "" {
 					entry.ReplaceVersion = symbols.ReplaceVersion
 				}
+				if entry.FixCommands == nil {
+					entry.FixCommands = symbols.FixCommands
+				}
 				mergedImports[pkg] = entry
 			}
 		}
@@ -271,6 +276,7 @@ func (j Job) isVulnerable(result *Result) Result {
 	modPath := getModPath(j.Package, filepath.Join(result.Directory, j.Dir))
 	repVer := getReplaceVersion(modPath, filepath.Join(result.Directory, j.Dir))
 	fixVer := getFixedVersion(result.GoCVE, modPath)
+	fixVer = "v" + extractFormattedFixedVersions(fixVer)
 
 	used := false
 	unknown := false
@@ -288,7 +294,9 @@ func (j Job) isVulnerable(result *Result) Result {
 	}
 
 	aentry := result.AffectedImports[j.Package]
+
 	aentry.FixedVersion = fixVer
+
 	result.AffectedImports[j.Package] = aentry
 
 	if result.UsedImports == nil {
@@ -296,9 +304,9 @@ func (j Job) isVulnerable(result *Result) Result {
 	}
 
 	uentry := result.UsedImports[j.Package]
+
 	uentry.CurrentVersion = curVer
 	uentry.ReplaceVersion = repVer
-	result.UsedImports[j.Package] = uentry
 
 	if used {
 		result.IsVulnerable = "true"
@@ -309,18 +317,20 @@ func (j Job) isVulnerable(result *Result) Result {
 	}
 
 	if repVer != "" {
-		result.FixCommands = []string{
+		uentry.FixCommands = []string{
 			fmt.Sprintf("go mod edit -replace=%s=%s@%s", modPath, modPath, fixVer),
 			"go mod tidy",
 			"go mod vendor",
 		}
 	} else if result.IsVulnerable == "true" {
-		result.FixCommands = []string{
+		uentry.FixCommands = []string{
 			fmt.Sprintf("go get %s@%s", modPath, fixVer),
 			"go mod tidy",
 			"go mod vendor",
 		}
 	}
+
+	result.UsedImports[j.Package] = uentry
 
 	return *result
 }
@@ -447,9 +457,14 @@ func (r *Result) fetchAffectedSymbols(id string) {
 	imports := make(map[string]AffectedImportsDetails)
 
 	for _, aff := range detail.Affected {
+		typ := "non-stdlib"
+		if aff.Package.Name == "stdlib" {
+			typ = "stdlib"
+		}
 		for _, imp := range aff.EcosystemSpecific.Imports {
 			entry := imports[imp.Path]
 			entry.Symbols = append(entry.Symbols, imp.Symbols...)
+			entry.Type = typ
 			imports[imp.Path] = entry
 		}
 
@@ -474,6 +489,7 @@ func (r *Result) isSymbolUsed(pkg, symbol, dir string, files []string) string {
 		grep := exec.Command("digraph", "somepath", "command-line-arguments.main", symbol)
 		grep.Stdin = bytes.NewReader(out)
 		result, _ := grep.CombinedOutput()
+		// TODO: Handle error
 		//	if err != nil {
 		//		fmt.Printf("Failed running grep in %s: %s\n", dir, strings.TrimSpace(string(result)))
 		//		return "unknown"
@@ -555,11 +571,13 @@ func getFixedVersion(id, pkg string) string {
 		if a.Package.Name == pkg {
 			for _, r := range a.Ranges {
 				if r.Type == "SEMVER" {
-					for _, e := range r.Events {
-						if e.Fixed != "" {
-							return e.Fixed
-						}
-					}
+					return formatIntroducedFixed(r.Events)
+				}
+			}
+		} else if a.Package.Name == "stdlib" {
+			for _, r := range a.Ranges {
+				if r.Type == "SEMVER" {
+					return formatIntroducedFixed(r.Events)
 				}
 			}
 		}
@@ -616,4 +634,46 @@ func getGitURL(dir string) string {
 		fmt.Printf("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func formatIntroducedFixed(events []Event) string {
+	var result []string
+	var introduced string
+
+	for _, e := range events {
+		if e.Introduced != "" {
+			introduced = e.Introduced
+		}
+		if e.Fixed != "" && introduced != "" {
+			pair := fmt.Sprintf("Introduced in %s and fixed in %s", introduced, e.Fixed)
+			result = append(result, pair)
+			introduced = ""
+		}
+	}
+
+	if introduced != "" {
+		result = append(result, fmt.Sprintf("Introdued in %s - ", introduced))
+	}
+
+	return "[" + strings.Join(result, ", ") + "]"
+}
+
+func extractFormattedFixedVersions(input string) string {
+	re := regexp.MustCompile(`fixed in ([0-9a-zA-Z.\-]+)`)
+	matches := re.FindAllStringSubmatch(input, -1)
+
+	var fixedVersions []string
+	for _, match := range matches {
+		if len(match) > 1 {
+			fixedVersions = append(fixedVersions, match[1])
+		}
+	}
+
+	if len(fixedVersions) == 1 {
+		return fixedVersions[0]
+	} else if len(fixedVersions) > 1 {
+		return "[" + strings.Join(fixedVersions, "/ ") + "]"
+	}
+
+	return ""
 }
