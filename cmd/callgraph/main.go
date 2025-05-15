@@ -31,15 +31,14 @@ type AffectedImportsDetails struct {
 }
 
 type UsedImportsDetails struct {
-	Symbols        []string
-	CurrentVersion string
-	ReplaceVersion string
+	Symbols        []string `json:"Symbols,omitempty"`
+	CurrentVersion string   `json:"CurrentVersion,omitempty"`
+	ReplaceVersion string   `json:"ReplaceVersion,omitempty"`
 }
 
 type Result struct {
 	AffectedImports map[string]AffectedImportsDetails
 	UsedImports     map[string]UsedImportsDetails
-	Symbols         []string
 	Files           map[string][][]string
 	IsVulnerable    string
 	Directory       string
@@ -104,18 +103,18 @@ type GoModEdit struct {
 func main() {
 	tools := []string{"go", "digraph", "callgraph", "git"}
 	if !validateTools(tools) {
-		os.Exit(0)
+		os.Exit(1)
 	}
 
 	if len(os.Args) < 3 {
 		fmt.Printf("Usage: %s <CVE ID> <directory>\n", os.Args[0])
-		os.Exit(0)
+		os.Exit(1)
 	}
 
 	if info, err := os.Stat(os.Args[2]); err != nil || !info.IsDir() {
 		fmt.Printf("Invalid directory: %s\n", os.Args[2])
 		fmt.Printf("Usage: %s <CVE ID> <directory>\n", os.Args[0])
-		os.Exit(0)
+		os.Exit(1)
 	}
 
 	result := InitResult(os.Args[1], os.Args[2])
@@ -151,19 +150,19 @@ func main() {
 
 	mergedImports := make(map[string]UsedImportsDetails)
 
+	var mu sync.Mutex
 	for res := range results {
 		if res.IsVulnerable != "true" {
 			continue
 		}
 
+		mu.Lock()
 		for pkg, symbols := range res.UsedImports {
 			for _, sym := range symbols.Symbols {
 				if strings.HasPrefix(sym, pkg+".") {
 					sym = strings.TrimPrefix(sym, pkg+".")
 				}
 
-				var mu sync.Mutex
-				mu.Lock()
 				entry := mergedImports[pkg]
 				entry.Symbols = append(entry.Symbols, sym)
 
@@ -174,15 +173,26 @@ func main() {
 					entry.ReplaceVersion = symbols.ReplaceVersion
 				}
 				mergedImports[pkg] = entry
-				mu.Unlock()
 			}
 		}
+		mu.Unlock()
 	}
 
 	for pkg, details := range mergedImports {
 		deduped := uniqueStrings(details.Symbols)
-		sort.Strings(deduped)
-		details.Symbols = deduped
+		isSymbolsEmpty := len(deduped) == 0
+		isCurrentVersionEmpty := details.CurrentVersion == ""
+		isReplaceVersionEmpty := details.ReplaceVersion == ""
+
+		if isSymbolsEmpty && isCurrentVersionEmpty && isReplaceVersionEmpty {
+			delete(mergedImports, pkg)
+			continue
+		}
+
+		if !isSymbolsEmpty {
+			sort.Strings(deduped)
+			details.Symbols = deduped
+		}
 		mergedImports[pkg] = details
 	}
 
@@ -196,6 +206,7 @@ func main() {
 			fmt.Println(string(jsonOutput))
 		}
 	} else {
+		result.UsedImports = nil
 		jsonOutput, err := json.MarshalIndent(result, "", "  ")
 		if err != nil {
 			fmt.Printf("Failed to marshal empty result: %v\n", err)
@@ -347,6 +358,9 @@ func (r *Result) findMainGoFiles() {
 	err := filepath.WalkDir(r.Directory, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if d.IsDir() && (strings.HasPrefix(d.Name(), ".")) {
+			return filepath.SkipDir
 		}
 		if d.IsDir() && d.Name() == "vendor" {
 			return filepath.SkipDir
