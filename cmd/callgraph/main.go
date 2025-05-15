@@ -37,17 +37,17 @@ type UsedImportsDetails struct {
 }
 
 type Result struct {
-	AffectedImports map[string]AffectedImportsDetails
-	UsedImports     map[string]UsedImportsDetails
-	Files           map[string][][]string
 	IsVulnerable    string
-	Directory       string
+	UsedImports     map[string]UsedImportsDetails
+	FixCommands     []string
+	Files           map[string][][]string
+	AffectedImports map[string]AffectedImportsDetails
+	GoCVE           string
+	CVE             string
 	Repository      string
 	Branch          string
-	CVE             string
-	GoCVE           string
+	Directory       string
 	Errors          []string
-	FixCommands     []string
 }
 
 type VulnReport struct {
