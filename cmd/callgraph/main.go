@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -19,6 +18,11 @@ import (
 	"time"
 )
 
+const (
+	vulnsIndexURL = "https://vuln.go.dev/index/vulns.json"
+	vulnIDURL = "https://vuln.go.dev/ID"
+)
+
 type Job struct {
 	Package string
 	Symbol  string
@@ -29,7 +33,7 @@ type Job struct {
 type AffectedImportsDetails struct {
 	Symbols      []string
 	Type         string
-	FixedVersion string
+	FixedVersion []string
 }
 
 type UsedImportsDetails struct {
@@ -206,7 +210,8 @@ func main() {
 		result.UsedImports = mergedImports
 		jsonOutput, err := json.MarshalIndent(result, "", "  ")
 		if err != nil {
-			fmt.Printf("Failed to marshal result to JSON: %v\n", err)
+			errMsg := fmt.Sprintf("Failed to marshal result to JSON: %v\n", err)
+			result.Errors = append(result.Errors, errMsg)
 		} else {
 			fmt.Println(string(jsonOutput))
 		}
@@ -214,7 +219,8 @@ func main() {
 		result.UsedImports = nil
 		jsonOutput, err := json.MarshalIndent(result, "", "  ")
 		if err != nil {
-			fmt.Printf("Failed to marshal empty result: %v\n", err)
+			errMsg := fmt.Sprintf("Failed to marshal result to JSON: %v\n", err)
+			result.Errors = append(result.Errors, errMsg)
 		} else {
 			fmt.Println(string(jsonOutput))
 		}
@@ -238,10 +244,14 @@ func InitResult(cve, dir string) *Result {
 		CVE:          cve,
 		Directory:    dir,
 		IsVulnerable: "unknown",
-		Repository:   getGitURL(dir),
-		Branch:       getGitBranch(dir),
-		GoCVE:        fetchGoVulnID(cve),
 	}
+
+	fetchGoVulnID(r)
+	fetchAffectedSymbols(r)
+	findMainGoFiles(r)
+	getGitBranch(r)
+	getGitURL(r)
+
 	if r.GoCVE == "" {
 		r = &Result{
 			GoCVE:        "No Go CVE ID found",
@@ -253,13 +263,12 @@ func InitResult(cve, dir string) *Result {
 		}
 		jsonOutput, err := json.MarshalIndent(r, "", "  ")
 		if err != nil {
-			fmt.Printf("Failed to marshal results to JSON: %v", err)
+			errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
+			r.Errors = append(r.Errors, errMsg)
 		}
 		fmt.Println(string(jsonOutput))
 		os.Exit(0)
 	}
-	r.fetchAffectedSymbols(r.GoCVE)
-	r.findMainGoFiles()
 	return r
 }
 
@@ -272,11 +281,11 @@ func worker(jobs <-chan Job, results chan<- Result, wg *sync.WaitGroup, result *
 }
 
 func (j Job) isVulnerable(result *Result) Result {
-	curVer := getCurrentVersion(j.Package, filepath.Join(result.Directory, j.Dir))
-	modPath := getModPath(j.Package, filepath.Join(result.Directory, j.Dir))
-	repVer := getReplaceVersion(modPath, filepath.Join(result.Directory, j.Dir))
-	fixVer := getFixedVersion(result.GoCVE, modPath)
-	fixVer = "v" + extractFormattedFixedVersions(fixVer)
+	curVer := getCurrentVersion(j.Package, filepath.Join(result.Directory, j.Dir), result)
+	modPath := getModPath(j.Package, filepath.Join(result.Directory, j.Dir), result)
+	repVer := getReplaceVersion(modPath, filepath.Join(result.Directory, j.Dir), result)
+	fixVer := getFixedVersion(result.GoCVE, modPath, result)
+	fixVer = extractFormattedFixedVersions(fixVer)
 
 	used := false
 	unknown := false
@@ -323,10 +332,18 @@ func (j Job) isVulnerable(result *Result) Result {
 			"go mod vendor",
 		}
 	} else if result.IsVulnerable == "true" {
-		uentry.FixCommands = []string{
-			fmt.Sprintf("go get %s@%s", modPath, fixVer),
-			"go mod tidy",
-			"go mod vendor",
+		if result.AffectedImports[j.Package].Type == "stdlib" {
+			uentry.FixCommands = []string{
+				fmt.Sprintf("go mod edit -go=%s", fixVer),
+				"go mod tidy",
+				"go mod vendor",
+			}
+		} else {
+			uentry.FixCommands = []string{
+				fmt.Sprintf("go get %s@%s", modPath, fixVer),
+				"go mod tidy",
+				"go mod vendor",
+			}
 		}
 	}
 
@@ -335,37 +352,40 @@ func (j Job) isVulnerable(result *Result) Result {
 	return *result
 }
 
-func fetchGoVulnID(cve string) string {
-	resp, err := http.Get("https://vuln.go.dev/index/vulns.json")
+func fetchGoVulnID(result *Result) string {
+	resp, err := http.Get(vulnsIndexURL)
 	if err != nil {
-		log.Fatal(err)
+		errMsg := fmt.Sprint("Failed to get response from" + vulnsIndexURL + ": %v", err)
+		result.Errors = append(result.Errors, errMsg)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Fatal(err)
+		errMsg := fmt.Sprint("Failed to read response body from" + vulnsIndexURL + ": %v", err)
+		result.Errors = append(result.Errors, errMsg)
 	}
 
 	var vulns []VulnReport
 	if err := json.Unmarshal(body, &vulns); err != nil {
-		log.Fatal(err)
+		errMsg := fmt.Sprint("Failed to marshal response body from" + vulnsIndexURL + "to JSON: %v", err)
+		result.Errors = append(result.Errors, errMsg)
 	}
 
 	for _, v := range vulns {
-		if slices.Contains(v.Aliases, cve) {
-			return v.ID
+		if slices.Contains(v.Aliases, result.CVE) {
+			result.GoCVE = v.ID
 		}
 	}
 
 	return ""
 }
 
-func (r *Result) findMainGoFiles() {
+func findMainGoFiles(res *Result) {
 	result := make(map[string][][]string)
 	var modDirs []string
 
-	err := filepath.WalkDir(r.Directory, func(path string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir(res.Directory, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -381,7 +401,8 @@ func (r *Result) findMainGoFiles() {
 		return nil
 	})
 	if err != nil {
-		log.Fatal(err)
+		errMsg := fmt.Sprintf("Failed to run filepath.WalkDir in %s: %v", res.Directory, err)
+		res.Errors = append(res.Errors, errMsg)
 	}
 
 	for _, modDir := range modDirs {
@@ -389,12 +410,12 @@ func (r *Result) findMainGoFiles() {
 		args := []string{"list", "-f", "{{.Name}}: {{.Dir}}", "./..."}
 		out, err := runCommand(modDir, cmd, args...)
 		if err != nil {
-			errMsg := fmt.Sprintf("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), modDir, strings.TrimSpace(string(out)))
-			r.Errors = append(r.Errors, errMsg)
+			errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), modDir, strings.TrimSpace(string(out)))
+			res.Errors = append(res.Errors, errMsg)
 			continue
 		}
 
-		modKey, err := filepath.Rel(r.Directory, modDir)
+		modKey, err := filepath.Rel(res.Directory, modDir)
 		if err != nil {
 			modKey = modDir
 		}
@@ -430,28 +451,34 @@ func (r *Result) findMainGoFiles() {
 		result[modKey] = sets
 	}
 
-	r.Files = make(map[string][][]string)
-	r.Files = result
+	res.Files = make(map[string][][]string)
+	res.Files = result
 }
 
-func (r *Result) fetchAffectedSymbols(id string) {
+func fetchAffectedSymbols(result *Result) {
 	client := http.Client{Timeout: 10 * time.Second}
-	url := fmt.Sprintf("https://vuln.go.dev/ID/%s.json", id)
+	url := fmt.Sprintf(vulnIDURL + "/%s.json", result.GoCVE)
 
 	resp, err := client.Get(url)
 	if err != nil {
-		fmt.Printf("HTTP request failed: %v", err)
+		errMsg := fmt.Sprint("Failed HTTP request to %s: %v",url, err)
+		result.Errors = append(result.Errors, errMsg)
+
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Fatalf("failed to fetch vulnerability data: %s", resp.Status)
+		errMsg := fmt.Sprint("Failed to connect" + vulnIDURL + "%s.json %s", resp.Status)
+		result.Errors = append(result.Errors, errMsg)
+
 	}
 
 	var detail VulnReport
 
 	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
-		log.Fatalf("failed to parse JSON: %v", err)
+		errMsg := fmt.Sprint("Failed to parse JSON: %v", err)
+		result.Errors = append(result.Errors, errMsg)
+
 	}
 
 	imports := make(map[string]AffectedImportsDetails)
@@ -468,7 +495,7 @@ func (r *Result) fetchAffectedSymbols(id string) {
 			imports[imp.Path] = entry
 		}
 
-		r.AffectedImports = imports
+		result.AffectedImports = imports
 	}
 }
 
@@ -481,7 +508,8 @@ func (r *Result) isSymbolUsed(pkg, symbol, dir string, files []string) string {
 	args := append([]string{"-format=digraph"}, files...)
 	out, err := runCommand(dir, cmd, args...)
 	if err != nil {
-		fmt.Printf("Failed running %s %s in %s: %s\n", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
+		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s\n", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
+		r.Errors = append(r.Errors, errMsg)
 		return "unknown"
 	}
 
@@ -508,12 +536,13 @@ func (r *Result) isSymbolUsed(pkg, symbol, dir string, files []string) string {
 	return "false"
 }
 
-func getCurrentVersion(pkg string, dir string) string {
+func getCurrentVersion(pkg string, dir string, result *Result) string {
 	cmd := "go"
 	args := []string{"list", "-mod=mod", "-f", "{{if .Module}}{{.Module.Path}}{{.Module.Version}}{{end}}", pkg}
 	out, err := runCommand(dir, cmd, args...)
 	if err != nil {
-		fmt.Printf("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
+		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
+		result.Errors = append(result.Errors, errMsg)
 		return ""
 	}
 	parts := strings.Split(string(out), "@")
@@ -523,12 +552,13 @@ func getCurrentVersion(pkg string, dir string) string {
 	return ""
 }
 
-func getReplaceVersion(pkg string, dir string) string {
+func getReplaceVersion(pkg string, dir string, result *Result) string {
 	cmd := "go"
 	args := []string{"mod", "edit", "-json"}
 	out, err := runCommand(dir, cmd, args...)
 	if err != nil {
-		fmt.Printf("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
+		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
+		result.Errors = append(result.Errors, errMsg)
 		return ""
 	}
 
@@ -549,22 +579,27 @@ func getReplaceVersion(pkg string, dir string) string {
 	return ""
 }
 
-func getFixedVersion(id, pkg string) string {
-	url := fmt.Sprintf("https://vuln.go.dev/ID/%s.json", id)
+func getFixedVersion(id, pkg string, result *Result) []string {
+	url := fmt.Sprintf(vulnIDURL + "/%s.json", id)
 	resp, err := http.Get(url)
 	if err != nil {
-		log.Fatal(err)
+		errMsg := fmt.Sprint("Failed to get response from" + vulnIDURL + "/%s.json: %v", err)
+		result.Errors = append(result.Errors, errMsg)
+
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Fatal(err)
+		errMsg := fmt.Sprint("Failed to read response body from" + vulnIDURL + "/%s.json: %v", err)
+		result.Errors = append(result.Errors, errMsg)
+
 	}
 
 	var detail VulnReport
 	if err := json.Unmarshal(body, &detail); err != nil {
-		log.Fatal(err)
+		errMsg := fmt.Sprint("Failed to unmarshal response body from" + vulnIDURL + "/%s.json: %v", err)
+		result.Errors = append(result.Errors, errMsg)
 	}
 
 	for _, a := range detail.Affected {
@@ -583,15 +618,16 @@ func getFixedVersion(id, pkg string) string {
 		}
 	}
 
-	return ""
+	return nil
 }
 
-func getModPath(pkg, dir string) string {
+func getModPath(pkg, dir string, result *Result) string {
 	cmd := "go"
 	args := []string{"list", "-mod=mod", "-f", "{{if .Module}}{{.Module.Path}}{{end}}", pkg}
 	out, err := runCommand(dir, cmd, args...)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
+		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
+		result.Errors = append(result.Errors, errMsg)
 		return ""
 	}
 	return strings.TrimSpace(string(out))
@@ -616,27 +652,29 @@ func validateTools(tools []string) bool {
 	return allAvailable
 }
 
-func getGitBranch(dir string) string {
+func getGitBranch(result *Result) {
 	cmd := "git"
 	args := []string{"rev-parse", "--abbrev-ref", "HEAD"}
-	out, err := runCommand(dir, cmd, args...)
+	out, err := runCommand(result.Directory, cmd, args...)
 	if err != nil {
-		fmt.Printf("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
+		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), result.Directory, strings.TrimSpace(string(out)))
+		result.Errors = append(result.Errors, errMsg)
 	}
-	return strings.TrimSpace(string(out))
+	result.Branch = strings.TrimSpace(string(out))
 }
 
-func getGitURL(dir string) string {
+func getGitURL(result *Result) {
 	cmd := "git"
 	args := []string{"remote", "get-url", "origin"}
-	out, err := runCommand(dir, cmd, args...)
+	out, err := runCommand(result.Directory, cmd, args...)
 	if err != nil {
-		fmt.Printf("Failed running %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
+		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), result.Directory, strings.TrimSpace(string(out)))
+		result.Errors = append(result.Errors, errMsg)
 	}
-	return strings.TrimSpace(string(out))
+	result.Repository = strings.TrimSpace(string(out))
 }
 
-func formatIntroducedFixed(events []Event) string {
+func formatIntroducedFixed(events []Event) []string {
 	var result []string
 	var introduced string
 
@@ -655,25 +693,22 @@ func formatIntroducedFixed(events []Event) string {
 		result = append(result, fmt.Sprintf("Introdued in %s - ", introduced))
 	}
 
-	return "[" + strings.Join(result, ", ") + "]"
+	return result
 }
 
-func extractFormattedFixedVersions(input string) string {
+func extractFormattedFixedVersions(inputs []string) []string {
 	re := regexp.MustCompile(`fixed in ([0-9a-zA-Z.\-]+)`)
-	matches := re.FindAllStringSubmatch(input, -1)
 
 	var fixedVersions []string
-	for _, match := range matches {
-		if len(match) > 1 {
-			fixedVersions = append(fixedVersions, match[1])
+
+	for _, input := range inputs {
+		matches := re.FindAllStringSubmatch(input, -1)
+		for _, match := range matches {
+			if len(match) > 1 {
+				fixedVersions = append(fixedVersions, match[1])
+			}
 		}
 	}
 
-	if len(fixedVersions) == 1 {
-		return fixedVersions[0]
-	} else if len(fixedVersions) > 1 {
-		return "[" + strings.Join(fixedVersions, "/ ") + "]"
-	}
-
-	return ""
+	return fixedVersions
 }
