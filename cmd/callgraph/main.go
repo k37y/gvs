@@ -20,7 +20,7 @@ import (
 
 const (
 	vulnsIndexURL = "https://vuln.go.dev/index/vulns.json"
-	vulnIDURL = "https://vuln.go.dev/ID"
+	vulnIDURL     = "https://vuln.go.dev/ID"
 )
 
 type Job struct {
@@ -54,6 +54,7 @@ type Result struct {
 	Branch          string
 	Directory       string
 	Errors          []string
+	mu              sync.Mutex
 }
 
 type VulnReport struct {
@@ -126,7 +127,7 @@ func main() {
 	result := InitResult(os.Args[1], os.Args[2])
 
 	jobs := make(chan Job)
-	results := make(chan Result)
+	results := make(chan *Result)
 
 	var wg sync.WaitGroup
 	workerCount := 18
@@ -156,13 +157,11 @@ func main() {
 
 	mergedImports := make(map[string]UsedImportsDetails)
 
-	var mu sync.Mutex
 	for res := range results {
 		if res.IsVulnerable != "true" {
 			continue
 		}
 
-		mu.Lock()
 		for pkg, symbols := range res.UsedImports {
 			for _, sym := range symbols.Symbols {
 				if strings.HasPrefix(sym, pkg+".") {
@@ -181,10 +180,12 @@ func main() {
 				if entry.FixCommands == nil {
 					entry.FixCommands = symbols.FixCommands
 				}
+
+				result.mu.Lock()
 				mergedImports[pkg] = entry
+				result.mu.Unlock()
 			}
 		}
-		mu.Unlock()
 	}
 
 	for pkg, details := range mergedImports {
@@ -272,7 +273,7 @@ func InitResult(cve, dir string) *Result {
 	return r
 }
 
-func worker(jobs <-chan Job, results chan<- Result, wg *sync.WaitGroup, result *Result) {
+func worker(jobs <-chan Job, results chan<- *Result, wg *sync.WaitGroup, result *Result) {
 	defer wg.Done()
 	for job := range jobs {
 		res := job.isVulnerable(result)
@@ -280,7 +281,7 @@ func worker(jobs <-chan Job, results chan<- Result, wg *sync.WaitGroup, result *
 	}
 }
 
-func (j Job) isVulnerable(result *Result) Result {
+func (j Job) isVulnerable(result *Result) *Result {
 	curVer := getCurrentVersion(j.Package, filepath.Join(result.Directory, j.Dir), result)
 	modPath := getModPath(j.Package, filepath.Join(result.Directory, j.Dir), result)
 	repVer := getReplaceVersion(modPath, filepath.Join(result.Directory, j.Dir), result)
@@ -306,7 +307,9 @@ func (j Job) isVulnerable(result *Result) Result {
 
 	aentry.FixedVersion = fixVer
 
+	result.mu.Lock()
 	result.AffectedImports[j.Package] = aentry
+	result.mu.Unlock()
 
 	if result.UsedImports == nil {
 		result.UsedImports = make(map[string]UsedImportsDetails)
@@ -347,28 +350,30 @@ func (j Job) isVulnerable(result *Result) Result {
 		}
 	}
 
+	result.mu.Lock()
 	result.UsedImports[j.Package] = uentry
+	result.mu.Unlock()
 
-	return *result
+	return result
 }
 
 func fetchGoVulnID(result *Result) string {
 	resp, err := http.Get(vulnsIndexURL)
 	if err != nil {
-		errMsg := fmt.Sprint("Failed to get response from" + vulnsIndexURL + ": %v", err)
+		errMsg := fmt.Sprint("Failed to get response from"+vulnsIndexURL+": %v", err)
 		result.Errors = append(result.Errors, errMsg)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		errMsg := fmt.Sprint("Failed to read response body from" + vulnsIndexURL + ": %v", err)
+		errMsg := fmt.Sprint("Failed to read response body from"+vulnsIndexURL+": %v", err)
 		result.Errors = append(result.Errors, errMsg)
 	}
 
 	var vulns []VulnReport
 	if err := json.Unmarshal(body, &vulns); err != nil {
-		errMsg := fmt.Sprint("Failed to marshal response body from" + vulnsIndexURL + "to JSON: %v", err)
+		errMsg := fmt.Sprint("Failed to marshal response body from"+vulnsIndexURL+"to JSON: %v", err)
 		result.Errors = append(result.Errors, errMsg)
 	}
 
@@ -457,18 +462,18 @@ func findMainGoFiles(res *Result) {
 
 func fetchAffectedSymbols(result *Result) {
 	client := http.Client{Timeout: 10 * time.Second}
-	url := fmt.Sprintf(vulnIDURL + "/%s.json", result.GoCVE)
+	url := fmt.Sprintf(vulnIDURL+"/%s.json", result.GoCVE)
 
 	resp, err := client.Get(url)
 	if err != nil {
-		errMsg := fmt.Sprint("Failed HTTP request to %s: %v",url, err)
+		errMsg := fmt.Sprint("Failed HTTP request to %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
 
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		errMsg := fmt.Sprint("Failed to connect" + vulnIDURL + "%s.json %s", resp.Status)
+		errMsg := fmt.Sprint("Failed to connect"+vulnIDURL+"%s.json %s", resp.Status)
 		result.Errors = append(result.Errors, errMsg)
 
 	}
@@ -580,10 +585,10 @@ func getReplaceVersion(pkg string, dir string, result *Result) string {
 }
 
 func getFixedVersion(id, pkg string, result *Result) []string {
-	url := fmt.Sprintf(vulnIDURL + "/%s.json", id)
+	url := fmt.Sprintf(vulnIDURL+"/%s.json", id)
 	resp, err := http.Get(url)
 	if err != nil {
-		errMsg := fmt.Sprint("Failed to get response from" + vulnIDURL + "/%s.json: %v", err)
+		errMsg := fmt.Sprint("Failed to get response from"+vulnIDURL+"/%s.json: %v", err)
 		result.Errors = append(result.Errors, errMsg)
 
 	}
@@ -591,14 +596,14 @@ func getFixedVersion(id, pkg string, result *Result) []string {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		errMsg := fmt.Sprint("Failed to read response body from" + vulnIDURL + "/%s.json: %v", err)
+		errMsg := fmt.Sprint("Failed to read response body from"+vulnIDURL+"/%s.json: %v", err)
 		result.Errors = append(result.Errors, errMsg)
 
 	}
 
 	var detail VulnReport
 	if err := json.Unmarshal(body, &detail); err != nil {
-		errMsg := fmt.Sprint("Failed to unmarshal response body from" + vulnIDURL + "/%s.json: %v", err)
+		errMsg := fmt.Sprint("Failed to unmarshal response body from"+vulnIDURL+"/%s.json: %v", err)
 		result.Errors = append(result.Errors, errMsg)
 	}
 
