@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/mod/semver"
 )
 
 const (
@@ -287,6 +289,7 @@ func (j Job) isVulnerable(result *Result) *Result {
 	repVer := getReplaceVersion(modPath, filepath.Join(result.Directory, j.Dir), result)
 	fixVer := getFixedVersion(result.GoCVE, modPath, result)
 	fixVer = extractFormattedFixedVersions(fixVer)
+	fv := semVersion(strings.Join(fixVer, " "))
 
 	used := false
 	unknown := false
@@ -299,38 +302,40 @@ func (j Job) isVulnerable(result *Result) *Result {
 		unknown = true
 	}
 
+	result.mu.Lock()
 	if result.AffectedImports == nil {
 		result.AffectedImports = make(map[string]AffectedImportsDetails)
 	}
-
 	aentry := result.AffectedImports[j.Package]
-
-	aentry.FixedVersion = fixVer
-
-	result.mu.Lock()
+	if result.AffectedImports[j.Package].Type != "stdlib" {
+		aentry.FixedVersion = strings.Split(semVersion(fv), ",")
+	} else {
+		aentry.FixedVersion = fixVer
+	}
 	result.AffectedImports[j.Package] = aentry
 	result.mu.Unlock()
 
+	result.mu.Lock()
 	if result.UsedImports == nil {
 		result.UsedImports = make(map[string]UsedImportsDetails)
 	}
-
 	uentry := result.UsedImports[j.Package]
-
 	uentry.CurrentVersion = curVer
 	uentry.ReplaceVersion = repVer
-
 	if used {
-		result.IsVulnerable = "true"
+		if result.AffectedImports[j.Package].Type != "stdlib" {
+			if semver.Compare(curVer, fv) <= 0 {
+				result.IsVulnerable = "true"
+			}
+		}
 	} else if unknown {
 		result.IsVulnerable = "unknown"
 	} else {
 		result.IsVulnerable = "false"
 	}
-
-	if repVer != "" {
+	if repVer != "" && semver.Compare(curVer, repVer) <= 0 {
 		uentry.FixCommands = []string{
-			fmt.Sprintf("go mod edit -replace=%s=%s@%s", modPath, modPath, fixVer),
+			fmt.Sprintf("go mod edit -replace=%s=%s@%s", modPath, modPath, fv),
 			"go mod tidy",
 			"go mod vendor",
 		}
@@ -343,14 +348,12 @@ func (j Job) isVulnerable(result *Result) *Result {
 			}
 		} else {
 			uentry.FixCommands = []string{
-				fmt.Sprintf("go get %s@%s", modPath, fixVer),
+				fmt.Sprintf("go get %s@%s", modPath, fv),
 				"go mod tidy",
 				"go mod vendor",
 			}
 		}
 	}
-
-	result.mu.Lock()
 	result.UsedImports[j.Package] = uentry
 	result.mu.Unlock()
 
@@ -543,18 +546,14 @@ func (r *Result) isSymbolUsed(pkg, symbol, dir string, files []string) string {
 
 func getCurrentVersion(pkg string, dir string, result *Result) string {
 	cmd := "go"
-	args := []string{"list", "-mod=mod", "-f", "{{if .Module}}{{.Module.Path}}{{.Module.Version}}{{end}}", pkg}
+	args := []string{"list", "-mod=mod", "-f", "{{if .Module}}{{.Module.Version}}{{end}}", pkg}
 	out, err := runCommand(dir, cmd, args...)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
 		result.Errors = append(result.Errors, errMsg)
 		return ""
 	}
-	parts := strings.Split(string(out), "@")
-	if len(parts) == 2 {
-		return strings.TrimSpace(parts[1])
-	}
-	return ""
+	return strings.TrimSpace(string(out))
 }
 
 func getReplaceVersion(pkg string, dir string, result *Result) string {
@@ -716,4 +715,11 @@ func extractFormattedFixedVersions(inputs []string) []string {
 	}
 
 	return fixedVersions
+}
+
+func semVersion(v string) string {
+	if !strings.HasPrefix(v, "v") {
+		return "v" + v
+	}
+	return v
 }
