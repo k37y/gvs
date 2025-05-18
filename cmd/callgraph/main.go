@@ -21,13 +21,12 @@ import (
 )
 
 const (
-	vulnsIndexURL = "https://vuln.go.dev/index/vulns.json"
-	vulnIDURL     = "https://vuln.go.dev/ID"
+	vulnsURL = "https://vuln.go.dev"
 )
 
 type Job struct {
 	Package string
-	Symbol  string
+	Symbols []string
 	Dir     string
 	Files   []string
 }
@@ -143,9 +142,7 @@ func main() {
 		for modDir, sets := range result.Files {
 			for _, fset := range sets {
 				for pkg, syms := range result.AffectedImports {
-					for _, sym := range syms.Symbols {
-						jobs <- Job{Package: pkg, Symbol: sym, Dir: modDir, Files: fset}
-					}
+					jobs <- Job{Package: pkg, Symbols: syms.Symbols, Dir: modDir, Files: fset}
 				}
 			}
 		}
@@ -294,7 +291,7 @@ func (j Job) isVulnerable(result *Result) *Result {
 	used := false
 	unknown := false
 
-	isUsed := result.isSymbolUsed(j.Package, j.Symbol, filepath.Join(result.Directory, j.Dir), j.Files)
+	isUsed := result.isSymbolUsed(j.Package, filepath.Join(result.Directory, j.Dir), j.Symbols, j.Files)
 	switch isUsed {
 	case "true":
 		used = true
@@ -361,22 +358,22 @@ func (j Job) isVulnerable(result *Result) *Result {
 }
 
 func fetchGoVulnID(result *Result) string {
-	resp, err := http.Get(vulnsIndexURL)
+	resp, err := http.Get(vulnsURL + "/index/vulns.json")
 	if err != nil {
-		errMsg := fmt.Sprint("Failed to get response from"+vulnsIndexURL+": %v", err)
+		errMsg := fmt.Sprint("Failed to get response from"+vulnsURL+"/index/vulns.json : %v", err)
 		result.Errors = append(result.Errors, errMsg)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		errMsg := fmt.Sprint("Failed to read response body from"+vulnsIndexURL+": %v", err)
+		errMsg := fmt.Sprint("Failed to read response body from"+vulnsURL+"/index/vulns.json : %v", err)
 		result.Errors = append(result.Errors, errMsg)
 	}
 
 	var vulns []VulnReport
 	if err := json.Unmarshal(body, &vulns); err != nil {
-		errMsg := fmt.Sprint("Failed to marshal response body from"+vulnsIndexURL+"to JSON: %v", err)
+		errMsg := fmt.Sprint("Failed to marshal response body from"+vulnsURL+"/index/vulns.json to JSON: %v", err)
 		result.Errors = append(result.Errors, errMsg)
 	}
 
@@ -465,7 +462,7 @@ func findMainGoFiles(res *Result) {
 
 func fetchAffectedSymbols(result *Result) {
 	client := http.Client{Timeout: 10 * time.Second}
-	url := fmt.Sprintf(vulnIDURL+"/%s.json", result.GoCVE)
+	url := fmt.Sprintf(vulnsURL+"/ID/%s.json", result.GoCVE)
 
 	resp, err := client.Get(url)
 	if err != nil {
@@ -476,7 +473,7 @@ func fetchAffectedSymbols(result *Result) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		errMsg := fmt.Sprint("Failed to connect"+vulnIDURL+"%s.json %s", resp.Status)
+		errMsg := fmt.Sprint("Failed to connect"+vulnsURL+"/ID/%s.json %s", resp.Status)
 		result.Errors = append(result.Errors, errMsg)
 
 	}
@@ -507,13 +504,14 @@ func fetchAffectedSymbols(result *Result) {
 	}
 }
 
-func (r *Result) isSymbolUsed(pkg, symbol, dir string, files []string) string {
-	var symbols []string
-	symbols = append(symbols, fmt.Sprintf("%s.%s", pkg, symbol))
-	symbols = append(symbols, fmt.Sprintf("(%s).%s", pkg, symbol))
-	symbols = append(symbols, fmt.Sprintf("(*%s).%s", pkg, symbol))
+func (r *Result) isSymbolUsed(pkg, dir string, symbols, files []string) string {
+	for _, symbol := range symbols {
+		symbols = append(symbols, fmt.Sprintf("%s.%s", pkg, symbol))
+		symbols = append(symbols, fmt.Sprintf("(%s).%s", pkg, symbol))
+		symbols = append(symbols, fmt.Sprintf("(*%s).%s", pkg, symbol))
+	}
 	cmd := "callgraph"
-	args := append([]string{"-format=digraph"}, files...)
+	args := append([]string{"-format={{.Caller}} {{.Callee}}"}, files...)
 	out, err := runCommand(dir, cmd, args...)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s\n", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
@@ -522,26 +520,30 @@ func (r *Result) isSymbolUsed(pkg, symbol, dir string, files []string) string {
 	}
 
 	for _, symbol := range symbols {
-		grep := exec.Command("digraph", "somepath", "command-line-arguments.main", symbol)
-		grep.Stdin = bytes.NewReader(out)
-		result, _ := grep.CombinedOutput()
-		// TODO: Handle error
-		//	if err != nil {
-		//		fmt.Printf("Failed running grep in %s: %s\n", dir, strings.TrimSpace(string(result)))
-		//		return "unknown"
-		//	}
-
-		if !bytes.Contains(result, []byte("digraph: no such")) {
+		if matchSymbol(out, symbol) {
 			if r.UsedImports == nil {
 				r.UsedImports = make(map[string]UsedImportsDetails)
 			}
 			entry := r.UsedImports[pkg]
 			entry.Symbols = append(entry.Symbols, symbol)
 			r.UsedImports[pkg] = entry
-			return "true"
 		}
 	}
+	if len(r.UsedImports[pkg].Symbols) > 0 {
+		return "true"
+	}
 	return "false"
+}
+
+func matchSymbol(out []byte, symbol string) bool {
+	pattern := regexp.MustCompile(`\s` + regexp.QuoteMeta(symbol) + `$`)
+	scanner := bufio.NewScanner(bytes.NewReader(out))
+	for scanner.Scan() {
+		if pattern.MatchString(scanner.Text()) {
+			return true
+		}
+	}
+	return false
 }
 
 func getCurrentVersion(pkg string, dir string, result *Result) string {
@@ -584,10 +586,10 @@ func getReplaceVersion(pkg string, dir string, result *Result) string {
 }
 
 func getFixedVersion(id, pkg string, result *Result) []string {
-	url := fmt.Sprintf(vulnIDURL+"/%s.json", id)
+	url := fmt.Sprintf(vulnsURL+"/ID/%s.json", id)
 	resp, err := http.Get(url)
 	if err != nil {
-		errMsg := fmt.Sprint("Failed to get response from"+vulnIDURL+"/%s.json: %v", err)
+		errMsg := fmt.Sprint("Failed to get response from"+vulnsURL+"/ID/%s.json: %v", err)
 		result.Errors = append(result.Errors, errMsg)
 
 	}
@@ -595,14 +597,14 @@ func getFixedVersion(id, pkg string, result *Result) []string {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		errMsg := fmt.Sprint("Failed to read response body from"+vulnIDURL+"/%s.json: %v", err)
+		errMsg := fmt.Sprint("Failed to read response body from"+vulnsURL+"/ID/%s.json: %v", err)
 		result.Errors = append(result.Errors, errMsg)
 
 	}
 
 	var detail VulnReport
 	if err := json.Unmarshal(body, &detail); err != nil {
-		errMsg := fmt.Sprint("Failed to unmarshal response body from"+vulnIDURL+"/%s.json: %v", err)
+		errMsg := fmt.Sprint("Failed to unmarshal response body from"+vulnsURL+"/ID/%s.json: %v", err)
 		result.Errors = append(result.Errors, errMsg)
 	}
 
