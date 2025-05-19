@@ -1,13 +1,13 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -17,21 +17,38 @@ import (
 )
 
 var (
-	scanMutex      sync.Mutex
-	scanInProgress bool
+	requestMutex sync.Mutex
+	inProgress   bool
+	taskStore    = make(map[string]*TaskResult)
+	taskMutex    sync.Mutex
 )
 
+type TaskStatus string
+
+const (
+	StatusPending   TaskStatus = "pending"
+	StatusRunning   TaskStatus = "running"
+	StatusCompleted TaskStatus = "completed"
+	StatusFailed    TaskStatus = "failed"
+)
+
+type TaskResult struct {
+	Status TaskStatus `json:"status"`
+	Output string     `json:"output,omitempty"`
+	Error  string     `json:"error,omitempty"`
+}
+
 func scanHandler(w http.ResponseWriter, r *http.Request) {
-	if scanInProgress {
+	if inProgress {
 		http.Error(w, `{"error": "Another scan is in progress. Please wait."}`, http.StatusTooManyRequests)
 		return
 	}
 
-	scanMutex.Lock()
-	scanInProgress = true
+	requestMutex.Lock()
+	inProgress = true
 	defer func() {
-		scanInProgress = false
-		scanMutex.Unlock()
+		inProgress = false
+		requestMutex.Unlock()
 	}()
 
 	startTime := time.Now()
@@ -49,7 +66,9 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 	cacheKey := scanRequest.Repo + "@" + scanRequest.Branch
 	if cachedData, err := retrieveCacheFromDisk(cacheKey); err == nil {
 		w.WriteHeader(http.StatusOK)
-		w.Write(cachedData)
+		if _, err := w.Write(cachedData); err != nil {
+			log.Printf("failed to write response: %v", err)
+		}
 		log.Print("Retrieved from cache")
 		return
 	}
@@ -63,7 +82,9 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Clone failed for Repo: %s, Branch: %s, Error: %s", scanRequest.Repo, scanRequest.Branch, err.Error())
 		response, _ := json.Marshal(gvs.ScanResponse{Success: false, ExitCode: 1, Error: err.Error()})
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write(response)
+		if _, err := w.Write(response); err != nil {
+			log.Printf("failed to write response: %v", err)
+		}
 		return
 	}
 
@@ -72,11 +93,13 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("No go.mod files found in Repo: %s", scanRequest.Repo)
 		response, _ := json.Marshal(gvs.ScanResponse{Success: false, ExitCode: 1, Error: "No Go modules found"})
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write(response)
+		if _, err := w.Write(response); err != nil {
+			log.Printf("failed to write response: %v", err)
+		}
 		return
 	}
 
-	var combinedOutput []map[string]interface{}
+	var combinedOutput []map[string]any
 	finalExitCode := 0
 
 	for _, modDir := range moduleDirs {
@@ -97,10 +120,10 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		var findings []map[string]interface{}
+		var findings []map[string]any
 		for _, run := range sarif.Runs {
 			for _, result := range run.Results {
-				findings = append(findings, map[string]interface{}{
+				findings = append(findings, map[string]any{
 					"ruleId":  result.RuleID,
 					"message": result.Message.Text,
 				})
@@ -114,7 +137,7 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 			relativePath = filepath.Join(repoName, strings.TrimPrefix(modDir, cloneDir+"/"))
 		}
 
-		combinedOutput = append(combinedOutput, map[string]interface{}{
+		combinedOutput = append(combinedOutput, map[string]any{
 			"directory": relativePath,
 			"results":   findings,
 		})
@@ -126,7 +149,9 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 		Output:   combinedOutput,
 	})
 	w.WriteHeader(http.StatusOK)
-	w.Write(response)
+	if _, err := w.Write(response); err != nil {
+		log.Printf("failed to write response: %v", err)
+	}
 
 	if err = saveCacheToDisk(cacheKey, response); err != nil {
 		log.Printf("Error saving the cache to disk: %v", err)
@@ -137,78 +162,133 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
+	if _, err := w.Write([]byte("OK")); err != nil {
+		log.Printf("failed to write response: %v", err)
+	}
 }
 
-func sseHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "Streaming unsupported!", http.StatusInternalServerError)
+func writeJSONError(w http.ResponseWriter, statusCode int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	if err := json.NewEncoder(w).Encode(map[string]string{"error": msg}); err != nil {
+		log.Printf("failed to write JSON response: %v", err)
+	}
+}
+
+func cgHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Repo   string `json:"repo"`
+		Branch string `json:"branch"`
+		CVE    string `json:"cve"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "Invalid request payload")
 		return
 	}
 
-	repo := r.URL.Query().Get("repo")
-	branch := r.URL.Query().Get("branch")
-	cve := r.URL.Query().Get("cve")
-
-	if repo == "" || branch == "" || cve == "" {
-		http.Error(w, "Missing query parameters", http.StatusBadRequest)
+	requestMutex.Lock()
+	if inProgress {
+		requestMutex.Unlock()
+		writeJSONError(w, http.StatusTooManyRequests, "Another task is in progress")
 		return
 	}
+	inProgress = true
+	requestMutex.Unlock()
 
-	repoName := filepath.Base(repo)
-	cloneDir := filepath.Join("/tmp", repoName)
-	_ = os.RemoveAll(cloneDir)
+	taskId := fmt.Sprintf("%d", time.Now().UnixNano())
 
-	err := gvs.CloneRepo(repo, branch, cloneDir)
-	if err != nil {
-		fmt.Fprintf(w, "data: Clone failed: %s\n\n", err.Error())
-		flusher.Flush()
-		return
-	}
+	taskMutex.Lock()
+	taskStore[taskId] = &TaskResult{Status: StatusPending}
+	taskMutex.Unlock()
 
-	log.Printf("Running hack/callgraph.sh %s %s ...", cve, cloneDir)
-	cmd := exec.Command("bash", "hack/callgraph.sh", cve, cloneDir)
+	go func(taskId, repo, branch, cve string) {
+		defer func() {
+			requestMutex.Lock()
+			inProgress = false
+			requestMutex.Unlock()
+		}()
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		fmt.Fprint(w, "data: Failed to get stdout\n\n")
-		flusher.Flush()
-		return
-	}
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		log.Printf("Failed to get stderr: %v", err)
-		return
-	}
-
-	go func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			log.Printf("[stderr] %s", scanner.Text())
+		updateStatus := func(status TaskStatus, output, errMsg string) {
+			taskMutex.Lock()
+			defer taskMutex.Unlock()
+			taskStore[taskId] = &TaskResult{Status: status, Output: output, Error: errMsg}
 		}
-	}()
 
-	if err := cmd.Start(); err != nil {
-		fmt.Fprint(w, "data: Failed to start script\n\n")
-		flusher.Flush()
+		updateStatus(StatusRunning, "", "")
+
+		cloneDir, err := os.MkdirTemp("", "cg-"+path.Base(repo)+"-*")
+		if err != nil {
+			updateStatus(StatusFailed, "", fmt.Sprintf("failed to create temp dir: %v", err))
+			return
+		}
+		defer os.RemoveAll(cloneDir)
+
+		log.Printf("[Task %s] Cloning repository %s (%s)...", taskId, repo, branch)
+		if err := gvs.CloneRepo(repo, branch, cloneDir); err != nil {
+			updateStatus(StatusFailed, "", fmt.Sprintf("git clone failed: %v", err))
+			return
+		}
+		log.Printf("[Task %s] Clone successful", taskId)
+
+		log.Printf("[Task %s] Running cg...", taskId)
+		cmd := exec.Command("bin/cg", cve, cloneDir)
+		output, err := cmd.CombinedOutput()
+
+		if err != nil {
+			log.Printf("[Task %s] cg execution failed: %v", taskId, err)
+			updateStatus(StatusFailed, string(output), err.Error())
+			return
+		}
+
+		log.Printf("[Task %s] cg execution completed", taskId)
+		updateStatus(StatusCompleted, string(output), "")
+	}(taskId, req.Repo, req.Branch, req.CVE)
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]string{"taskId": taskId}); err != nil {
+		log.Printf("failed to write taskId response: %v", err)
+	}
+}
+
+func statusHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		TaskID string `json:"taskId"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TaskID == "" {
+		writeJSONError(w, http.StatusBadRequest, "Invalid or missing taskId")
 		return
 	}
 
-	go func() {
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			line := scanner.Text()
-			fmt.Fprintf(w, "data: %s\n\n", line)
-			flusher.Flush()
-		}
-	}()
+	taskMutex.Lock()
+	result, exists := taskStore[req.TaskID]
+	taskMutex.Unlock()
 
-	cmd.Wait()
-	fmt.Fprint(w, "data: Completed!\n\n")
-	flusher.Flush()
+	if !exists {
+		writeJSONError(w, http.StatusNotFound, "Task not found")
+		return
+	}
+
+	resp := map[string]any{
+		"status": result.Status,
+	}
+
+	if result.Output != "" {
+		var parsed any
+		if err := json.Unmarshal([]byte(result.Output), &parsed); err == nil {
+			resp["output"] = parsed
+		} else {
+			resp["output"] = result.Output
+		}
+	}
+
+	if result.Error != "" {
+		resp["error"] = result.Error
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Printf("failed to write status response: %v", err)
+	}
 }

@@ -6,15 +6,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"syscall"
-	"time"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 )
 
 var (
-	port    string = "8082"
-	version string
+	port     string = "8082"
+	version  string
 	cacheDir = "/tmp/gvs-cache"
 )
 
@@ -29,7 +29,8 @@ func main() {
 	http.Handle("/", http.FileServer(http.Dir("./site")))
 	http.HandleFunc("/scan", scanHandler)
 	http.HandleFunc("/healthz", healthHandler)
-	http.HandleFunc("/events", sseHandler)
+	http.HandleFunc("/cg", cgHandler)
+	http.HandleFunc("/status", statusHandler)
 
 	srv := &http.Server{Addr: ":" + port}
 

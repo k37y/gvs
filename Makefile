@@ -1,5 +1,5 @@
 GVS_SOURCES=$(wildcard *.go cmd/gvs/*.go)
-SEMVER_SOURCES=$(wildcard cmd/semver/*.go)
+CG_SOURCES=$(wildcard cmd/callgraph/*.go)
 VERSION=$(shell git describe --tags --long --dirty 2>/dev/null)
 IMAGE=quay.io/kevy/gvs:${VERSION}
 IMAGE_NAME=$(basename $(IMAGE))
@@ -7,7 +7,7 @@ PORT=?8082
 
 .PHONY: run
 
-run: gvs semver
+run: gvs cg
 	./bin/gvs
 
 .PHONY: gvs
@@ -15,10 +15,10 @@ run: gvs semver
 gvs: $(GVS_SOURCES)
 	go build -buildvcs=false -ldflags "-X main.version=${VERSION}" -o ./bin/$@ ./cmd/gvs
 
-.PHONY: semver
+.PHONY: cg
 
-semver: $(SEMVER_SOURCES)
-	go build -buildvcs=false -ldflags "-X main.version=${VERSION}" -o ./bin/$@ ./cmd/semver
+cg: $(CG_SOURCES)
+	go build -buildvcs=false -ldflags "-X main.version=${VERSION}" -o ./bin/$@ ./cmd/callgraph
 
 .PHONY: image
 
