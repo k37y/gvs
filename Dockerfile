@@ -3,7 +3,7 @@ FROM registry.access.redhat.com/ubi9/go-toolset:1.21 AS builder
 WORKDIR /go/src/github.com/k37y/gvs
 COPY . .
 RUN go build -buildvcs=false -o /usr/bin/gvs ./cmd/gvs
-RUN go build -buildvcs=false -o /usr/bin/semver ./cmd/semver
+RUN go build -buildvcs=false -o /usr/bin/cg ./cmd/callgraph
 
 # Final stage
 FROM registry.access.redhat.com/ubi9:latest
@@ -23,7 +23,7 @@ RUN yum install -y ${INSTALL_PKGS} && \
 EXPOSE 8082
 
 COPY --from=builder /usr/bin/gvs /go/src/github.com/k37y/gvs/bin/gvs
-COPY --from=builder /usr/bin/semver /go/src/github.com/k37y/gvs/bin/semver
+COPY --from=builder /usr/bin/cg /go/src/github.com/k37y/gvs/bin/cg
 COPY --from=builder /go/src/github.com/k37y/gvs/hack/callgraph.sh /go/src/github.com/k37y/gvs/hack/callgraph.sh
 COPY --from=builder /go/src/github.com/k37y/gvs/site/index.html /go/src/github.com/k37y/gvs/site/index.html
 
