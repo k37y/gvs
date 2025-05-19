@@ -358,22 +358,25 @@ func (j Job) isVulnerable(result *Result) *Result {
 }
 
 func fetchGoVulnID(result *Result) string {
-	resp, err := http.Get(vulnsURL + "/index/vulns.json")
+	client := http.Client{Timeout: 10 * time.Second}
+	url := fmt.Sprintf(vulnsURL + "/index/vulns.json")
+	
+	resp, err := client.Get(url)
 	if err != nil {
-		errMsg := fmt.Sprint("Failed to get response from"+vulnsURL+"/index/vulns.json : %v", err)
+		errMsg := fmt.Sprint("Failed to get response from %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		errMsg := fmt.Sprint("Failed to read response body from"+vulnsURL+"/index/vulns.json : %v", err)
+		errMsg := fmt.Sprint("Failed to read response body from %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
 	}
 
 	var vulns []VulnReport
 	if err := json.Unmarshal(body, &vulns); err != nil {
-		errMsg := fmt.Sprint("Failed to marshal response body from"+vulnsURL+"/index/vulns.json to JSON: %v", err)
+		errMsg := fmt.Sprint("Failed to marshal response body from %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
 	}
 
@@ -473,7 +476,7 @@ func fetchAffectedSymbols(result *Result) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		errMsg := fmt.Sprint("Failed to connect"+vulnsURL+"/ID/%s.json %s", resp.Status)
+		errMsg := fmt.Sprint("Failed to connect %s: %s", url, resp.Status)
 		result.Errors = append(result.Errors, errMsg)
 
 	}
@@ -589,7 +592,7 @@ func getFixedVersion(id, pkg string, result *Result) []string {
 	url := fmt.Sprintf(vulnsURL+"/ID/%s.json", id)
 	resp, err := http.Get(url)
 	if err != nil {
-		errMsg := fmt.Sprint("Failed to get response from"+vulnsURL+"/ID/%s.json: %v", err)
+		errMsg := fmt.Sprint("Failed to get response from %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
 
 	}
@@ -597,14 +600,14 @@ func getFixedVersion(id, pkg string, result *Result) []string {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		errMsg := fmt.Sprint("Failed to read response body from"+vulnsURL+"/ID/%s.json: %v", err)
+		errMsg := fmt.Sprint("Failed to read response body from %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
 
 	}
 
 	var detail VulnReport
 	if err := json.Unmarshal(body, &detail); err != nil {
-		errMsg := fmt.Sprint("Failed to unmarshal response body from"+vulnsURL+"/ID/%s.json: %v", err)
+		errMsg := fmt.Sprint("Failed to unmarshal response body from %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
 	}
 
