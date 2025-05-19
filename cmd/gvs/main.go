@@ -25,11 +25,11 @@ func main() {
 		log.Fatalf("Failed to create directory: %v", err)
 	}
 
-	http.Handle("/callgraph/", logFileAccess(http.StripPrefix("/callgraph/", http.FileServer(http.Dir("/tmp/gvs-cache/img")))))
+	http.Handle("/cg/", logFileAccess(http.StripPrefix("/cg/", http.FileServer(http.Dir("/tmp/gvs-cache/img")))))
 	http.Handle("/", http.FileServer(http.Dir("./site")))
 	http.HandleFunc("/scan", scanHandler)
 	http.HandleFunc("/healthz", healthHandler)
-	http.HandleFunc("/cg", cgHandler)
+	http.HandleFunc("/callgraph", callgraphHandler)
 	http.HandleFunc("/status", statusHandler)
 
 	srv := &http.Server{Addr: ":" + port}

@@ -175,7 +175,7 @@ func writeJSONError(w http.ResponseWriter, statusCode int, msg string) {
 	}
 }
 
-func cgHandler(w http.ResponseWriter, r *http.Request) {
+func callgraphHandler(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Repo   string `json:"repo"`
 		Branch string `json:"branch"`
