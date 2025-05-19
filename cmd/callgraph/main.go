@@ -415,7 +415,7 @@ func findMainGoFiles(res *Result) {
 
 	for _, modDir := range modDirs {
 		cmd := "go"
-		args := []string{"list", "-f", "{{.Name}}: {{.Dir}}", "./..."}
+		args := []string{"list", "-f", `{{if eq .Name "main"}}{{.Name}}: {{.Dir}}{{end}}`, "./..."}
 		out, err := runCommand(modDir, cmd, args...)
 		if err != nil {
 			errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), modDir, strings.TrimSpace(string(out)))
@@ -522,17 +522,30 @@ func (r *Result) isSymbolUsed(pkg, dir string, symbols, files []string) string {
 		return "unknown"
 	}
 
+	var wg sync.WaitGroup
+	found := false
+
 	for _, symbol := range symbols {
-		if matchSymbol(out, symbol) {
-			if r.UsedImports == nil {
-				r.UsedImports = make(map[string]UsedImportsDetails)
+		wg.Add(1)
+		go func(sym string) {
+			defer wg.Done()
+			if matchSymbol(out, sym) {
+				r.mu.Lock()
+				if r.UsedImports == nil {
+					r.UsedImports = make(map[string]UsedImportsDetails)
+				}
+				entry := r.UsedImports[pkg]
+				entry.Symbols = append(entry.Symbols, sym)
+				r.UsedImports[pkg] = entry
+				r.mu.Unlock()
+				found = true
 			}
-			entry := r.UsedImports[pkg]
-			entry.Symbols = append(entry.Symbols, symbol)
-			r.UsedImports[pkg] = entry
-		}
+		}(symbol)
 	}
-	if len(r.UsedImports[pkg].Symbols) > 0 {
+
+	wg.Wait()
+
+	if found {
 		return "true"
 	}
 	return "false"
