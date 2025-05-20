@@ -217,6 +217,13 @@ func callgraphHandler(w http.ResponseWriter, r *http.Request) {
 
 		updateStatus(StatusRunning, "", "")
 
+		cacheKey := fmt.Sprintf("%s@%s:%s", repo, branch, cve)
+		if cachedData, err := retrieveCacheFromDisk(cacheKey); err == nil {
+			updateStatus(StatusCompleted, string(cachedData), "")
+			log.Printf("[Task %s] Retrieved callgraph from cache", taskId)
+			return
+		}
+
 		cloneDir, err := os.MkdirTemp("", "cg-"+path.Base(repo)+"-*")
 		if err != nil {
 			updateStatus(StatusFailed, "", fmt.Sprintf("failed to create temp dir: %v", err))
@@ -245,6 +252,10 @@ func callgraphHandler(w http.ResponseWriter, r *http.Request) {
 		elapsed := time.Since(start)
 		log.Printf("[Task %s] cg execution completed - Took %s", taskId, elapsed)
 		updateStatus(StatusCompleted, string(output), "")
+
+		if err := saveCacheToDisk(cacheKey, output); err != nil {
+			log.Printf("[Task %s] Failed to save cache: %v", taskId, err)
+		}
 	}(taskId, req.Repo, req.Branch, req.CVE)
 
 	w.Header().Set("Content-Type", "application/json")
