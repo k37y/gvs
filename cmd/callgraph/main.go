@@ -514,7 +514,7 @@ func (r *Result) isSymbolUsed(pkg, dir string, symbols, files []string) string {
 		symbols = append(symbols, fmt.Sprintf("(*%s).%s", pkg, symbol))
 	}
 	cmd := "callgraph"
-	args := append([]string{"-format=digraph"}, files...)
+	args := append([]string{"-format={{.Caller}} {{.Callee}}"}, files...)
 	out, err := runCommand(dir, cmd, args...)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s\n", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
@@ -552,7 +552,7 @@ func (r *Result) isSymbolUsed(pkg, dir string, symbols, files []string) string {
 }
 
 func matchSymbol(out []byte, symbol string) bool {
-	pattern := regexp.MustCompile(`\s"` + regexp.QuoteMeta(symbol) + `"$`)
+	pattern := regexp.MustCompile(`\s` + regexp.QuoteMeta(symbol) + `$`)
 	scanner := bufio.NewScanner(bytes.NewReader(out))
 	for scanner.Scan() {
 		if pattern.MatchString(scanner.Text()) {
