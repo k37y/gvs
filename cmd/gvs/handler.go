@@ -224,14 +224,15 @@ func callgraphHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		defer os.RemoveAll(cloneDir)
 
-		log.Printf("[Task %s] Cloning repository %s (%s)...", taskId, repo, branch)
+		log.Printf("[Task %s] Cloning repository %s (%s) ...", taskId, repo, branch)
 		if err := gvs.CloneRepo(repo, branch, cloneDir); err != nil {
 			updateStatus(StatusFailed, "", fmt.Sprintf("git clone failed: %v", err))
 			return
 		}
 		log.Printf("[Task %s] Clone successful", taskId)
 
-		log.Printf("[Task %s] Running cg...", taskId)
+		log.Printf("[Task %s] Running cg ...", taskId)
+		start := time.Now()
 		cmd := exec.Command("bin/cg", cve, cloneDir)
 		output, err := cmd.CombinedOutput()
 
@@ -241,7 +242,8 @@ func callgraphHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		log.Printf("[Task %s] cg execution completed", taskId)
+		elapsed := time.Since(start)
+		log.Printf("[Task %s] cg execution completed - Took %s", taskId, elapsed)
 		updateStatus(StatusCompleted, string(output), "")
 	}(taskId, req.Repo, req.Branch, req.CVE)
 
