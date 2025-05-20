@@ -564,7 +564,7 @@ func matchSymbol(out []byte, symbol string) bool {
 
 func getCurrentVersion(pkg string, dir string, result *Result) string {
 	cmd := "go"
-	args := []string{"list", "-mod=mod", "-f", "{{if .Module}}{{.Module.Version}}{{end}}", pkg}
+	args := []string{"list", "-f", "{{if .Module}}{{.Module.Version}}{{end}}", pkg}
 	out, err := runCommand(dir, cmd, args...)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
@@ -645,7 +645,7 @@ func getFixedVersion(id, pkg string, result *Result) []string {
 
 func getModPath(pkg, dir string, result *Result) string {
 	cmd := "go"
-	args := []string{"list", "-mod=mod", "-f", "{{if .Module}}{{.Module.Path}}{{end}}", pkg}
+	args := []string{"list", "-f", "{{if .Module}}{{.Module.Path}}{{end}}", pkg}
 	out, err := runCommand(dir, cmd, args...)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
@@ -657,6 +657,7 @@ func getModPath(pkg, dir string, result *Result) string {
 
 func runCommand(dir string, command string, args ...string) ([]byte, error) {
 	cmd := exec.Command(command, args...)
+	cmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off")
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	return out, err
