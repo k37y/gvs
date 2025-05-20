@@ -1,0 +1,17 @@
+.result-card {
+	display: none;
+	padding: 15px;
+	border-radius: 8px;
+	font-family: monospace;
+	white-space: pre-wrap;
+	word-break: break-word;
+	margin-top: 20px;
+	border-left: 5px solid #bbb;
+	overflow-y: auto;
+}
+
+.alert-success { background-color: #d4edda; border-left-color: #5cb85c; }
+.alert-warning { background-color: #fff3cd; border-left-color: #f0ad4e; color: #856404; }
+.alert-danger  { background-color: #f8d7da; border-left-color: #d9534f; color: #721c24; }
+.highlight-key { color: #b30000; font-weight: bold; }
+.highlight-value { color: #007b00; font-weight: bold; }
