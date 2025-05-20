@@ -1,9 +1,9 @@
-GVS_SOURCES=$(wildcard *.go cmd/gvs/*.go)
-CG_SOURCES=$(wildcard cmd/callgraph/*.go)
-VERSION=$(shell git describe --tags --long --dirty 2>/dev/null)
-IMAGE=quay.io/kevy/gvs:${VERSION}
-IMAGE_NAME=$(basename $(IMAGE))
-PORT=?8082
+GVS_SOURCES = $(wildcard *.go cmd/gvs/*.go)
+CG_SOURCES = $(wildcard cmd/callgraph/*.go)
+VERSION = $(shell git describe --tags --long --dirty 2>/dev/null)
+IMAGE = quay.io/kevy/gvs:${VERSION}
+IMAGE_NAME = $(basename $(IMAGE))
+PORT ?= 8082
 
 .PHONY: run
 

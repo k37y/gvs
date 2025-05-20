@@ -2,6 +2,7 @@
 FROM registry.access.redhat.com/ubi9/go-toolset:1.21 AS builder
 WORKDIR /go/src/github.com/k37y/gvs
 COPY . .
+USER root
 RUN go build -buildvcs=false -o /usr/bin/gvs ./cmd/gvs
 RUN go build -buildvcs=false -o /usr/bin/cg ./cmd/callgraph
 
