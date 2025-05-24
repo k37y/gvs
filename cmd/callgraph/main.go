@@ -56,6 +56,7 @@ type Result struct {
 	Directory       string
 	Errors          []string
 	mu              sync.Mutex
+	Summary         string
 }
 
 type VulnReport struct {
@@ -208,15 +209,28 @@ func main() {
 	if len(mergedImports) > 0 {
 		result.IsVulnerable = "true"
 		result.UsedImports = mergedImports
+		jOutput, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			errMsg := fmt.Sprintf("Failed to marshal result to JSON: %v\n", err)
+			result.Errors = append(result.Errors, errMsg)
+		}
+		generateSummaryWithOllama(string(jOutput), result)
 		jsonOutput, err := json.MarshalIndent(result, "", "  ")
 		if err != nil {
 			errMsg := fmt.Sprintf("Failed to marshal result to JSON: %v\n", err)
 			result.Errors = append(result.Errors, errMsg)
 		} else {
+			generateSummaryWithOllama(string(jsonOutput), result)
 			fmt.Println(string(jsonOutput))
 		}
 	} else {
 		result.UsedImports = nil
+		jOutput, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			errMsg := fmt.Sprintf("Failed to marshal result to JSON: %v\n", err)
+			result.Errors = append(result.Errors, errMsg)
+		}
+		generateSummaryWithOllama(string(jOutput), result)
 		jsonOutput, err := json.MarshalIndent(result, "", "  ")
 		if err != nil {
 			errMsg := fmt.Sprintf("Failed to marshal result to JSON: %v\n", err)
@@ -360,7 +374,7 @@ func (j Job) isVulnerable(result *Result) *Result {
 func fetchGoVulnID(result *Result) string {
 	client := http.Client{Timeout: 10 * time.Second}
 	url := fmt.Sprintf(vulnsURL + "/index/vulns.json")
-	
+
 	resp, err := client.Get(url)
 	if err != nil {
 		errMsg := fmt.Sprint("Failed to get response from %s: %v", url, err)
@@ -741,4 +755,92 @@ func semVersion(v string) string {
 		return "v" + v
 	}
 	return v
+}
+
+func generateSummaryWithOllama(input string, result *Result) {
+	prompt, err := BuildPrompt(result)
+	body := map[string]any{
+		"model":       "llama3.2",
+		"prompt":      prompt,
+		"role":        "You are a senior software engineer specializing in Go security tools.",
+		"system":      "I have a struct named 'Result' that represents the output of a Go-based vulnerability scanner. I want you to summarize its content for reports or user-facing dashboards.",
+		"temperature": 0.3,
+		"max_tokens":  900,
+		"stream":      false,
+	}
+
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		errMsg := fmt.Sprintf("Failed to marshal ollama request: %v\n", err)
+		result.Errors = append(result.Errors, errMsg)
+
+	}
+
+	resp, err := http.Post("http://localhost:11434/api/generate", "application/json", bytes.NewReader(jsonBody))
+	if err != nil {
+		errMsg := fmt.Sprintf("Failed to connect ollama API: %v\n", err)
+		result.Errors = append(result.Errors, errMsg)
+
+	}
+	defer resp.Body.Close()
+
+	var response struct {
+		Response string `json:"response"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		errMsg := fmt.Sprintf("Failed to decode ollama result: %v\n", err)
+		result.Errors = append(result.Errors, errMsg)
+	}
+
+	result.Summary = response.Response
+}
+
+func BuildPrompt(result *Result) (string, error) {
+
+	promptResult := &Result{
+		IsVulnerable: result.IsVulnerable,
+		UsedImports:  result.UsedImports,
+		GoCVE:        result.GoCVE,
+		CVE:          result.CVE,
+		Repository:   result.Repository,
+		Branch:       result.Branch,
+		Errors:       result.Errors,
+	}
+	resultJson, err := json.MarshalIndent(promptResult, "", "  ")
+	if err != nil {
+		return "", err
+	}
+
+	var sb strings.Builder
+
+	sb.WriteString(`You are a senior software engineer specializing in Go security tools.
+
+I have a struct named 'Result' that represents the output of a Go-based vulnerability scanner. I want you to summarize its content for reports or user-facing dashboards.
+
+This struct contains:
+- IsVulnerable: whether the project is affected.
+- UsedImports: import packages and how they are used in codebase.
+- Files: where symbols occur.
+- AffectedImports: vulnerable symbols and fixed versions of the CVE ID.
+- GoCVE: Go vulnerability ID.
+- CVE: General vulnerability ID.
+- Repository/Branch/Directory: context of the scanned code.
+- Errors: scanning issues if any.
+
+Here’s a real example:
+
+`)
+	sb.WriteString("```json\n")
+	sb.Write(resultJson)
+	sb.WriteString("\n```\n\n")
+
+	sb.WriteString(`Please provide a **concise and clear summary** for technical and security teams including:
+- Whether the project is vulnerable and why.
+- Which symbols and imports are involved only if the code is vulnerable.
+- Where in the code they appear.
+- Which version should be used to fix it and how.
+- Any errors or issues to be addressed.`)
+
+	return sb.String(), nil
 }
