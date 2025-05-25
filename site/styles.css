@@ -3,11 +3,20 @@
 	padding: 15px;
 	border-radius: 8px;
 	font-family: monospace;
-	white-space: pre-wrap;
-	word-break: break-word;
-	margin-top: 20px;
 	border-left: 5px solid #bbb;
-	overflow-y: auto;
+	margin-top: 20px;
+	overflow: auto;
+}
+
+.result-card pre {
+	margin: 0;
+	white-space: pre-wrap;
+	word-wrap: break-word;
+	overflow-wrap: break-word;
+}
+
+code {
+	font-family: monospace;
 }
 
 .alert-success { background-color: #d4edda; border-left-color: #5cb85c; }
