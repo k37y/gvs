@@ -874,7 +874,7 @@ func BuildPrompt(result *Result) (string, error) {
 
 	sb.WriteString(`You are a senior software engineer specializing in Go security tools.
 
-I have a JSON that represents the output of a Go-based vulnerability scanner. I want you to summarize its content for report. Use markdown format. Be straight to the point in an elaborative manner.
+I have a JSON that represents the output of a Go-based vulnerability scanner. I want you to summarize its content for report. Reply only with the markdown without triple backticks. Be straight to the point in an elaborative manner.
 
 This JSON contains:
 - IsVulnerable: whether the project is affected.
