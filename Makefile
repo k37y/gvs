@@ -1,7 +1,9 @@
 GVS_SOURCES = $(wildcard *.go cmd/gvs/*.go)
 CG_SOURCES = $(wildcard cmd/callgraph/*.go)
+NAME = gvs
+RUNNING_CONTAINER = $(shell podman ps --format json | jq -r '.[] | select(.Names[] | contains("$(NAME)")) | .Names[]')
 VERSION = $(shell git describe --tags --long --dirty 2>/dev/null)
-IMAGE = quay.io/kevy/gvs:${VERSION}
+IMAGE = quay.io/kevy/${NAME}:${VERSION}
 IMAGE_NAME = $(basename $(IMAGE))
 PORT ?= 8082
 
@@ -28,8 +30,8 @@ image:
 .PHONY: image-run
 
 image-run: image
-	-podman kill ${VERSION} && podman wait ${VERSION}
-	podman run --security-opt label=disable --rm --detach --name ${VERSION} --tty --interactive --publish ${PORT}:8082 ${IMAGE}
+	-podman kill ${RUNNING_CONTAINER} && podman wait ${RUNNING_CONTAINER}
+	podman run --security-opt label=disable --rm --detach --name ${NAME}-${VERSION} --tty --interactive --publish ${PORT}:8082 --volume ${HOME}/.gemini.conf:/root/.gemini.conf ${IMAGE}
 
 .PHONY: image-push
 
