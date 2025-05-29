@@ -25,7 +25,7 @@ $ curl --silent \
        --request POST \
        --header "Content-Type: application/json" \
        --data '{"repo": "https://github.com/openshift/metallb", "branch": "release-4.18", "cve": "CVE-2024-45338"}' \
-       http://10.0.0.10:8082/cg | jq .
+       http://10.0.0.10:8082/callgraph | jq .
 
 $ curl --silent \
        --location \
