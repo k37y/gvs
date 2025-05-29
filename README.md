@@ -16,7 +16,7 @@ $ curl --silent \
        --request "POST" \
        --header "Content-Type: application/json" \
        --data '{"repo": "https://github.com/openshift/metallb", "branch": "release-4.18"}' \
-       http://<URL>:8082/scan | jq .
+       http://10.0.0.10:8082/scan | jq .
 ```
 ### Sample API requests of callgraph path
 ```
@@ -25,18 +25,18 @@ $ curl --silent \
        --request POST \
        --header "Content-Type: application/json" \
        --data '{"repo": "https://github.com/openshift/metallb", "branch": "release-4.18", "cve": "CVE-2024-45338"}' \
-       http://<URL>:8082/cg | jq .
+       http://10.0.0.10:8082/cg | jq .
 
 $ curl --silent \
        --location \
        --request POST \
        --header "Content-Type: application/json" \
        --data '{"taskId":"<task-id>"}' \
-       http://<URL>:8082/status | jq .
+       http://10.0.0.10:8082/status | jq .
 ```
 ### Sample API response of govulncheck path
 ```
-$ curl -X POST "http://10.74.129.37:8088/scan" -H "Content-Type: application/json" -d '{"repo": "https://github.com/openshift/metallb", "branch": "release-4.18", "cve": "CVE-2024-45338"}' | jq
+$ curl -X POST "http://10.0.0.10:8082/scan" -H "Content-Type: application/json" -d '{"repo": "https://github.com/openshift/metallb", "branch": "release-4.18", "cve": "CVE-2024-45338"}' | jq
 [
   {
     "directory": "metallb/e2etest",
@@ -100,7 +100,7 @@ $ curl -X POST "http://10.74.129.37:8088/scan" -H "Content-Type: application/jso
 ```
 ### Sample API response of callgraph path
 ```
-$ curl -X POST "http://10.74.129.37:8088/callgraph" -H "Content-Type: application/json" -d '{"repo": "https://github.com/openshift/metallb", "branch": "release-4.18", "cve": "CVE-2024-45338"}' | jq .
+$ curl -X POST "http://10.0.0.10:8082/callgraph" -H "Content-Type: application/json" -d '{"repo": "https://github.com/openshift/metallb", "branch": "release-4.18", "cve": "CVE-2024-45338"}' | jq .
 {
   "taskId": "1748493013100462517"
 }
