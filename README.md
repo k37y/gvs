@@ -20,6 +20,31 @@ Provide the **repository**, **branch**, and **CVE ID** to identify potential vul
     API_KEY=<your-api-key>
     ```
 * Podman
+## Flowchart
+```mermaid
+flowchart TD
+    A[Start: Input Parameters] --> B[Clone Repository]
+    B --> C[Checkout Branch]
+    C --> D[Find Project Endpoint Files]
+    D --> E[Find Affected Symbols From CVE ID]
+    E --> F[Generate Endpoint-Symbol Combinations]
+    F --> G[Loop: For Each Combination]
+    G --> H[Generate Callgraph Path]
+    H --> I{Is Symbol Used in Endpoint?}
+    I -- Yes --> J[Compare Used vs Fixed Version]
+    J --> K{Used Version < Fixed?}
+    K -- Yes --> L[Mark as Vulnerable]
+    K -- No --> M[Mark as Not Vulnerable]
+    L --> N[Add to Result]
+    M --> N
+    I -- No --> O[Skip Combination]
+    O --> N
+    N --> P{More Combinations?}
+    P -- Yes --> G
+    P -- No --> Q[Generate Summary Using AI]
+    Q --> R[Return Result as JSON]
+    R --> S[End]
+```
 ## Usage
 ### Build and run as a container image
 ```bash
