@@ -1,4 +1,5 @@
-# Golang Vulnerability Scanner (GVS)
+![image](https://github.com/user-attachments/assets/8a352844-d4a7-477d-a9b0-f6f383a67fee)
+
 Analyze your Golang-based repository for vulnerabilities
 ## Prerequisites
 * Gemini API credentials
