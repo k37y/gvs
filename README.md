@@ -1,6 +1,6 @@
 ![image](https://github.com/user-attachments/assets/6cf99b76-6299-4217-8c19-4e49a427cd6d)
 
-Analyze your Golang-based repository for vulnerabilities
+Provide the **repository**, **branch**, and **CVE ID** to identify potential vulnerabilities in the code
 ## Demo
 [![asciicast](https://asciinema.org/a/721319.svg)](https://asciinema.org/a/721319)
 ## Prerequisites
