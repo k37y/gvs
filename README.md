@@ -1,10 +1,15 @@
 # Golang Vulnerability Scanner (GVS)
 Analyze your Golang-based repository for vulnerabilities
+## Prerequisites
+* Gemini API credentials
+  - Create a file named `~/.gemini.conf`
+  - Use the below contents (Use your API key)
+    ```
+    API_URL=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent
+    API_KEY=<your-api-key>
+    ```
+* Podman
 ## Usage
-### Build and run
-```
-$ make
-```
 ### Build and run as a container image
 ```
 $ make image-run
