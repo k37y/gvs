@@ -1,5 +1,5 @@
 GVS_SOURCES = $(wildcard *.go cmd/gvs/*.go)
-CG_SOURCES = $(wildcard cmd/callgraph/*.go)
+CG_SOURCES = $(wildcard cmd/cg/*.go)
 NAME = gvs
 RUNNING_CONTAINER = $(shell podman ps --format json | jq -r '.[] | select(.Names[] | contains("$(NAME)")) | .Names[]')
 VERSION = $(shell git describe --tags --long --dirty 2>/dev/null)
@@ -20,7 +20,7 @@ gvs: $(GVS_SOURCES)
 .PHONY: cg
 
 cg: $(CG_SOURCES)
-	go build -buildvcs=false -ldflags "-X main.version=${VERSION}" -o ./bin/$@ ./cmd/callgraph
+	go build -buildvcs=false -ldflags "-X main.version=${VERSION}" -o ./bin/$@ ./cmd/cg
 
 .PHONY: image
 
