@@ -11,15 +11,6 @@ Provide the **repository**, **branch**, and **CVE ID** to identify potential vul
 
 ## Demo 2
 [![asciicast](https://asciinema.org/a/721319.svg)](https://asciinema.org/a/721319)
-## Prerequisites
-* Gemini API credentials
-  - Create a file named `~/.gemini.conf`
-  - Use the below contents (Use your API key)
-    ```bash
-    API_URL=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent
-    API_KEY=<your-api-key>
-    ```
-* Podman
 ## Flowchart
 ```mermaid
 flowchart TD
@@ -45,6 +36,15 @@ flowchart TD
     Q --> R[Return Result as JSON]
     R --> S[End]
 ```
+## Prerequisites
+* Gemini API credentials
+  - Create a file named `~/.gemini.conf`
+  - Use the below contents (Use your API key)
+    ```bash
+    API_URL=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent
+    API_KEY=<your-api-key>
+    ```
+* Podman
 ## Usage
 ### Build and run as a container image
 ```bash
