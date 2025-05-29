@@ -16,7 +16,7 @@ $ curl --silent \
        --request "POST" \
        --header "Content-Type: application/json" \
        --data '{"repo": "https://github.com/openshift/metallb", "branch": "release-4.18"}' \
-       "http://<URL>:8082/scan" | jq .
+       http://<URL>:8082/scan | jq .
 ```
 ### Sample API requests of callgraph path
 ```
