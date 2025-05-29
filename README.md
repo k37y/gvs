@@ -25,22 +25,6 @@ $ curl --silent \
        --data '{"repo": "https://github.com/openshift/metallb", "branch": "release-4.18"}' \
        http://localhost:8082/scan | jq .
 ```
-### Sample API requests of callgraph path
-```
-$ curl --silent \
-       --location \
-       --request POST \
-       --header "Content-Type: application/json" \
-       --data '{"repo": "https://github.com/openshift/metallb", "branch": "release-4.18", "cve": "CVE-2024-45338"}' \
-       http://localhost:8082/callgraph | jq .
-
-$ curl --silent \
-       --location \
-       --request POST \
-       --header "Content-Type: application/json" \
-       --data '{"taskId":"<task-id>"}' \
-       http://localhost:8082/status | jq .
-```
 ### Sample API response of govulncheck path
 ```
 $ curl --request POST \
@@ -107,6 +91,22 @@ $ curl --request POST \
     "results": null
   }
 ]
+```
+### Sample API requests of callgraph path
+```
+$ curl --silent \
+       --location \
+       --request POST \
+       --header "Content-Type: application/json" \
+       --data '{"repo": "https://github.com/openshift/metallb", "branch": "release-4.18", "cve": "CVE-2024-45338"}' \
+       http://localhost:8082/callgraph | jq .
+
+$ curl --silent \
+       --location \
+       --request POST \
+       --header "Content-Type: application/json" \
+       --data '{"taskId":"<task-id>"}' \
+       http://localhost:8082/status | jq .
 ```
 ### Sample API response of callgraph path
 ```
