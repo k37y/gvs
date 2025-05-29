@@ -12,6 +12,7 @@ Analyze your Golang-based repository for vulnerabilities
 ## Usage
 ### Build and run as a container image
 ```
+$ git clone https://github.com/k37y/gvs && cd gvs
 $ make image-run
 ```
 ### Sample API request of govulncheck path
