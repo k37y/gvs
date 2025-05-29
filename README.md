@@ -1,6 +1,8 @@
 ![image](https://github.com/user-attachments/assets/6cf99b76-6299-4217-8c19-4e49a427cd6d)
 
 Analyze your Golang-based repository for vulnerabilities
+## Demo
+[![asciicast](https://asciinema.org/a/721317.svg)](https://asciinema.org/a/721317)
 ## Prerequisites
 * Gemini API credentials
   - Create a file named `~/.gemini.conf`
