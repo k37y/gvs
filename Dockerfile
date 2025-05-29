@@ -12,7 +12,7 @@ FROM registry.access.redhat.com/ubi9:latest
 ENV GOPATH=/go
 ENV PATH=${PATH}:${GOPATH}/bin
 ENV PATH=${PATH}:/go/src/github.com/k37y/gvs/bin
-ENV INSTALL_PKGS="git golang gpgme-devel jq"
+ENV INSTALL_PKGS="git golang gpgme-devel jq libseccomp-devel"
 
 WORKDIR /go/src/github.com/k37y/gvs
 
