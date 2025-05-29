@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/427bc5c7-bfee-4c0c-9df6-61e992180909" alt="drawing" width="300" style="border-radius: 1120px;">
+</p>
+
 # Golang Vulnerability Scanner (GVS)
 Analyze your Golang-based repository for vulnerabilities
 ## Prerequisites
