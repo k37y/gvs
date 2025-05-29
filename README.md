@@ -9,7 +9,7 @@ flowchart TD
     A[Start: Input Parameters] --> B[Clone Repository]
     B --> C[Checkout Branch]
     C --> D[Find Project Endpoint Files]
-    D --> E[Find Affected Symbols From CVE ID]
+    D --> E[Find Affected Symbols]
     E --> F[Generate Endpoint-Symbol Combinations]
     F --> G[Loop: For Each Combination]
     G --> H[Generate Callgraph Path]
@@ -27,6 +27,12 @@ flowchart TD
     P -- No --> Q[Generate Summary Using AI]
     Q --> R[Return Result as JSON]
     R --> S[End]
+
+    %% Style nodes
+    style A fill:#d1e8ff,stroke:#333,stroke-width:1px
+    style L fill:#ffcccc,stroke:#d33,stroke-width:1px
+    style M fill:#ccffcc,stroke:#393,stroke-width:1px
+    style S fill:#e2e2e2,stroke:#333,stroke-width:1px
 ```
 ## Prerequisites
 * Gemini API credentials
