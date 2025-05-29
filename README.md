@@ -5,7 +5,7 @@ Analyze your Golang-based repository for vulnerabilities
 * Gemini API credentials
   - Create a file named `~/.gemini.conf`
   - Use the below contents (Use your API key)
-    ```
+    ```bash
     API_URL=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent
     API_KEY=<your-api-key>
     ```
