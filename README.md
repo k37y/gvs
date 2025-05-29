@@ -2,7 +2,7 @@
 
 Analyze your Golang-based repository for vulnerabilities
 ## Demo
-[![asciicast](https://asciinema.org/a/721317.svg)](https://asciinema.org/a/721317)
+[![asciicast](https://asciinema.org/a/721319.svg)](https://asciinema.org/a/721319)
 ## Prerequisites
 * Gemini API credentials
   - Create a file named `~/.gemini.conf`
