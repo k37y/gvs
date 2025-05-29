@@ -1,15 +1,7 @@
 ![image](https://github.com/user-attachments/assets/6cf99b76-6299-4217-8c19-4e49a427cd6d)
 
 Provide the **repository**, **branch**, and **CVE ID** to identify potential vulnerabilities in the code
-## Demo 1
-
-<a href="https://youtu.be/Fs63_dcjkU8" target="_blank">
-  <img src="https://github.com/user-attachments/assets/64c37d86-0441-43ec-96ed-4873cd076eaa" 
-       alt="Watch the video" 
-       style="width:100%; max-width:900px; display:block; margin:auto;">
-</a>
-
-## Demo 2
+## Demo
 [![asciicast](https://asciinema.org/a/721319.svg)](https://asciinema.org/a/721319)
 ## Flowchart
 ```mermaid
