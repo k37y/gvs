@@ -9,7 +9,7 @@ flowchart TD
     A[Start: Input Parameters] --> B[Clone Repository]
     B --> C[Checkout Branch]
     C --> D[Find Project Endpoint Files]
-    D --> E[Find Affected Symbols]
+    D --> E[Find Affected Symbols from CVE ID]
     E --> F[Generate Endpoint-Symbol Combinations]
     F --> G[Loop: For Each Combination]
     G --> H[Generate Callgraph Path]
