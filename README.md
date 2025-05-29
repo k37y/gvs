@@ -3,11 +3,11 @@ Analyze your Golang-based repository for vulnerabilities
 ## Usage
 ### Build and run
 ```
-make
+$ make
 ```
 ### Build and run as a container image
 ```
-make image-run
+$ make image-run
 ```
 ### Sample API request of govulncheck path
 ```
