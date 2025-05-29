@@ -517,7 +517,7 @@ func (r *Result) isSymbolUsed(pkg, dir string, symbols, files []string) string {
 		symbols = append(symbols, fmt.Sprintf("(*%s).%s", pkg, symbol))
 	}
 	cmd := "callgraph"
-	args := append([]string{"-format='{{.Caller}} {{.Callee}}'"}, files...)
+	args := append([]string{"-format={{.Caller}} {{.Callee}}"}, files...)
 	out, err := runCommand(dir, cmd, args...)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s\n", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
