@@ -12,18 +12,18 @@ Analyze your Golang-based repository for vulnerabilities
 * Podman
 ## Usage
 ### Build and run as a container image
-```
+```bash
 $ git clone https://github.com/k37y/gvs && cd gvs
 $ make image-run
 ```
 ### Sample API request and response of govulncheck path
-```
+```bash
 $ curl --request POST \
        --header "Content-Type: application/json" \
        --data '{"repo": "https://github.com/openshift/metallb", "branch": "release-4.18", "cve": "CVE-2024-45338"}' \
        http://localhost:8082/scan | jq .
 ```
-```
+```bash
 [
   {
     "directory": "metallb/e2etest",
@@ -86,25 +86,25 @@ $ curl --request POST \
 ]
 ```
 ### Sample API request and response of callgraph path
-```
+```bash
 $ curl --request POST \
        --header "Content-Type: application/json" \
        --data '{"repo": "https://github.com/openshift/metallb", "branch": "release-4.18", "cve": "CVE-2024-45338"}' \
        http://10.0.0.10:8082/callgraph | jq .
 ```
-```
+```bash
 {
   "taskId": "1748493013100462517"
 }
 ```
-```
+```bash
 $ curl --silent \
        --request POST \
        --header "Content-Type: application/json" \
        --data '{"taskId":"1748493013100462517"}' \
        http://localhost:8082/status | jq .output
 ```
-```
+```bash
 {
   "AffectedImports": {
     "golang.org/x/net/html": {
