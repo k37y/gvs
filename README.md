@@ -1,6 +1,6 @@
-![image](https://github.com/user-attachments/assets/6cf99b76-6299-4217-8c19-4e49a427cd6d)
+![gvs](https://github.com/user-attachments/assets/e726bf74-5bc4-48de-8b89-bc57ee6d53e4)
 
-Provide the **repository**, **branch**, and **CVE ID** to identify potential vulnerabilities in the code
+Takes **repository**, **branch**, and **CVE ID** gives vulnerability status
 ## Demo
 [![asciicast](https://asciinema.org/a/721319.svg)](https://asciinema.org/a/721319)
 ## Flowchart
