@@ -6,6 +6,17 @@ VERSION = $(shell git describe --tags --long --dirty 2>/dev/null)
 IMAGE = quay.io/kevy/${NAME}:${VERSION}
 IMAGE_NAME = $(basename $(IMAGE))
 PORT ?= 8082
+GEMINI_CONF := $(HOME)/.gemini.conf
+
+RUN_OPTS := --security-opt label=disable \
+            --rm --detach \
+            --name $(NAME)-$(VERSION) \
+            --tty --interactive \
+            --publish $(PORT):8082
+
+ifdef VOLUME_EXISTS
+    VOLUME_OPT := --volume $(GEMINI_CONF):/root/.gemini.conf
+endif
 
 .PHONY: run
 
@@ -30,8 +41,15 @@ image:
 .PHONY: image-run
 
 image-run: image
+	@if [ -f "$(GEMINI_CONF)" ]; then \
+		echo "Gemini config found. Mounting volume ..."; \
+		VOLUME_OPT="--volume $(GEMINI_CONF):/root/.gemini.conf"; \
+	else \
+		echo "Gemini config not found. Skipping volume mount ..."; \
+		VOLUME_OPT=""; \
+	fi; \
 	-podman kill ${RUNNING_CONTAINER} && podman wait ${RUNNING_CONTAINER}
-	podman run --security-opt label=disable --rm --detach --name ${NAME}-${VERSION} --tty --interactive --publish ${PORT}:8082 --volume ${HOME}/.gemini.conf:/root/.gemini.conf ${IMAGE}
+	podman run $(RUN_OPTS) $$VOLUME_OPT $(IMAGE)
 
 .PHONY: image-push
 
