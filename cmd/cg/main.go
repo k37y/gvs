@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"runtime"
+	"strconv"
 
 	"golang.org/x/mod/semver"
 )
@@ -126,13 +128,26 @@ func main() {
 		os.Exit(1)
 	}
 
+	defaultWorkers := runtime.NumCPU() / 2
+	if defaultWorkers < 1 {
+		defaultWorkers = 1
+	}
+
+	if envVal, ok := os.LookupEnv("WORKER_COUNT"); ok {
+		if n, err := strconv.Atoi(envVal); err == nil && n > 0 {
+			defaultWorkers = n
+		}
+	}
+
+
 	result := InitResult(os.Args[1], os.Args[2])
 
 	jobs := make(chan Job)
 	results := make(chan *Result)
 
 	var wg sync.WaitGroup
-	workerCount := 18
+
+	workerCount := defaultWorkers
 
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)

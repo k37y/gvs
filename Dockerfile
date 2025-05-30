@@ -9,6 +9,9 @@ RUN go build -buildvcs=false -o /usr/bin/cg ./cmd/cg
 # Final stage
 FROM registry.access.redhat.com/ubi9:latest
 
+ARG WORKER_COUNT
+
+ENV WORKER_COUNT=${WORKER_COUNT}
 ENV GOPATH=/go
 ENV PATH=${PATH}:${GOPATH}/bin
 ENV PATH=${PATH}:/go/src/github.com/k37y/gvs/bin
