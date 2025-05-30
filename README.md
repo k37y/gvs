@@ -35,14 +35,16 @@ flowchart TD
     style S fill:#e2e2e2,stroke:#333,stroke-width:1px
 ```
 ## Prerequisites
-* Gemini API credentials
+* Podman
+* Gemini API credentials (optional)
+
+  If Gemini credentials are absent, the `Summary` field in the final JSON result will be null.
   - Create a file named `~/.gemini.conf`
-  - Use the below contents (Use your API key)
+  - Use the below contents
     ```bash
     API_URL=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent
     API_KEY=<your-api-key>
     ```
-* Podman
 ## Usage
 ### Build and run as a container image
 ```bash
