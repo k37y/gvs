@@ -764,15 +764,13 @@ func semVersion(v string) string {
 func generateSummaryWithGemini(result *Result) {
 	apiURL, apiKey, err := loadGeminiConfig()
 	if err != nil {
-		errMsg := fmt.Sprintf("Failed to load Gemini config: %v", err)
-		result.Errors = append(result.Errors, errMsg)
+		result.Summary = fmt.Sprintf("Failed to load Gemini config: %v", err)
 		return
 	}
 
 	prompt, err := BuildPrompt(result)
 	if err != nil {
-		errMsg := fmt.Sprintf("Failed to build prompt: %v", err)
-		result.Errors = append(result.Errors, errMsg)
+		result.Summary = fmt.Sprintf("Failed to build prompt: %v", err)
 		return
 	}
 
@@ -789,21 +787,21 @@ func generateSummaryWithGemini(result *Result) {
 
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
-		result.Errors = append(result.Errors, fmt.Sprintf("Failed to marshal Gemini request: %v", err))
+		result.Summary = fmt.Sprintf("Failed to marshal Gemini request: %v", err)
 		return
 	}
 
 	fullURL := fmt.Sprintf("%s?key=%s", apiURL, apiKey)
 	req, err := http.NewRequest("POST", fullURL, bytes.NewReader(jsonBody))
 	if err != nil {
-		result.Errors = append(result.Errors, fmt.Sprintf("Failed to create Gemini request: %v", err))
+		result.Summary = fmt.Sprintf("Failed to create Gemini request: %v", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		result.Errors = append(result.Errors, fmt.Sprintf("Failed to connect to Gemini API: %v", err))
+		result.Summary = fmt.Sprintf("Failed to connect to Gemini API: %v", err)
 		return
 	}
 	defer resp.Body.Close()
@@ -819,7 +817,7 @@ func generateSummaryWithGemini(result *Result) {
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		result.Errors = append(result.Errors, fmt.Sprintf("Failed to decode Gemini response: %v", err))
+		result.Summary = fmt.Sprintf("Failed to decode Gemini response: %v", err)
 		return
 	}
 
