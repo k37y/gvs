@@ -126,3 +126,7 @@ $ curl --silent \
   "UsedImports": null
 }
 ```
+## Advanced usage
+```
+make image-run PORT=8088 WORKER_COUNT=3
+```
