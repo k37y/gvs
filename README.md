@@ -2,9 +2,9 @@
 
 Takes **repository**, **branch**, and **CVE ID** gives vulnerability status
 ## Demo 1
-[![demo-1](https://asciinema.org/a/721319.svg)](https://asciinema.org/a/721319)
+[!demo-1](https://github.com/user-attachments/assets/3b013256-368f-45b1-8cd3-897173a48814)
 ## Demo 2
-[!demo-2](https://github.com/user-attachments/assets/3b013256-368f-45b1-8cd3-897173a48814)
+[![demo-2](https://asciinema.org/a/721319.svg)](https://asciinema.org/a/721319)
 ## Flowchart
 ```mermaid
 flowchart TD
