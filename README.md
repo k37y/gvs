@@ -57,8 +57,8 @@ $ make image-run
 ```bash
 $ curl --request POST \
        --header "Content-Type: application/json" \
-       --data '{"repo": "https://github.com/openshift/metallb", "branch": "release-4.18", "cve": "CVE-2024-45338"}' \
-       http://10.0.0.10:8082/callgraph | jq .
+       --data '{"repo": "https://github.com/k37y/gvs-example-one", "branch": "main", "cve": "CVE-2024-45338"}' \
+       http://localhost:8082/callgraph | jq .
 ```
 ```bash
 {
@@ -92,40 +92,55 @@ $ curl --silent \
       "Type": "non-stdlib"
     }
   },
-  "Branch": "release-4.18",
+  "Branch": "main",
   "CVE": "CVE-2024-45338",
-  "Directory": "/tmp/cg-metallb-1402140135",
+  "Directory": "/tmp/cg-gvs-example-one-2212737432",
   "Errors": null,
   "Files": {
     ".": [
       [
-        "configmaptocrs/main.go",
-        "configmaptocrs/types.go"
-      ],
-      [
-        "controller/main.go",
-        "controller/service.go"
-      ],
-      [
-        "frr-tools/cp-tool/cp-tool.go"
-      ],
-      [
-        "frr-tools/metrics/exporter.go"
-      ],
-      [
-        "speaker/bgp_controller.go",
-        "speaker/layer2_controller.go",
-        "speaker/main.go"
+        "main.go"
       ]
-    ],
-    "e2etest": null,
-    "website/themes/hugo-theme-relearn": null
+    ]
   },
   "GoCVE": "GO-2024-3333",
-  "IsVulnerable": "false",
-  "Repository": "https://github.com/openshift/metallb",
-  "Summary": "**Vulnerability Assessment Summary**\n\nNo vulnerability was detected in the scanned project (Repository: `https://github.com/openshift/metallb`, Branch: `release-4.18`, Directory: ``, GoCVE: `GO-2024-3333`, CVE: `CVE-2024-45338`). No errors were encountered during the scan.\n",
-  "UsedImports": null
+  "IsVulnerable": "true",
+  "Repository": "https://github.com/k37y/gvs-example-one",
+  "Summary": "## Vulnerability Report Summary
+
+The project is vulnerable to CVE-2024-45338 (GO-2024-3333) due to the use of `golang.org/x/net/html` at version `v0.23.0`.
+
+The following symbols from the `golang.org/x/net/html` package are used in the codebase: `Parse`, `ParseWithOptions`, `htmlIntegrationPoint`, `inBodyIM`, `inTableIM`, and `parseDoctype`.
+
+To remediate this vulnerability, update `golang.org/x/net/html` to version `v0.24.0` or higher. The recommended fix commands are:
+
+
+go mod edit -replace=golang.org/x/net=golang.org/x/net@v0.33.0
+go mod tidy
+go mod vendor
+
+
+No errors or issues were encountered during the scanning process.
+",
+  "UsedImports": {
+    "golang.org/x/net/html": {
+      "CurrentVersion": "v0.23.0",
+      "FixCommands": [
+        "go mod edit -replace=golang.org/x/net=golang.org/x/net@v0.33.0",
+        "go mod tidy",
+        "go mod vendor"
+      ],
+      "ReplaceVersion": "v0.24.0",
+      "Symbols": [
+        "Parse",
+        "ParseWithOptions",
+        "htmlIntegrationPoint",
+        "inBodyIM",
+        "inTableIM",
+        "parseDoctype"
+      ]
+    }
+  }
 }
 ```
 ## Advanced usage
