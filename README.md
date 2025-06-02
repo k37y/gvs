@@ -40,7 +40,7 @@ flowchart TD
 * Podman
 * Gemini API credentials (optional)
 
-  If Gemini credentials are absent, the `Summary` field in the final JSON result will be null.
+  If Gemini credentials are absent, the `Summary` field in the final JSON result will be an error message.
   - Create a file named `~/.gemini.conf`
   - Use the below contents
     ```bash
