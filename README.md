@@ -26,15 +26,39 @@ flowchart TD
     O --> N
     N --> P{More Combinations?}
     P -- Yes --> G
-    P -- No --> Q[Generate Summary Using AI]
+    P -- No --> Q[Generate Summary Using AI - Optional]
     Q --> R[Return Result as JSON]
     R --> S[End]
 
     %% Style nodes
-    style A fill:#d1e8ff,stroke:#333,stroke-width:1px
-    style L fill:#ffcccc,stroke:#d33,stroke-width:1px
-    style M fill:#ccffcc,stroke:#393,stroke-width:1px
-    style S fill:#e2e2e2,stroke:#333,stroke-width:1px
+    style A fill:#458588,stroke:#282828,stroke-width:1px,color:#ebdbb2
+    style B fill:#ebdbb2,stroke:#282828,stroke-width:1px,color:#282828
+    style C fill:#ebdbb2,stroke:#282828,stroke-width:1px,color:#282828
+    style D fill:#ebdbb2,stroke:#282828,stroke-width:1px,color:#282828
+    style E fill:#ebdbb2,stroke:#282828,stroke-width:1px,color:#282828
+    style F fill:#ebdbb2,stroke:#282828,stroke-width:1px,color:#282828
+    style G fill:#689d6a,stroke:#282828,stroke-width:1px,color:#ebdbb2
+    style H fill:#ebdbb2,stroke:#282828,stroke-width:1px,color:#282828
+    style I fill:#d79921,stroke:#282828,stroke-width:1px,color:#282828
+    style J fill:#ebdbb2,stroke:#282828,stroke-width:1px,color:#282828
+    style K fill:#d79921,stroke:#282828,stroke-width:1px,color:#282828
+    style L fill:#fe8019,stroke:#282828,stroke-width:1px,color:#282828
+    style M fill:#98971a,stroke:#282828,stroke-width:1px,color:#ebdbb2
+    style N fill:#689d6a,stroke:#282828,stroke-width:1px,color:#ebdbb2
+    style O fill:#ebdbb2,stroke:#282828,stroke-width:1px,color:#282828
+    style P fill:#d79921,stroke:#282828,stroke-width:1px,color:#282828
+    style Q fill:#b16286,stroke:#282828,stroke-width:1px,color:#ebdbb2
+    style R fill:#ebdbb2,stroke:#282828,stroke-width:1px,color:#282828
+    style S fill:#458588,stroke:#282828,stroke-width:1px,color:#ebdbb2
+    linkStyle 18 fill:none,stroke:#282828,stroke-width:1px,color:#28282,stroke-dasharray:5,5
+
+%%    style white fill:#ebdbb2,stroke:#282828,stroke-width:1px,color:#282828
+%%    style orange fill:#fe8019,stroke:#282828,stroke-width:1px,color:#282828
+%%    style green fill:#98971a,stroke:#282828,stroke-width:1px,color:#ebdbb2
+%%    style blue fill:#458588,stroke:#282828,stroke-width:1px,color:#ebdbb2
+%%    style magenta fill:#b16286,stroke:#282828,stroke-width:1px,color:#ebdbb2
+%%    style cyan fill:#689d6a,stroke:#282828,stroke-width:1px,color:#ebdbb2
+%%    style yellow fill:#d79921,stroke:#282828,stroke-width:1px,color:#282828
 ```
 ## Prerequisites
 * Podman
