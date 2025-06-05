@@ -50,7 +50,7 @@ flowchart TD
     style Q fill:#b16286,stroke:#282828,stroke-width:1px,color:#ebdbb2
     style R fill:#ebdbb2,stroke:#282828,stroke-width:1px,color:#282828
     style S fill:#458588,stroke:#282828,stroke-width:1px,color:#ebdbb2
-    linkStyle 18 fill:none,stroke:#282828,stroke-width:1px,color:#28282,stroke-dasharray:5,5
+    linkStyle 18 stroke-width:1px,stroke-dasharray:5,5
 
 %%    style white fill:#ebdbb2,stroke:#282828,stroke-width:1px,color:#282828
 %%    style orange fill:#fe8019,stroke:#282828,stroke-width:1px,color:#282828
