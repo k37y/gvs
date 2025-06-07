@@ -171,5 +171,5 @@ No errors or issues were encountered during the scanning process.
 * `PORT` specifies the port on which the application will run  
 * `WORKER_COUNT` sets the size of the worker pool used to process endpoint and symbol combinations
 ```
-make image-run PORT=8088 WORKER_COUNT=3
+make image-run PORT=8082 WORKER_COUNT=3
 ```
