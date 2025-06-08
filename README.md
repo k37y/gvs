@@ -1,6 +1,6 @@
 ![gvs](https://github.com/user-attachments/assets/e726bf74-5bc4-48de-8b89-bc57ee6d53e4)
 
-Takes **repository**, **branch**, and **CVE ID** gives vulnerability status
+Find vulnerability status from **Git repository URL**, **Git branch name**, and **CVE ID**
 ## Demo 1
 [!demo-1](https://github.com/user-attachments/assets/3b013256-368f-45b1-8cd3-897173a48814)
 ## Demo 2
