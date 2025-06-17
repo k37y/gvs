@@ -6,8 +6,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -56,31 +54,4 @@ func main() {
 	}
 
 	log.Println("Server exiting")
-}
-
-func retrieveCacheFromDisk(key string) ([]byte, error) {
-	path := filepath.Join(cacheDir, keyToFilename(key))
-	if info, err := os.Stat(path); err == nil && time.Since(info.ModTime()) < 24*time.Hour {
-		return os.ReadFile(path)
-	}
-	return nil, os.ErrNotExist
-}
-
-func saveCacheToDisk(key string, data []byte) error {
-	err := os.MkdirAll(cacheDir, 0755)
-	if err != nil {
-		log.Fatalf("Failed to create directory: %v", err)
-	}
-	return os.WriteFile(filepath.Join(cacheDir, keyToFilename(key)), data, 0644)
-}
-
-func keyToFilename(key string) string {
-	return strings.ReplaceAll(strings.ReplaceAll(key, "/", "_"), ":", "_") + ".json"
-}
-
-func logFileAccess(handler http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("Accessed: %s", r.URL.Path)
-		handler.ServeHTTP(w, r)
-	})
 }
