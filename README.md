@@ -168,8 +168,14 @@ No errors or issues were encountered during the scanning process.
 }
 ```
 ## Advanced usage
+### Build custom container image
 * `PORT` specifies the port on which the application will run  
 * `WORKER_COUNT` sets the size of the worker pool used to process endpoint and symbol combinations
 ```
 make image-run PORT=8082 WORKER_COUNT=3
+```
+### Install as binary
+```
+$ go install github.com/k37y/gvs/cmd/gvs@main
+$ go install github.com/k37y/gvs/cmd/cg@main
 ```
