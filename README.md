@@ -61,7 +61,7 @@ flowchart TD
 %%    style yellow fill:#d79921,stroke:#282828,stroke-width:1px,color:#282828
 ```
 ## Prerequisites
-* Podman
+* `podman`, `git`, `jq` and `make`
 * Gemini API credentials (optional)
 
   If Gemini credentials are absent, the `Summary` field in the final JSON result will be an error message.
