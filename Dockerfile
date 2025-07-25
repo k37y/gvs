@@ -7,7 +7,7 @@ RUN go build -buildvcs=false -o /usr/bin/gvs ./cmd/gvs
 RUN go build -buildvcs=false -o /usr/bin/cg ./cmd/cg
 
 # Final stage
-FROM registry.access.redhat.com/ubi9:latest
+FROM quay.io/fedora/fedora:latest
 
 ARG WORKER_COUNT
 
@@ -15,7 +15,7 @@ ENV WORKER_COUNT=${WORKER_COUNT}
 ENV GOPATH=/go
 ENV PATH=${PATH}:${GOPATH}/bin
 ENV PATH=${PATH}:/go/src/github.com/k37y/gvs/bin
-ENV INSTALL_PKGS="git golang gpgme-devel jq libseccomp-devel"
+ENV INSTALL_PKGS="git golang gpgme-devel jq libseccomp-devel btrfs-progs-devel"
 
 WORKDIR /go/src/github.com/k37y/gvs
 
