@@ -17,6 +17,11 @@ var (
 )
 
 func main() {
+	// Check for GVS_PORT environment variable
+	if envPort := os.Getenv("GVS_PORT"); envPort != "" {
+		port = envPort
+	}
+
 	os.Setenv("GOCACHE", "/tmp/go-build")
 	err := os.MkdirAll("/tmp/go-build", os.ModePerm)
 	if err != nil {
