@@ -9,20 +9,49 @@
 	</head>
 	<body class="container mt-5">
 		<h2 class="text-center">Golang Vulnerability Scanner</h2>
-		<p class="text-center text-muted">Analyze your Golang-based repository for vulnerabilities</p>
+		<p class="text-center text-muted">Analyze your Golang-based repository for vulnerabilities</p>	
+		<div class="card p-3 shadow-sm mb-4">
+			<code class="d-block text-dark rounded p-3 text-start" style="font-size: 0.9em;">
+				Important fields that need to be checked in the JSON output<br><br>
+				<strong>IsVulnerable:</strong> It has three values - true, false, and unknown. If it is true, then the repository is vulnerable to the CVE ID. If it is false, then the repository is not vulnerable to the CVE ID. If it is unknown, then the scanning is failed.<br>
+				<strong>AffectedImports:</strong> It is a list of symbols that are affected by the CVE ID. It contains information about the symbol's name, version, and its library name.<br>
+				<strong>UsedImports:</strong> It is a list of symbols that are used in the repository. If it is empty, then the repository is not vulnerable to the CVE ID.<br>
+				<strong>FixSuccess / FixErrors:</strong> It is the output and error after running the UsedImports.FixCommands in the JSON output from GVS host.<br>
+				<strong>CursorCommand:</strong> It is a command that can be executed in the terminal to open the scanned repository in Cursor IDE. Type 'read gvs-output.txt and get the context' in the Cursor chat to start working on the fix.<br>
+				<strong>Summary:</strong> It is a summary of the JSON output using the Gemini API.<br>
+			</code>
+		</div>
 		<div class="card p-4 shadow-sm">
 			<div class="row mb-3 align-items-end">
 				<div class="col-md-5">
-					<label for="repo" class="form-label">Repository URL</label>
-					<input type="text" id="repo" class="form-control" placeholder="Enter repo URL" value="https://github.com/openshift/metallb">
+					<label for="repo" class="form-label">
+						Repository URL
+						<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted" 
+							  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
+							  data-bs-toggle="tooltip" data-bs-placement="top" 
+							  title="Git repository URL from GitHub, GitLab, Bitbucket, etc. Must be publicly accessible.">?</span>
+					</label>
+					<input type="text" id="repo" class="form-control" placeholder="Enter repo URL" value="https://github.com/openshift/sriov-network-device-plugin">
 				</div>
 				<div class="col-md-3">
-					<label for="branch" class="form-label">Branch</label>
+					<label for="branch" class="form-label">
+						Branch
+						<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted" 
+							  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
+							  data-bs-toggle="tooltip" data-bs-placement="top" 
+							  title="Specific branch to scan (e.g., main, master, develop, release-4.18). The scanner will checkout this branch before analysis.">?</span>
+					</label>
 					<input type="text" id="branch" class="form-control" placeholder="Enter branch name" value="release-4.18">
 				</div>
 				<div class="col-md-2">
-					<label for="cve" class="form-label">CVE ID (optional)</label>
-					<input type="text" id="cve" class="form-control" placeholder="Enter CVE ID">
+					<label for="cve" class="form-label">
+						CVE ID (optional)
+						<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted" 
+							  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
+							  data-bs-toggle="tooltip" data-bs-placement="top" 
+							  title="Specific CVE identifier to check (e.g., CVE-2024-45338). If left empty, scans for all known Go vulnerabilities in the repository.">?</span>
+					</label>
+					<input type="text" id="cve" class="form-control" placeholder="Enter CVE ID" value="CVE-2024-45339">
 				</div>
 				<div class="col-md-2 text-end">
 					<button id="scanButton" class="btn btn-primary w-100" onclick="runScan()">Run Scan</button>
@@ -32,6 +61,15 @@
 		<div id="output" class="result-card"></div>
 		<script src="script.js"></script>
 		<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+		<script>
+			// Initialize Bootstrap tooltips
+			document.addEventListener('DOMContentLoaded', function () {
+				var tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+				var tooltipList = tooltipTriggerList.map(function (tooltipTriggerEl) {
+					return new bootstrap.Tooltip(tooltipTriggerEl);
+				});
+			});
+		</script>
 		<footer class="mt-5 pb-4 text-center text-muted">&copy; 2025 Golang Vulnerability Scanner</footer>
 	</body>
 </html>
