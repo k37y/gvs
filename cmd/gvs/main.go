@@ -19,6 +19,7 @@ var (
 func main() {
 	// Check for GVS_PORT environment variable
 	if envPort := os.Getenv("GVS_PORT"); envPort != "" {
+		log.Printf("Using port from environment variable: %s\n", envPort)
 		port = envPort
 	}
 
