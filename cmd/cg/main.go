@@ -10,13 +10,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
-	"runtime"
-	"strconv"
 
 	"golang.org/x/mod/semver"
 )
@@ -48,7 +48,6 @@ func main() {
 			defaultWorkers = n
 		}
 	}
-
 
 	result := InitResult(os.Args[1], os.Args[2])
 
@@ -134,24 +133,28 @@ func main() {
 	if len(mergedImports) > 0 {
 		result.IsVulnerable = "true"
 		result.UsedImports = mergedImports
-		generateSummaryWithGemini(result)
-		jsonOutput, err := json.MarshalIndent(result, "", "  ")
-		if err != nil {
-			errMsg := fmt.Sprintf("Failed to marshal result to JSON: %v\n", err)
-			result.Errors = append(result.Errors, errMsg)
-		} else {
-			fmt.Println(string(jsonOutput))
-		}
 	} else {
 		result.UsedImports = nil
-		generateSummaryWithGemini(result)
-		jsonOutput, err := json.MarshalIndent(result, "", "  ")
-		if err != nil {
-			errMsg := fmt.Sprintf("Failed to marshal result to JSON: %v\n", err)
-			result.Errors = append(result.Errors, errMsg)
-		} else {
-			fmt.Println(string(jsonOutput))
+	}
+
+	// Run fix commands BEFORE generating output
+	for pkg, details := range result.UsedImports {
+		if len(details.FixCommands) > 0 {
+			runFixCommands(pkg, result.Directory, details.FixCommands, result)
 		}
+	}
+
+	// Read gvs-output.txt to populate fix results
+	readFixResults(result)
+
+	// Generate summary and output JSON
+	generateSummaryWithGemini(result)
+	jsonOutput, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		errMsg := fmt.Sprintf("Failed to marshal result to JSON: %v\n", err)
+		result.Errors = append(result.Errors, errMsg)
+	} else {
+		fmt.Println(string(jsonOutput))
 	}
 }
 
@@ -169,9 +172,12 @@ func uniqueStrings(input []string) []string {
 
 func InitResult(cve, dir string) *Result {
 	r := &Result{
-		CVE:          cve,
-		Directory:    dir,
-		IsVulnerable: "unknown",
+		CVE:           cve,
+		Directory:     dir,
+		IsVulnerable:  "unknown",
+		CursorCommand: fmt.Sprintf("cursor --remote ssh-remote+beaker %s", dir),
+		FixErrors:     []string{},
+		FixSuccess:    []string{},
 	}
 
 	fetchGoVulnID(r)
@@ -581,4 +587,89 @@ func getModPath(pkg, dir string, result *Result) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func runFixCommands(pkg, dir string, fixCommands []string, result *Result) {
+	outputFile := filepath.Join(dir, "gvs-output.txt")
+	f, err := os.OpenFile(outputFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		result.FixErrors = append(result.FixErrors, fmt.Sprintf("Failed to open output file %s: %v", outputFile, err))
+		return
+	}
+	defer f.Close()
+
+	f.WriteString(fmt.Sprintf("Package: %s\n", pkg))
+
+	for _, fullCommand := range fixCommands {
+		parts := strings.Fields(fullCommand)
+		if len(parts) == 0 {
+			continue
+		}
+
+		cmd := parts[0]
+		args := parts[1:]
+
+		f.WriteString(fmt.Sprintf("Command: %s\n", fullCommand))
+
+		out, err := runCommand(dir, cmd, args...)
+		f.WriteString(fmt.Sprintf("Output: %s\n", strings.TrimSpace(string(out))))
+
+		if err != nil {
+			errMsg := fmt.Sprintf("Error: %v\n", err)
+			f.WriteString(errMsg)
+		} else {
+			f.WriteString("Status: Success\n")
+		}
+		f.WriteString("---\n")
+	}
+}
+
+func readFixResults(result *Result) {
+	outputFile := filepath.Join(result.Directory, "gvs-output.txt")
+
+	// Check if the file exists
+	if _, err := os.Stat(outputFile); os.IsNotExist(err) {
+		return
+	}
+
+	content, err := os.ReadFile(outputFile)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("Failed to read gvs-output.txt: %v", err))
+		return
+	}
+
+	if len(content) == 0 {
+		return
+	}
+
+	// Parse the content to extract success and error information
+	lines := strings.Split(string(content), "\n")
+	var currentPackage, currentCommand string
+	var currentOutput []string
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+
+		if strings.HasPrefix(line, "Package: ") {
+			currentPackage = strings.TrimPrefix(line, "Package: ")
+		} else if strings.HasPrefix(line, "Command: ") {
+			currentCommand = strings.TrimPrefix(line, "Command: ")
+		} else if strings.HasPrefix(line, "Output: ") {
+			currentOutput = []string{strings.TrimPrefix(line, "Output: ")}
+		} else if strings.HasPrefix(line, "Status: Success") {
+			result.FixSuccess = append(result.FixSuccess,
+				fmt.Sprintf("\nPackage: %s\nCommand: %s\nOutput:  %s",
+					currentPackage, currentCommand, strings.Join(currentOutput, "\n         ")))
+		} else if strings.HasPrefix(line, "Error: ") {
+			errorMsg := strings.TrimPrefix(line, "Error: ")
+			result.FixErrors = append(result.FixErrors,
+				fmt.Sprintf("\nPackage: %s\nCommand: %s\nError:   %s\nOutput:  %s",
+					currentPackage, currentCommand, errorMsg, strings.Join(currentOutput, "\n         ")))
+		} else if line != "---" && line != "" && !strings.HasPrefix(line, "Package:") &&
+			!strings.HasPrefix(line, "Command:") && !strings.HasPrefix(line, "Output:") &&
+			!strings.HasPrefix(line, "Status:") && !strings.HasPrefix(line, "Error:") {
+			// Continue collecting output lines
+			currentOutput = append(currentOutput, line)
+		}
+	}
 }

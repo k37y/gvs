@@ -37,6 +37,9 @@ func main() {
 
 	srv := &http.Server{Addr: ":" + port}
 
+	// Start directory cleanup routine
+	go startDirectoryCleanup()
+
 	go func() {
 		log.Printf("Starting gvs, version %s\n", version)
 		log.Printf("Server started on port %s\n", port)

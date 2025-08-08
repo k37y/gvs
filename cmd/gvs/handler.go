@@ -74,8 +74,16 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	repoName := filepath.Base(scanRequest.Repo)
-	cloneDir := filepath.Join("/tmp", repoName)
-	_ = os.RemoveAll(cloneDir)
+	cloneDir, err := os.MkdirTemp("", "gvc-"+path.Base(repoName)+"-*")
+	if err != nil {
+		log.Printf("failed to create temp dir: %v", err)
+		response, _ := json.Marshal(gvs.ScanResponse{Success: false, ExitCode: 1, Error: err.Error()})
+		w.WriteHeader(http.StatusInternalServerError)
+		if _, err := w.Write(response); err != nil {
+			log.Printf("failed to write response: %v", err)
+		}
+		return
+	}
 
 	err = gvs.CloneRepo(scanRequest.Repo, scanRequest.Branch, cloneDir)
 	if err != nil {
@@ -229,7 +237,6 @@ func callgraphHandler(w http.ResponseWriter, r *http.Request) {
 			updateStatus(StatusFailed, "", fmt.Sprintf("failed to create temp dir: %v", err))
 			return
 		}
-		defer os.RemoveAll(cloneDir)
 
 		log.Printf("[Task %s] Cloning repository %s (%s) ...", taskId, repo, branch)
 		if err := gvs.CloneRepo(repo, branch, cloneDir); err != nil {

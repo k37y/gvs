@@ -36,7 +36,10 @@ type Result struct {
 	Repository      string
 	Branch          string
 	Directory       string
-	Errors          []string
+	CursorCommand   string
+	Errors          []string `json:"Errors"`
+	FixErrors       []string `json:"FixErrors"`
+	FixSuccess      []string `json:"FixSuccess"`
 	mu              sync.Mutex
 	Summary         string
 }
