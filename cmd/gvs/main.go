@@ -17,6 +17,12 @@ var (
 )
 
 func main() {
+	// Check for GVS_PORT environment variable
+	if envPort := os.Getenv("GVS_PORT"); envPort != "" {
+		log.Printf("Using port from environment variable: %s\n", envPort)
+		port = envPort
+	}
+
 	os.Setenv("GOCACHE", "/tmp/go-build")
 	err := os.MkdirAll("/tmp/go-build", os.ModePerm)
 	if err != nil {
@@ -31,6 +37,9 @@ func main() {
 	http.HandleFunc("/status", statusHandler)
 
 	srv := &http.Server{Addr: ":" + port}
+
+	// Start directory cleanup routine
+	go startDirectoryCleanup()
 
 	go func() {
 		log.Printf("Starting gvs, version %s\n", version)
