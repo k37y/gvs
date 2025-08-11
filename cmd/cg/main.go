@@ -326,20 +326,20 @@ func fetchGoVulnID(result *Result) string {
 
 	resp, err := client.Get(url)
 	if err != nil {
-		errMsg := fmt.Sprint("Failed to get response from %s: %v", url, err)
+		errMsg := fmt.Sprintf("Failed to get response from %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		errMsg := fmt.Sprint("Failed to read response body from %s: %v", url, err)
+		errMsg := fmt.Sprintf("Failed to read response body from %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
 	}
 
 	var vulns []VulnReport
 	if err := json.Unmarshal(body, &vulns); err != nil {
-		errMsg := fmt.Sprint("Failed to marshal response body from %s: %v", url, err)
+		errMsg := fmt.Sprintf("Failed to marshal response body from %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
 	}
 
@@ -432,14 +432,14 @@ func fetchAffectedSymbols(result *Result) {
 
 	resp, err := client.Get(url)
 	if err != nil {
-		errMsg := fmt.Sprint("Failed HTTP request to %s: %v", url, err)
+		errMsg := fmt.Sprintf("Failed HTTP request to %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
 
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		errMsg := fmt.Sprint("Failed to connect %s: %s", url, resp.Status)
+		errMsg := fmt.Sprintf("Failed to connect %s: %s", url, resp.Status)
 		result.Errors = append(result.Errors, errMsg)
 
 	}
@@ -447,7 +447,7 @@ func fetchAffectedSymbols(result *Result) {
 	var detail VulnReport
 
 	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
-		errMsg := fmt.Sprint("Failed to parse JSON: %v", err)
+		errMsg := fmt.Sprintf("Failed to parse JSON: %v", err)
 		result.Errors = append(result.Errors, errMsg)
 
 	}
@@ -568,7 +568,7 @@ func getFixedVersion(id, pkg string, result *Result) []string {
 	url := fmt.Sprintf(vulnsURL+"/ID/%s.json", id)
 	resp, err := http.Get(url)
 	if err != nil {
-		errMsg := fmt.Sprint("Failed to get response from %s: %v", url, err)
+		errMsg := fmt.Sprintf("Failed to get response from %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
 
 	}
@@ -576,14 +576,14 @@ func getFixedVersion(id, pkg string, result *Result) []string {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		errMsg := fmt.Sprint("Failed to read response body from %s: %v", url, err)
+		errMsg := fmt.Sprintf("Failed to read response body from %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
 
 	}
 
 	var detail VulnReport
 	if err := json.Unmarshal(body, &detail); err != nil {
-		errMsg := fmt.Sprint("Failed to unmarshal response body from %s: %v", url, err)
+		errMsg := fmt.Sprintf("Failed to unmarshal response body from %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
 	}
 
