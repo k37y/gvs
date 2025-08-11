@@ -56,6 +56,7 @@ function runScan() {
 	const repo = document.getElementById("repo").value.trim();
 	const branch = document.getElementById("branch").value.trim();
 	const cve = document.getElementById("cve").value.trim();
+	const runFix = document.getElementById("runFix").value === "true";
 	const outputDiv = document.getElementById("output");
 	const scanButton = document.getElementById("scanButton");
 
@@ -76,7 +77,7 @@ function runScan() {
 			headers: {
 				"Content-Type": "application/json"
 			},
-			body: JSON.stringify({ repo, branch, cve })
+			body: JSON.stringify({ repo, branch, cve, runFix: runFix })
 		})
 			.then(response => response.json())
 			.then(data => {

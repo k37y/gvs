@@ -188,6 +188,7 @@ func callgraphHandler(w http.ResponseWriter, r *http.Request) {
 		Repo   string `json:"repo"`
 		Branch string `json:"branch"`
 		CVE    string `json:"cve"`
+		RunFix bool   `json:"runFix"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -210,7 +211,7 @@ func callgraphHandler(w http.ResponseWriter, r *http.Request) {
 	taskStore[taskId] = &TaskResult{Status: StatusPending}
 	taskMutex.Unlock()
 
-	go func(taskId, repo, branch, cve string) {
+	go func(taskId, repo, branch, cve string, runFix bool) {
 		defer func() {
 			requestMutex.Lock()
 			inProgress = false
@@ -225,7 +226,7 @@ func callgraphHandler(w http.ResponseWriter, r *http.Request) {
 
 		updateStatus(StatusRunning, "", "")
 
-		cacheKey := fmt.Sprintf("%s@%s:%s", repo, branch, cve)
+		cacheKey := fmt.Sprintf("%s@%s:%s:runFix=%t", repo, branch, cve, runFix)
 		if cachedData, err := retrieveCacheFromDisk(cacheKey); err == nil {
 			updateStatus(StatusCompleted, string(cachedData), "")
 			log.Printf("[Task %s] Retrieved callgraph from cache", taskId)
@@ -247,7 +248,12 @@ func callgraphHandler(w http.ResponseWriter, r *http.Request) {
 
 		log.Printf("[Task %s] Running cg ...", taskId)
 		start := time.Now()
-		cmd := exec.Command("bin/cg", cve, cloneDir)
+		var cmd *exec.Cmd
+		if runFix {
+			cmd = exec.Command("bin/cg", "-runfix", cve, cloneDir)
+		} else {
+			cmd = exec.Command("bin/cg", cve, cloneDir)
+		}
 		output, err := cmd.CombinedOutput()
 
 		if err != nil {
@@ -263,7 +269,7 @@ func callgraphHandler(w http.ResponseWriter, r *http.Request) {
 		if err := saveCacheToDisk(cacheKey, output); err != nil {
 			log.Printf("[Task %s] Failed to save cache: %v", taskId, err)
 		}
-	}(taskId, req.Repo, req.Branch, req.CVE)
+	}(taskId, req.Repo, req.Branch, req.CVE, req.RunFix)
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]string{"taskId": taskId}); err != nil {
