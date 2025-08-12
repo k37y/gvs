@@ -27,14 +27,30 @@ func main() {
 		os.Exit(1)
 	}
 
-	if len(os.Args) < 3 {
-		fmt.Printf("Usage: %s <CVE ID> <directory>\n", os.Args[0])
+	var runFix bool
+	var cveID, directory string
+
+	// Parse command line arguments
+	args := os.Args[1:]
+
+	for _, arg := range args {
+		if arg == "-runfix" {
+			runFix = true
+		} else if cveID == "" {
+			cveID = arg
+		} else if directory == "" {
+			directory = arg
+		}
+	}
+
+	if cveID == "" || directory == "" {
+		fmt.Printf("Usage: %s [-runfix] <CVE ID> <directory>\n", os.Args[0])
 		os.Exit(1)
 	}
 
-	if info, err := os.Stat(os.Args[2]); err != nil || !info.IsDir() {
-		fmt.Printf("Invalid directory: %s\n", os.Args[2])
-		fmt.Printf("Usage: %s <CVE ID> <directory>\n", os.Args[0])
+	if info, err := os.Stat(directory); err != nil || !info.IsDir() {
+		fmt.Printf("Invalid directory: %s\n", directory)
+		fmt.Printf("Usage: %s [-runfix] <CVE ID> <directory>\n", os.Args[0])
 		os.Exit(1)
 	}
 
@@ -49,7 +65,7 @@ func main() {
 		}
 	}
 
-	result := InitResult(os.Args[1], os.Args[2])
+	result := InitResult(cveID, directory, runFix)
 
 	jobs := make(chan Job)
 	results := make(chan *Result)
@@ -137,15 +153,19 @@ func main() {
 		result.UsedImports = nil
 	}
 
-	// Run fix commands BEFORE generating output
-	for pkg, details := range result.UsedImports {
-		if len(details.FixCommands) > 0 {
-			runFixCommands(pkg, result.Directory, details.FixCommands, result)
+	// Run fix commands BEFORE generating output (only if runFix is true)
+	if runFix {
+		for pkg, details := range result.UsedImports {
+			if len(details.FixCommands) > 0 {
+				runFixCommands(pkg, result.Directory, details.FixCommands, result)
+			}
 		}
 	}
 
-	// Read gvs-output.txt to populate fix results
-	readFixResults(result)
+	// Read gvs-output.txt to populate fix results (only if fixes were run)
+	if runFix {
+		readFixResults(result)
+	}
 
 	// Generate summary and output JSON
 	generateSummaryWithGemini(result)
@@ -170,14 +190,23 @@ func uniqueStrings(input []string) []string {
 	return result
 }
 
-func InitResult(cve, dir string) *Result {
+func InitResult(cve, dir string, runFix bool) *Result {
 	r := &Result{
-		CVE:           cve,
-		Directory:     dir,
-		IsVulnerable:  "unknown",
-		CursorCommand: fmt.Sprintf("cursor --remote ssh-remote+beaker %s", dir),
-		FixErrors:     []string{},
-		FixSuccess:    []string{},
+		CVE:          cve,
+		Directory:    dir,
+		IsVulnerable: "unknown",
+	}
+
+	// Only initialize fix-related fields if runFix is true
+	// When runFix is false, these fields remain as nil pointers
+	// and will be omitted from JSON due to the omitempty tags
+	if runFix {
+		cursorCmd := fmt.Sprintf("cursor --remote ssh-remote+gvs-host %s", dir)
+		r.CursorCommand = &cursorCmd
+		fixErrors := []string{}
+		fixSuccess := []string{}
+		r.FixErrors = &fixErrors
+		r.FixSuccess = &fixSuccess
 	}
 
 	fetchGoVulnID(r)
@@ -297,20 +326,20 @@ func fetchGoVulnID(result *Result) string {
 
 	resp, err := client.Get(url)
 	if err != nil {
-		errMsg := fmt.Sprint("Failed to get response from %s: %v", url, err)
+		errMsg := fmt.Sprintf("Failed to get response from %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		errMsg := fmt.Sprint("Failed to read response body from %s: %v", url, err)
+		errMsg := fmt.Sprintf("Failed to read response body from %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
 	}
 
 	var vulns []VulnReport
 	if err := json.Unmarshal(body, &vulns); err != nil {
-		errMsg := fmt.Sprint("Failed to marshal response body from %s: %v", url, err)
+		errMsg := fmt.Sprintf("Failed to marshal response body from %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
 	}
 
@@ -403,14 +432,14 @@ func fetchAffectedSymbols(result *Result) {
 
 	resp, err := client.Get(url)
 	if err != nil {
-		errMsg := fmt.Sprint("Failed HTTP request to %s: %v", url, err)
+		errMsg := fmt.Sprintf("Failed HTTP request to %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
 
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		errMsg := fmt.Sprint("Failed to connect %s: %s", url, resp.Status)
+		errMsg := fmt.Sprintf("Failed to connect %s: %s", url, resp.Status)
 		result.Errors = append(result.Errors, errMsg)
 
 	}
@@ -418,7 +447,7 @@ func fetchAffectedSymbols(result *Result) {
 	var detail VulnReport
 
 	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
-		errMsg := fmt.Sprint("Failed to parse JSON: %v", err)
+		errMsg := fmt.Sprintf("Failed to parse JSON: %v", err)
 		result.Errors = append(result.Errors, errMsg)
 
 	}
@@ -539,7 +568,7 @@ func getFixedVersion(id, pkg string, result *Result) []string {
 	url := fmt.Sprintf(vulnsURL+"/ID/%s.json", id)
 	resp, err := http.Get(url)
 	if err != nil {
-		errMsg := fmt.Sprint("Failed to get response from %s: %v", url, err)
+		errMsg := fmt.Sprintf("Failed to get response from %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
 
 	}
@@ -547,14 +576,14 @@ func getFixedVersion(id, pkg string, result *Result) []string {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		errMsg := fmt.Sprint("Failed to read response body from %s: %v", url, err)
+		errMsg := fmt.Sprintf("Failed to read response body from %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
 
 	}
 
 	var detail VulnReport
 	if err := json.Unmarshal(body, &detail); err != nil {
-		errMsg := fmt.Sprint("Failed to unmarshal response body from %s: %v", url, err)
+		errMsg := fmt.Sprintf("Failed to unmarshal response body from %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
 	}
 
@@ -593,7 +622,9 @@ func runFixCommands(pkg, dir string, fixCommands []string, result *Result) {
 	outputFile := filepath.Join(dir, "gvs-output.txt")
 	f, err := os.OpenFile(outputFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
-		result.FixErrors = append(result.FixErrors, fmt.Sprintf("Failed to open output file %s: %v", outputFile, err))
+		if result.FixErrors != nil {
+			*result.FixErrors = append(*result.FixErrors, fmt.Sprintf("Failed to open output file %s: %v", outputFile, err))
+		}
 		return
 	}
 	defer f.Close()
@@ -657,14 +688,18 @@ func readFixResults(result *Result) {
 		} else if strings.HasPrefix(line, "Output: ") {
 			currentOutput = []string{strings.TrimPrefix(line, "Output: ")}
 		} else if strings.HasPrefix(line, "Status: Success") {
-			result.FixSuccess = append(result.FixSuccess,
-				fmt.Sprintf("\nPackage: %s\nCommand: %s\nOutput:  %s",
-					currentPackage, currentCommand, strings.Join(currentOutput, "\n         ")))
+			if result.FixSuccess != nil {
+				*result.FixSuccess = append(*result.FixSuccess,
+					fmt.Sprintf("\nPackage: %s\nCommand: %s\nOutput:  %s",
+						currentPackage, currentCommand, strings.Join(currentOutput, "\n         ")))
+			}
 		} else if strings.HasPrefix(line, "Error: ") {
 			errorMsg := strings.TrimPrefix(line, "Error: ")
-			result.FixErrors = append(result.FixErrors,
-				fmt.Sprintf("\nPackage: %s\nCommand: %s\nError:   %s\nOutput:  %s",
-					currentPackage, currentCommand, errorMsg, strings.Join(currentOutput, "\n         ")))
+			if result.FixErrors != nil {
+				*result.FixErrors = append(*result.FixErrors,
+					fmt.Sprintf("\nPackage: %s\nCommand: %s\nError:   %s\nOutput:  %s",
+						currentPackage, currentCommand, errorMsg, strings.Join(currentOutput, "\n         ")))
+			}
 		} else if line != "---" && line != "" && !strings.HasPrefix(line, "Package:") &&
 			!strings.HasPrefix(line, "Command:") && !strings.HasPrefix(line, "Output:") &&
 			!strings.HasPrefix(line, "Status:") && !strings.HasPrefix(line, "Error:") {

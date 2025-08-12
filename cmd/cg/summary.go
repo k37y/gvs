@@ -80,45 +80,6 @@ func generateSummaryWithGemini(result *Result) {
 	}
 }
 
-func generateSummaryWithOllama(input string, result *Result) {
-	prompt, err := BuildPrompt(result)
-	body := map[string]any{
-		"model":       "llama3.2",
-		"prompt":      prompt,
-		"role":        "You are a senior software engineer specializing in Go security tools.",
-		"system":      "You will be given a JSON output from a Go-based vulnerability scanner. Analyze and summarize the key findings clearly and concisely for inclusion in a security report.",
-		"temperature": 0.9,
-		"max_tokens":  900,
-		"stream":      false,
-	}
-
-	jsonBody, err := json.Marshal(body)
-	if err != nil {
-		errMsg := fmt.Sprintf("Failed to marshal ollama request: %v\n", err)
-		result.Errors = append(result.Errors, errMsg)
-
-	}
-
-	resp, err := http.Post("http://localhost:11434/api/generate", "application/json", bytes.NewReader(jsonBody))
-	if err != nil {
-		errMsg := fmt.Sprintf("Failed to connect ollama API: %v\n", err)
-		result.Errors = append(result.Errors, errMsg)
-
-	}
-	defer resp.Body.Close()
-
-	var response struct {
-		Response string `json:"response"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		errMsg := fmt.Sprintf("Failed to decode ollama result: %v\n", err)
-		result.Errors = append(result.Errors, errMsg)
-	}
-
-	result.Summary = response.Response
-}
-
 func BuildPrompt(result *Result) (string, error) {
 
 	promptResult := &Result{
