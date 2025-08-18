@@ -44,7 +44,7 @@ func CloneRepo(repoURL, branch, cloneDir string) error {
 		return fmt.Errorf("repository is not publicly accessible: %s", checkStderr.String())
 	}
 
-	cmd := exec.Command("git", "clone", "--branch", branch, "--single-branch", repoURL, cloneDir)
+	cmd := exec.Command("git", "clone", "--depth", "1", "--branch", branch, "--single-branch", repoURL, cloneDir)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
