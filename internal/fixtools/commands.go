@@ -1,6 +1,7 @@
 package fixtools
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,28 +29,34 @@ func RunFixCommands(pkg, dir string, fixCommands []string, result *Result) {
 	}
 	defer f.Close()
 
-	prompt := `Prompt:
-Assist as a Golang security expert to fix CVE vulnerabilities in a Golang repository.
+	prompt := `Context / Background:
+- Collected the command output and provided here [1].
+- Scanned the repository and generated the vulnerability status JSON output [2].
+- Executed the fixCommand if any present in the JSON output [2].
+- If the fixCommand is not present, then no action is needed.
 
-Context:
-	1.	The following commands are run in sequence:
-    	•	go get
-    	•	go mod tidy
-    	•	go mod vendor
-	3.	The command output is captured in the 'Command output:' section. It is provided to you for analysis.
-	4.	If the commands succeed, make sure that the package bump version is appropriate for the codebase.
-	5.	If the commands fail, need next step action plan with reasoning.
-	6.	Be careful not to bump the Go version when bumping package versions.
-	7.	The job is to:
-    	•	Analyze 'Command output' section and check if it is appropriate.
-    	•	Suggest the exact next action plan if any.
-    	•	If there are multiple options, list them in priority order.
-    	•	Keep the plan concise, actionable, and specific to Go modules.
+Goal / Objective:
+- Fix the vulnerability of the repository.
 
-Instruction:
-Given the content of gvs-output.txt, provide a step-by-step action plan for resolving issues. If no issues are found, respond with "No further action needed."
+Scope / Boundaries:
+- Keep the Go version same as the original repository.
+- Make minimal changes to the repository while fixing the vulnerability.
 
-Command output:
+Format of Output:
+- What was done.
+- What is next.
+- What is the status of vulnerability.
+
+Tone & Style:
+- Clear and concise.
+
+Constraints / Requirements:
+Keep the response under 250 words.
+
+Special Instructions:
+- Check the go.mod file and confirm if the package is indirect dependency and compare fix version and current version to see if the change is major.
+
+[1]
 `
 
 	f.WriteString(prompt)
@@ -83,6 +90,19 @@ Command output:
 			f.WriteString(errMsg)
 		} else {
 			f.WriteString("Status: Success\n")
+		}
+		f.WriteString("---\n")
+	}
+
+	// Add CVE Assessment section with Result{} JSON after all fix commands
+	if result != nil {
+		f.WriteString("\n[2]\n")
+		jsonData, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			f.WriteString(fmt.Sprintf("Error marshaling result to JSON: %v\n", err))
+		} else {
+			f.WriteString(string(jsonData))
+			f.WriteString("\n")
 		}
 		f.WriteString("---\n")
 	}

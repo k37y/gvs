@@ -158,11 +158,21 @@ func main() {
 	// Run fix commands BEFORE generating output (only if runFix is true)
 	if runFix {
 		// Convert to fixtools.Result for shared function compatibility
+		// Include all CVE assessment data for complete output
 		fixResult := &fixtools.Result{
-			Directory:  result.Directory,
-			FixErrors:  result.FixErrors,
-			FixSuccess: result.FixSuccess,
-			Errors:     result.Errors,
+			IsVulnerable:  result.IsVulnerable,
+			UsedImports:   convertUsedImports(result.UsedImports),
+			Files:         result.Files,
+			GoCVE:         result.GoCVE,
+			CVE:           result.CVE,
+			Repository:    result.Repository,
+			Branch:        result.Branch,
+			Directory:     result.Directory,
+			CursorCommand: result.CursorCommand,
+			Errors:        result.Errors,
+			FixErrors:     result.FixErrors,
+			FixSuccess:    result.FixSuccess,
+			Summary:       result.Summary,
 		}
 
 		for pkg, details := range result.UsedImports {
@@ -189,6 +199,24 @@ func main() {
 	} else {
 		fmt.Println(string(jsonOutput))
 	}
+}
+
+// convertUsedImports converts from cmd/cg UsedImportsDetails to fixtools UsedImportsDetails
+func convertUsedImports(input map[string]UsedImportsDetails) map[string]fixtools.UsedImportsDetails {
+	if input == nil {
+		return nil
+	}
+
+	result := make(map[string]fixtools.UsedImportsDetails)
+	for key, details := range input {
+		result[key] = fixtools.UsedImportsDetails{
+			Symbols:        details.Symbols,
+			CurrentVersion: details.CurrentVersion,
+			ReplaceVersion: details.ReplaceVersion,
+			FixCommands:    details.FixCommands,
+		}
+	}
+	return result
 }
 
 func uniqueStrings(input []string) []string {
