@@ -233,6 +233,26 @@ func callgraphHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// If runFix=true and no direct cache, check for runFix=false cache
+		// We can reuse the cached directory and execute fix commands from the cached data
+		if runFix {
+			fallbackCacheKey := fmt.Sprintf("%s@%s:%s:runFix=false", repo, branch, cve)
+			if fallbackCachedData, err := retrieveCacheFromDisk(fallbackCacheKey); err == nil {
+				// Parse the cached data, execute fix commands, and create runFix=true response
+				if optimizedOutput, err := convertCacheForRunFix(fallbackCachedData); err == nil {
+					updateStatus(StatusCompleted, string(optimizedOutput), "")
+					log.Printf("[Task %s] Retrieved and executed fixes using cached directory from runFix=false cache", taskId)
+					// Save the converted output to runFix=true cache for future use
+					if err := saveCacheToDisk(cacheKey, optimizedOutput); err != nil {
+						log.Printf("[Task %s] Failed to save converted cache: %v", taskId, err)
+					}
+					return
+				} else {
+					log.Printf("[Task %s] Failed to convert fallback cache: %v", taskId, err)
+				}
+			}
+		}
+
 		cloneDir, err := os.MkdirTemp("", "cg-"+path.Base(repo)+"-*")
 		if err != nil {
 			updateStatus(StatusFailed, "", fmt.Sprintf("failed to create temp dir: %v", err))

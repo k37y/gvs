@@ -35,7 +35,7 @@ type Result struct {
 	CVE             string
 	Repository      string
 	Branch          string
-	Directory       string    `json:"-"`
+	Directory       string
 	CursorCommand   *string   `json:"CursorCommand,omitempty"`
 	Errors          []string  `json:"Errors"`
 	FixErrors       *[]string `json:"FixErrors,omitempty"`
