@@ -1,5 +1,26 @@
 let scanInProgress = false;
 
+// Add event listener to CVE ID field to automatically set Run Fix to "No" and disable when empty
+document.addEventListener('DOMContentLoaded', function() {
+	const cveInput = document.getElementById('cve');
+	const runFixSelect = document.getElementById('runFix');
+	
+	function updateRunFixState() {
+		if (cveInput.value.trim() === '') {
+			runFixSelect.value = 'false';
+			runFixSelect.disabled = true;
+		} else {
+			runFixSelect.disabled = false;
+		}
+	}
+	
+	// Initialize Run Fix state on page load
+	updateRunFixState();
+	
+	// Update Run Fix state whenever CVE input changes
+	cveInput.addEventListener('input', updateRunFixState);
+});
+
 const sustainingQuestions = [
 	"If we fix a bug in a legacy system and no one merges it, did we really fix it?",
 	"How old does code have to be before it qualifies for retirement benefits?",
@@ -56,7 +77,8 @@ function runScan() {
 	const repo = document.getElementById("repo").value.trim();
 	const branch = document.getElementById("branch").value.trim();
 	const cve = document.getElementById("cve").value.trim();
-	const runFix = document.getElementById("runFix").value === "true";
+	// Automatically set runFix to false if CVE ID is empty
+	const runFix = cve ? document.getElementById("runFix").value === "true" : false;
 	const outputDiv = document.getElementById("output");
 	const scanButton = document.getElementById("scanButton");
 
