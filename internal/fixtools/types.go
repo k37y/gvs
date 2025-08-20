@@ -1,7 +1,5 @@
 package fixtools
 
-import "sync"
-
 type UsedImportsDetails struct {
 	Symbols        []string `json:"Symbols,omitempty"`
 	CurrentVersion string   `json:"CurrentVersion,omitempty"`
@@ -22,6 +20,5 @@ type Result struct {
 	Errors        []string  `json:"Errors"`
 	FixErrors     *[]string `json:"FixErrors,omitempty"`
 	FixSuccess    *[]string `json:"FixSuccess,omitempty"`
-	mu            sync.Mutex
 	Summary       string
 }

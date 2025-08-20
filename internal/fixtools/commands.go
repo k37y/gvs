@@ -41,6 +41,7 @@ Goal / Objective:
 Scope / Boundaries:
 - Keep the Go version same as the original repository.
 - Make minimal changes to the repository while fixing the vulnerability.
+- Check the go.mod file and confirm if the package is indirect dependency. If yes, compare the fix version and current version to see if the change is major.
 
 Format of Output:
 - What was done.
