@@ -233,21 +233,44 @@ func callgraphHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// If runFix=true and no direct cache, check for runFix=false cache
+		// We can reuse the cached directory and execute fix commands from the cached data
+		if runFix {
+			fallbackCacheKey := fmt.Sprintf("%s@%s:%s:runFix=false", repo, branch, cve)
+			if fallbackCachedData, err := retrieveCacheFromDisk(fallbackCacheKey); err == nil {
+				// Parse the cached data, execute fix commands, and create runFix=true response
+				start := time.Now()
+				log.Printf("[Task %s] Converting runFix=false cache to runFix=true cache and executing fixes ...", taskId)
+				if optimizedOutput, err := convertCacheForRunFix(fallbackCachedData); err == nil {
+					updateStatus(StatusCompleted, string(optimizedOutput), "")
+					log.Printf("[Task %s] Retrieved and executed fixes using runFix=false cache - Took %s", taskId, time.Since(start))
+					// Save the converted output to runFix=true cache for future use
+					if err := saveCacheToDisk(cacheKey, optimizedOutput); err != nil {
+						log.Printf("[Task %s] Failed to save converted cache: %v", taskId, err)
+					}
+					return
+				} else {
+					log.Printf("[Task %s] Failed to convert fallback cache: %v", taskId, err)
+				}
+			}
+		}
+
 		cloneDir, err := os.MkdirTemp("", "cg-"+path.Base(repo)+"-*")
 		if err != nil {
 			updateStatus(StatusFailed, "", fmt.Sprintf("failed to create temp dir: %v", err))
 			return
 		}
 
+		start := time.Now()
 		log.Printf("[Task %s] Cloning repository %s (%s) ...", taskId, repo, branch)
 		if err := gvs.CloneRepo(repo, branch, cloneDir); err != nil {
 			updateStatus(StatusFailed, "", fmt.Sprintf("git clone failed: %v", err))
 			return
 		}
-		log.Printf("[Task %s] Clone successful", taskId)
+		log.Printf("[Task %s] Clone successful - Took %s", taskId, time.Since(start))
 
 		log.Printf("[Task %s] Running cg ...", taskId)
-		start := time.Now()
+		start = time.Now()
 		var cmd *exec.Cmd
 		if runFix {
 			cmd = exec.Command("bin/cg", "-runfix", cve, cloneDir)
@@ -262,8 +285,7 @@ func callgraphHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		elapsed := time.Since(start)
-		log.Printf("[Task %s] cg execution completed - Took %s", taskId, elapsed)
+		log.Printf("[Task %s] cg execution completed - Took %s", taskId, time.Since(start))
 		updateStatus(StatusCompleted, string(output), "")
 
 		if err := saveCacheToDisk(cacheKey, output); err != nil {
