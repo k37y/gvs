@@ -13,7 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/k37y/gvs"
+	"github.com/k37y/gvs/internal/common"
+	"github.com/k37y/gvs/pkg/cmd/gvc"
 )
 
 var (
@@ -54,7 +55,7 @@ func ScanHandler(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
 	clientIP := r.RemoteAddr
 
-	var scanRequest gvs.ScanRequest
+	var scanRequest gvc.ScanRequest
 	err := json.NewDecoder(r.Body).Decode(&scanRequest)
 	if err != nil {
 		http.Error(w, `{"error": "Invalid JSON format"}`, http.StatusBadRequest)
@@ -77,7 +78,7 @@ func ScanHandler(w http.ResponseWriter, r *http.Request) {
 	cloneDir, err := os.MkdirTemp("", "gvc-"+path.Base(repoName)+"-*")
 	if err != nil {
 		log.Printf("failed to create temp dir: %v", err)
-		response, _ := json.Marshal(gvs.ScanResponse{Success: false, ExitCode: 1, Error: err.Error()})
+		response, _ := json.Marshal(gvc.ScanResponse{Success: false, ExitCode: 1, Error: err.Error()})
 		w.WriteHeader(http.StatusInternalServerError)
 		if _, err := w.Write(response); err != nil {
 			log.Printf("failed to write response: %v", err)
@@ -85,10 +86,10 @@ func ScanHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = gvs.CloneRepo(scanRequest.Repo, scanRequest.Branch, cloneDir)
+	err = common.CloneRepo(scanRequest.Repo, scanRequest.Branch, cloneDir)
 	if err != nil {
 		log.Printf("Clone failed for Repo: %s, Branch: %s, Error: %s", scanRequest.Repo, scanRequest.Branch, err.Error())
-		response, _ := json.Marshal(gvs.ScanResponse{Success: false, ExitCode: 1, Error: err.Error()})
+		response, _ := json.Marshal(gvc.ScanResponse{Success: false, ExitCode: 1, Error: err.Error()})
 		w.WriteHeader(http.StatusInternalServerError)
 		if _, err := w.Write(response); err != nil {
 			log.Printf("failed to write response: %v", err)
@@ -96,10 +97,10 @@ func ScanHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	moduleDirs, err := gvs.FindGoModDirs(cloneDir)
+	moduleDirs, err := common.FindGoModDirs(cloneDir)
 	if err != nil || len(moduleDirs) == 0 {
 		log.Printf("No go.mod files found in Repo: %s", scanRequest.Repo)
-		response, _ := json.Marshal(gvs.ScanResponse{Success: false, ExitCode: 1, Error: "No Go modules found"})
+		response, _ := json.Marshal(gvc.ScanResponse{Success: false, ExitCode: 1, Error: "No Go modules found"})
 		w.WriteHeader(http.StatusInternalServerError)
 		if _, err := w.Write(response); err != nil {
 			log.Printf("failed to write response: %v", err)
@@ -111,7 +112,7 @@ func ScanHandler(w http.ResponseWriter, r *http.Request) {
 	finalExitCode := 0
 
 	for _, modDir := range moduleDirs {
-		output, exitCode, err := gvs.RunGovulncheck(modDir, "./...")
+		output, exitCode, err := common.RunGovulncheck(modDir, "./...")
 		if exitCode > finalExitCode {
 			finalExitCode = exitCode
 		}
@@ -121,7 +122,7 @@ func ScanHandler(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		var sarif gvs.Sarif
+		var sarif gvc.Sarif
 		err = json.Unmarshal([]byte(output), &sarif)
 		if err != nil {
 			log.Printf("Failed to parse govulncheck output in %s", modDir)
@@ -151,7 +152,7 @@ func ScanHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	response, _ := json.Marshal(gvs.ScanResponse{
+	response, _ := json.Marshal(gvc.ScanResponse{
 		Success:  true,
 		ExitCode: finalExitCode,
 		Output:   combinedOutput,
@@ -263,7 +264,7 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 
 		start := time.Now()
 		log.Printf("[Task %s] Cloning repository %s (%s) ...", taskId, repo, branch)
-		if err := gvs.CloneRepo(repo, branch, cloneDir); err != nil {
+		if err := common.CloneRepo(repo, branch, cloneDir); err != nil {
 			updateStatus(StatusFailed, "", fmt.Sprintf("git clone failed: %v", err))
 			return
 		}
