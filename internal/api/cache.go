@@ -1,4 +1,4 @@
-package main
+package api
 
 import (
 	"encoding/json"
@@ -9,10 +9,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/k37y/gvs/internal/fixtools"
+	"github.com/k37y/gvs/internal/cli"
 )
 
-func retrieveCacheFromDisk(key string) ([]byte, error) {
+var cacheDir = "/tmp/gvs-cache"
+
+func RetrieveCacheFromDisk(key string) ([]byte, error) {
 	path := filepath.Join(cacheDir, keyToFilename(key))
 	if info, err := os.Stat(path); err == nil && time.Since(info.ModTime()) < 24*time.Hour {
 		return os.ReadFile(path)
@@ -20,7 +22,7 @@ func retrieveCacheFromDisk(key string) ([]byte, error) {
 	return nil, os.ErrNotExist
 }
 
-func saveCacheToDisk(key string, data []byte) error {
+func SaveCacheToDisk(key string, data []byte) error {
 	err := os.MkdirAll(cacheDir, 0755)
 	if err != nil {
 		log.Fatalf("Failed to create directory: %v", err)
@@ -32,9 +34,9 @@ func keyToFilename(key string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(key, "/", "_"), ":", "_") + ".json"
 }
 
-// convertCacheForRunFix converts cached runFix=false data to runFix=true format
+// ConvertCacheForRunFix converts cached runFix=false data to runFix=true format
 // by parsing fixCommands from cache and executing them in the cached directory
-func convertCacheForRunFix(cachedData []byte) ([]byte, error) {
+func ConvertCacheForRunFix(cachedData []byte) ([]byte, error) {
 	var result map[string]interface{}
 	if err := json.Unmarshal(cachedData, &result); err != nil {
 		return nil, err
@@ -67,7 +69,7 @@ func convertCacheForRunFix(cachedData []byte) ([]byte, error) {
 	}
 
 	// Create a temporary result structure to use the shared functions
-	tempResult := &fixtools.Result{
+	tempResult := &cli.Result{
 		Directory:  cachedDir,
 		FixErrors:  &fixErrors,
 		FixSuccess: &fixSuccess,
@@ -89,7 +91,7 @@ func convertCacheForRunFix(cachedData []byte) ([]byte, error) {
 
 						if len(fixCmds) > 0 {
 							// Use the shared runFixCommands function
-							fixtools.RunFixCommands(pkg, cachedDir, fixCmds, tempResult)
+							cli.RunFixCommands(pkg, cachedDir, fixCmds, tempResult)
 						}
 					}
 				}
@@ -98,7 +100,7 @@ func convertCacheForRunFix(cachedData []byte) ([]byte, error) {
 	}
 
 	// Use the shared readFixResults function to populate success/error arrays
-	fixtools.ReadFixResults(tempResult)
+	cli.ReadFixResults(tempResult)
 
 	// Update the result with populated fix results
 	result["FixErrors"] = tempResult.FixErrors

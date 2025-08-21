@@ -1,4 +1,4 @@
-package fixtools
+package cli
 
 import (
 	"encoding/json"
@@ -7,14 +7,35 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
-func runCommand(dir string, command string, args ...string) ([]byte, error) {
+// RunCommand executes a command in the specified directory with Go-specific environment
+func RunCommand(dir string, command string, args ...string) ([]byte, error) {
 	cmd := exec.Command(command, args...)
 	cmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off")
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	return out, err
+}
+
+// Result represents the result structure for CLI command operations
+type Result struct {
+	IsVulnerable    string                 `json:"IsVulnerable"`
+	UsedImports     map[string]interface{} `json:"UsedImports,omitempty"`
+	Files           map[string][][]string  `json:"Files,omitempty"`
+	AffectedImports map[string]interface{} `json:"AffectedImports,omitempty"`
+	GoCVE           string                 `json:"GoCVE"`
+	CVE             string                 `json:"CVE"`
+	Repository      string                 `json:"Repository,omitempty"`
+	Branch          string                 `json:"Branch,omitempty"`
+	Directory       string                 `json:"Directory"`
+	CursorCommand   *string                `json:"CursorCommand,omitempty"`
+	Errors          []string               `json:"Errors,omitempty"`
+	FixErrors       *[]string              `json:"FixErrors,omitempty"`
+	FixSuccess      *[]string              `json:"FixSuccess,omitempty"`
+	Mu              sync.Mutex             `json:"-"`
+	Summary         string                 `json:"Summary,omitempty"`
 }
 
 // RunFixCommands executes fix commands and writes results to gvs-output.txt
@@ -63,7 +84,7 @@ Special Instructions:
 	f.WriteString(prompt)
 	f.WriteString(fmt.Sprintf("Package: %s\n", pkg))
 
-	_, err = runCommand(dir, "go", "clean", "-modcache")
+	_, err = RunCommand(dir, "go", "clean", "-modcache")
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("Failed to run go clean -modcache: %v", err))
 	}
@@ -79,7 +100,7 @@ Special Instructions:
 
 		f.WriteString(fmt.Sprintf("Command: %s\n", fullCommand))
 
-		out, err := runCommand(dir, cmd, args...)
+		out, err := RunCommand(dir, cmd, args...)
 		output := strings.TrimSpace(string(out))
 		if output == "" {
 			output = "nil"
@@ -98,7 +119,23 @@ Special Instructions:
 	// Add CVE Assessment section with Result{} JSON after all fix commands
 	if result != nil {
 		f.WriteString("\n[2]\n")
-		jsonData, err := json.MarshalIndent(result, "", "  ")
+
+		// Create a filtered version for file output (exclude runtime fields)
+		filteredResult := map[string]interface{}{
+			"IsVulnerable":    result.IsVulnerable,
+			"UsedImports":     result.UsedImports,
+			"Files":           result.Files,
+			"AffectedImports": result.AffectedImports,
+			"GoCVE":           result.GoCVE,
+			"CVE":             result.CVE,
+			"Repository":      result.Repository,
+			"Branch":          result.Branch,
+			"Directory":       result.Directory,
+			"Errors":          result.Errors,
+			"Summary":         result.Summary,
+		}
+
+		jsonData, err := json.MarshalIndent(filteredResult, "", "  ")
 		if err != nil {
 			f.WriteString(fmt.Sprintf("Error marshaling result to JSON: %v\n", err))
 		} else {

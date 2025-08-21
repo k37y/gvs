@@ -1,9 +1,9 @@
-package main
+package cg
 
 import "sync"
 
 const (
-	vulnsURL = "https://vuln.go.dev"
+	VulnsURL = "https://vuln.go.dev"
 )
 
 type Job struct {
@@ -36,11 +36,11 @@ type Result struct {
 	Repository      string
 	Branch          string
 	Directory       string
-	CursorCommand   *string   `json:"CursorCommand,omitempty"`
-	Errors          []string  `json:"Errors"`
-	FixErrors       *[]string `json:"FixErrors,omitempty"`
-	FixSuccess      *[]string `json:"FixSuccess,omitempty"`
-	mu              sync.Mutex
+	CursorCommand   *string    `json:"CursorCommand,omitempty"`
+	Errors          []string   `json:"Errors"`
+	FixErrors       *[]string  `json:"FixErrors,omitempty"`
+	FixSuccess      *[]string  `json:"FixSuccess,omitempty"`
+	Mu              sync.Mutex `json:"-"`
 	Summary         string
 }
 

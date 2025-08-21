@@ -8,12 +8,14 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/k37y/gvs/internal/api"
+	"github.com/k37y/gvs/pkg/cmd/gvs"
 )
 
 var (
-	port     string = "8082"
-	version  string
-	cacheDir = "/tmp/gvs-cache"
+	port    string = "8082"
+	version string
 )
 
 func main() {
@@ -29,17 +31,17 @@ func main() {
 		log.Fatalf("Failed to create directory: %v", err)
 	}
 
-	http.Handle("/cg/", logFileAccess(http.StripPrefix("/cg/", http.FileServer(http.Dir("/tmp/gvs-cache/img")))))
+	http.Handle("/cg/", gvs.LogFileAccess(http.StripPrefix("/cg/", http.FileServer(http.Dir("/tmp/gvs-cache/img")))))
 	http.Handle("/", http.FileServer(http.Dir("./site")))
-	http.HandleFunc("/scan", scanHandler)
-	http.HandleFunc("/healthz", healthHandler)
-	http.HandleFunc("/callgraph", callgraphHandler)
-	http.HandleFunc("/status", statusHandler)
+	http.HandleFunc("/scan", api.ScanHandler)
+	http.HandleFunc("/healthz", api.HealthHandler)
+	http.HandleFunc("/callgraph", api.CallgraphHandler)
+	http.HandleFunc("/status", api.StatusHandler)
 
 	srv := &http.Server{Addr: ":" + port}
 
 	// Start directory cleanup routine
-	go startDirectoryCleanup()
+	go gvs.StartDirectoryCleanup()
 
 	go func() {
 		log.Printf("Starting gvs, version %s\n", version)

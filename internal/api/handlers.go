@@ -1,4 +1,4 @@
-package main
+package api
 
 import (
 	"encoding/json"
@@ -38,7 +38,7 @@ type TaskResult struct {
 	Error  string     `json:"error,omitempty"`
 }
 
-func scanHandler(w http.ResponseWriter, r *http.Request) {
+func ScanHandler(w http.ResponseWriter, r *http.Request) {
 	if inProgress {
 		http.Error(w, `{"error": "Another scan is in progress. Please wait."}`, http.StatusTooManyRequests)
 		return
@@ -64,7 +64,7 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Received request - Repo: %s, Branch: %s, Client IP: %s", scanRequest.Repo, scanRequest.Branch, clientIP)
 
 	cacheKey := scanRequest.Repo + "@" + scanRequest.Branch
-	if cachedData, err := retrieveCacheFromDisk(cacheKey); err == nil {
+	if cachedData, err := RetrieveCacheFromDisk(cacheKey); err == nil {
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write(cachedData); err != nil {
 			log.Printf("failed to write response: %v", err)
@@ -161,14 +161,14 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("failed to write response: %v", err)
 	}
 
-	if err = saveCacheToDisk(cacheKey, response); err != nil {
+	if err = SaveCacheToDisk(cacheKey, response); err != nil {
 		log.Printf("Error saving the cache to disk: %v", err)
 	}
 
 	log.Printf("Request completed - Time Taken: %s", time.Since(startTime))
 }
 
-func healthHandler(w http.ResponseWriter, r *http.Request) {
+func HealthHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write([]byte("OK")); err != nil {
 		log.Printf("failed to write response: %v", err)
@@ -183,7 +183,7 @@ func writeJSONError(w http.ResponseWriter, statusCode int, msg string) {
 	}
 }
 
-func callgraphHandler(w http.ResponseWriter, r *http.Request) {
+func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Repo   string `json:"repo"`
 		Branch string `json:"branch"`
@@ -227,7 +227,7 @@ func callgraphHandler(w http.ResponseWriter, r *http.Request) {
 		updateStatus(StatusRunning, "", "")
 
 		cacheKey := fmt.Sprintf("%s@%s:%s:runFix=%t", repo, branch, cve, runFix)
-		if cachedData, err := retrieveCacheFromDisk(cacheKey); err == nil {
+		if cachedData, err := RetrieveCacheFromDisk(cacheKey); err == nil {
 			updateStatus(StatusCompleted, string(cachedData), "")
 			log.Printf("[Task %s] Retrieved callgraph from cache", taskId)
 			return
@@ -237,15 +237,15 @@ func callgraphHandler(w http.ResponseWriter, r *http.Request) {
 		// We can reuse the cached directory and execute fix commands from the cached data
 		if runFix {
 			fallbackCacheKey := fmt.Sprintf("%s@%s:%s:runFix=false", repo, branch, cve)
-			if fallbackCachedData, err := retrieveCacheFromDisk(fallbackCacheKey); err == nil {
+			if fallbackCachedData, err := RetrieveCacheFromDisk(fallbackCacheKey); err == nil {
 				// Parse the cached data, execute fix commands, and create runFix=true response
 				start := time.Now()
 				log.Printf("[Task %s] Converting runFix=false cache to runFix=true cache and executing fixes ...", taskId)
-				if optimizedOutput, err := convertCacheForRunFix(fallbackCachedData); err == nil {
+				if optimizedOutput, err := ConvertCacheForRunFix(fallbackCachedData); err == nil {
 					updateStatus(StatusCompleted, string(optimizedOutput), "")
 					log.Printf("[Task %s] Retrieved and executed fixes using runFix=false cache - Took %s", taskId, time.Since(start))
 					// Save the converted output to runFix=true cache for future use
-					if err := saveCacheToDisk(cacheKey, optimizedOutput); err != nil {
+					if err := SaveCacheToDisk(cacheKey, optimizedOutput); err != nil {
 						log.Printf("[Task %s] Failed to save converted cache: %v", taskId, err)
 					}
 					return
@@ -288,7 +288,7 @@ func callgraphHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[Task %s] cg execution completed - Took %s", taskId, time.Since(start))
 		updateStatus(StatusCompleted, string(output), "")
 
-		if err := saveCacheToDisk(cacheKey, output); err != nil {
+		if err := SaveCacheToDisk(cacheKey, output); err != nil {
 			log.Printf("[Task %s] Failed to save cache: %v", taskId, err)
 		}
 	}(taskId, req.Repo, req.Branch, req.CVE, req.RunFix)
@@ -299,7 +299,7 @@ func callgraphHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func statusHandler(w http.ResponseWriter, r *http.Request) {
+func StatusHandler(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TaskID string `json:"taskId"`
 	}
