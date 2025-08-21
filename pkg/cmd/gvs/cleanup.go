@@ -1,4 +1,4 @@
-package main
+package gvs
 
 import (
 	"fmt"
@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func startDirectoryCleanup() {
+func StartDirectoryCleanup() {
 	log.Println("Starting directory cleanup routine")
 
 	// Run cleanup immediately on startup

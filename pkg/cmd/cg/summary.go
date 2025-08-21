@@ -1,4 +1,4 @@
-package main
+package cg
 
 import (
 	"bufio"
@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-func generateSummaryWithGemini(result *Result) {
+func GenerateSummaryWithGemini(result *Result) {
 	apiURL, apiKey, err := loadGeminiConfig()
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to load Gemini config: %v", err)
