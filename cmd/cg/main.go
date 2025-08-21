@@ -19,12 +19,16 @@ import (
 	"time"
 
 	"golang.org/x/mod/semver"
+	"golang.org/x/tools/go/callgraph/vta"
+	"golang.org/x/tools/go/packages"
+	"golang.org/x/tools/go/ssa"
+	"golang.org/x/tools/go/ssa/ssautil"
 
 	"github.com/k37y/gvs/internal/fixtools"
 )
 
 func main() {
-	tools := []string{"go", "digraph", "callgraph", "git"}
+	tools := []string{"go", "digraph", "git"}
 	if !validateTools(tools) {
 		os.Exit(1)
 	}
@@ -517,14 +521,17 @@ func (r *Result) isSymbolUsed(pkg, dir string, symbols, files []string) string {
 		symbols = append(symbols, fmt.Sprintf("(%s).%s", pkg, symbol))
 		symbols = append(symbols, fmt.Sprintf("(*%s).%s", pkg, symbol))
 	}
-	cmd := "callgraph"
-	args := append([]string{"-format={{.Caller}} {{.Callee}}"}, files...)
-	out, err := runCommand(dir, cmd, args...)
+
+	// Use callgraph library and use vta algorithm to list all the Callers and Callees
+	callGraphOutput, err := r.generateCallGraphWithLib(dir, files)
 	if err != nil {
-		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s\n", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
+		errMsg := fmt.Sprintf("Failed to generate call graph in %s: %v", dir, err)
 		r.Errors = append(r.Errors, errMsg)
 		return "unknown"
 	}
+
+	// Convert to bytes for compatibility with existing matchSymbol function
+	out := []byte(callGraphOutput)
 
 	var wg sync.WaitGroup
 	found := false
@@ -553,6 +560,104 @@ func (r *Result) isSymbolUsed(pkg, dir string, symbols, files []string) string {
 		return "true"
 	}
 	return "false"
+}
+
+// generateCallGraphWithLib creates a call graph using the callgraph library
+func (r *Result) generateCallGraphWithLib(dir string, files []string) (string, error) {
+	// Determine package patterns to load based on the files
+	packagePatterns := make(map[string]bool)
+
+	// Add the current directory and any subdirectories containing the files
+	packagePatterns["."] = true
+	for _, file := range files {
+		packageDir := filepath.Dir(file)
+		if packageDir != "." {
+			packagePatterns["./"+packageDir] = true
+		}
+	}
+
+	var patterns []string
+	for pattern := range packagePatterns {
+		patterns = append(patterns, pattern)
+	}
+
+	// Load packages with comprehensive mode to handle all dependencies
+	cfg := &packages.Config{
+		Mode: packages.LoadAllSyntax, // This loads everything needed for analysis
+		Dir:  dir,
+		Env:  append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off"),
+	}
+
+	// Load packages
+	pkgs, err := packages.Load(cfg, patterns...)
+	if err != nil {
+		return "", fmt.Errorf("failed to load packages: %v", err)
+	}
+
+	if len(pkgs) == 0 {
+		return "", fmt.Errorf("no packages loaded")
+	}
+
+	// Check for package errors and try to filter out packages with issues
+	var validPkgs []*packages.Package
+	for _, pkg := range pkgs {
+		if len(pkg.Errors) == 0 && pkg.Types != nil && pkg.TypesInfo != nil {
+			validPkgs = append(validPkgs, pkg)
+		}
+	}
+
+	// If no valid packages, try loading with less strict requirements
+	if len(validPkgs) == 0 {
+		// Try with just the module root pattern
+		cfg = &packages.Config{
+			Mode: packages.LoadSyntax,
+			Dir:  dir,
+			Env:  append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off"),
+		}
+
+		pkgs, err = packages.Load(cfg, "./...")
+		if err != nil {
+			return "", fmt.Errorf("failed to load packages with fallback: %v", err)
+		}
+
+		for _, pkg := range pkgs {
+			if len(pkg.Errors) == 0 {
+				validPkgs = append(validPkgs, pkg)
+			}
+		}
+	}
+
+	if len(validPkgs) == 0 {
+		return "", fmt.Errorf("no valid packages found after loading")
+	}
+
+	// Create SSA program with InstantiateGenerics for VTA analysis
+	prog, _ := ssautil.AllPackages(validPkgs, ssa.InstantiateGenerics)
+	prog.Build()
+
+	// Build call graph using VTA (Variable Type Analysis)
+	allFuncs := ssautil.AllFunctions(prog)
+	cg := vta.CallGraph(allFuncs, nil) // VTA can work with nil initial callgraph
+
+	// Convert call graph to string format matching callgraph binary output
+	var output strings.Builder
+	for _, node := range cg.Nodes {
+		if node.Func == nil {
+			continue
+		}
+
+		caller := node.Func.String()
+		for _, edge := range node.Out {
+			if edge.Callee == nil || edge.Callee.Func == nil {
+				continue
+			}
+
+			callee := edge.Callee.Func.String()
+			output.WriteString(fmt.Sprintf("%s %s\n", caller, callee))
+		}
+	}
+
+	return output.String(), nil
 }
 
 func matchSymbol(out []byte, symbol string) bool {
