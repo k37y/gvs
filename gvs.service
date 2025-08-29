@@ -1,0 +1,22 @@
+[Unit]
+Description=GVS Service
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/gvs
+
+Restart=on-failure
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+User=gvs
+Group=gvs
+
+# WorkingDirectory=/var/lib/gvs
+
+# EnvironmentFile=/etc/gvs/gvs.env
+
+[Install]
+WantedBy=multi-user.target
