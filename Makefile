@@ -11,7 +11,7 @@ PREFIX ?= /usr
 BINDIR ?= $(PREFIX)/bin
 UNITDIR ?= /etc/systemd/system
 SERVICE = gvs.service
-BINS = bin/gvs bin/cg
+BINS = gvs cg
 USERNAME ?= gvs
 GROUPNAME ?= $(USERNAME)
 
@@ -86,10 +86,10 @@ image-push:
 set-image-ocp:
 	oc set image deployment/gvs gvs=$$(echo ${IMAGE_NAME}@$$(/usr/bin/skopeo inspect docker://${IMAGE} | jq -r .Digest))
 
-install: cg gvs useradd $(SERVICE)
+install: cg gvs useradd gvs.service
 	@echo "Installing binaries to $(BINDIR)..."
 	for bin in $(BINS); do \
-		$(SUDO) install -Dm755 $$bin $(DESTDIR)$(BINDIR)/$$bin; \
+		$(SUDO) install -Dm755 bin/$$bin $(DESTDIR)$(BINDIR)/$$bin; \
 	done
 	@echo "Installing systemd service to $(UNITDIR)..."
 	$(SUDO) install -Dm644 $(SERVICE) $(DESTDIR)$(UNITDIR)/$(SERVICE)
@@ -98,7 +98,7 @@ install: cg gvs useradd $(SERVICE)
 	@echo "Enabling and starting service..."
 	$(SUDO) systemctl enable --now $(SERVICE)
 
-uninstall: stop disable userdel
+uninstall: userdel
 	@echo "Stopping + disabling service..."
 	-$(SUDO) systemctl disable --now $(SERVICE) || true
 	@echo "Removing binaries..."
