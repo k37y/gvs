@@ -168,11 +168,50 @@ No errors or issues were encountered during the scanning process.
 }
 ```
 ## Advanced usage
+### Call Graph Algorithm Configuration
+The scanner supports multiple call graph algorithms, configurable via the `ALGO` environment variable:
+
+| Algorithm | Speed | Precision | Description | Use Case |
+|-----------|-------|-----------|-------------|----------|
+| `vta` (default) | Slowest | Highest | Variable Type Analysis | When accuracy is critical |
+| `rta` | Medium | Good | Rapid Type Analysis | Balanced performance |
+| `cha` | Fast | Lower | Class Hierarchy Analysis | Large codebases where speed matters |
+| `static` | Fastest | Lowest | Static analysis (direct calls only) | Quick scans |
+
+```bash
+# Example: Use Rapid Type Analysis for better performance
+export ALGO=rta
+make image-run
+
+# Example: Use algorithm directly with cg binary
+./bin/cg -algo rta CVE-2024-45338 /path/to/repo
+./bin/cg -algo=static CVE-2024-45338 /path/to/repo
+
+# Combine with other flags
+./bin/cg -fix -algo cha CVE-2024-45338 /path/to/repo
+
+# Get help
+./bin/cg -h
+```
+
 ### Build custom container image
 * `PORT` specifies the port on which the application will run  
-* `WORKER_COUNT` sets the size of the worker pool used to process endpoint and symbol combinations
-```
-make image-run PORT=8082 WORKER_COUNT=3
+* `WORKER_COUNT` sets the size of the worker pool used to process endpoint and symbol combinations (optional)
+* `ALGO` sets the call graph analysis algorithm: vta, rta, cha, static (optional, defaults to vta)
+
+Each parameter is independent and can be set or omitted as needed:
+```bash
+# Build with all parameters
+make image-run PORT=8082 WORKER_COUNT=3 ALGO=rta
+
+# Build with only worker count
+make image-run WORKER_COUNT=5
+
+# Build with only algorithm choice
+make image-run ALGO=static
+
+# Build with defaults (vta algorithm, auto worker count)
+make image-run
 ```
 ### Install as binary
 ```

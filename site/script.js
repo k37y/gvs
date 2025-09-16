@@ -3,14 +3,14 @@ let scanInProgress = false;
 // Add event listener to CVE ID field to automatically set Run Fix to "No" and disable when empty
 document.addEventListener('DOMContentLoaded', function() {
 	const cveInput = document.getElementById('cve');
-	const runFixSelect = document.getElementById('runFix');
+	const fixSelect = document.getElementById('fix');
 	
 	function updateRunFixState() {
 		if (cveInput.value.trim() === '') {
-			runFixSelect.value = 'false';
-			runFixSelect.disabled = true;
+			fixSelect.value = 'false';
+			fixSelect.disabled = true;
 		} else {
-			runFixSelect.disabled = false;
+			fixSelect.disabled = false;
 		}
 	}
 	
@@ -77,8 +77,8 @@ function runScan() {
 	const repo = document.getElementById("repo").value.trim();
 	const branch = document.getElementById("branch").value.trim();
 	const cve = document.getElementById("cve").value.trim();
-	// Automatically set runFix to false if CVE ID is empty
-	const runFix = cve ? document.getElementById("runFix").value === "true" : false;
+	// Automatically set fix to false if CVE ID is empty
+	const fix = cve ? document.getElementById("fix").value === "true" : false;
 	const outputDiv = document.getElementById("output");
 	const scanButton = document.getElementById("scanButton");
 
@@ -99,7 +99,7 @@ function runScan() {
 			headers: {
 				"Content-Type": "application/json"
 			},
-			body: JSON.stringify({ repo, branch, cve, runFix: runFix })
+			body: JSON.stringify({ repo, branch, cve, fix: fix })
 		})
 			.then(response => response.json())
 			.then(data => {

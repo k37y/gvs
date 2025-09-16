@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"runtime"
@@ -22,32 +23,53 @@ func main() {
 		os.Exit(1)
 	}
 
-	var runFix bool
-	var cveID, directory string
+	// Define flags
+	var fix = flag.Bool("fix", false, "run fix commands after analysis")
+	var algo = flag.String("algo", "vta", "call graph algorithm: vta (default), cha, rta, static")
 
-	// Parse command line arguments
-	args := os.Args[1:]
-
-	for _, arg := range args {
-		if arg == "-runfix" {
-			runFix = true
-		} else if cveID == "" {
-			cveID = arg
-		} else if directory == "" {
-			directory = arg
-		}
+	// Custom usage function
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s [options] <CVE ID> <directory>\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "\nOptions:\n")
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nSupported algorithms: vta (default), cha, rta, static\n")
 	}
 
-	if cveID == "" || directory == "" {
-		fmt.Printf("Usage: %s [-runfix] <CVE ID> <directory>\n", os.Args[0])
+	// Parse flags
+	flag.Parse()
+
+	// Get positional arguments
+	args := flag.Args()
+	if len(args) != 2 {
+		flag.Usage()
 		os.Exit(1)
 	}
+
+	cveID := args[0]
+	directory := args[1]
 
 	if info, err := os.Stat(directory); err != nil || !info.IsDir() {
 		fmt.Printf("Invalid directory: %s\n", directory)
-		fmt.Printf("Usage: %s [-runfix] <CVE ID> <directory>\n", os.Args[0])
 		os.Exit(1)
 	}
+
+	// Validate and set algorithm (always has a value due to default)
+	validAlgos := []string{"vta", "cha", "rta", "static"}
+	isValid := false
+	algoLower := strings.ToLower(*algo)
+	for _, valid := range validAlgos {
+		if algoLower == valid {
+			isValid = true
+			break
+		}
+	}
+	if !isValid {
+		fmt.Printf("Error: Invalid algorithm '%s'\n", *algo)
+		fmt.Printf("Supported algorithms: vta, cha, rta, static\n")
+		os.Exit(1)
+	}
+	// Always set environment variable for the scanner to use
+	os.Setenv("ALGO", algoLower)
 
 	defaultWorkers := runtime.NumCPU() / 2
 	if defaultWorkers < 1 {
@@ -60,7 +82,7 @@ func main() {
 		}
 	}
 
-	result := cg.InitResult(cveID, directory, runFix)
+	result := cg.InitResult(cveID, directory, *fix)
 
 	jobs := make(chan cg.Job)
 	results := make(chan *cg.Result)
@@ -148,8 +170,8 @@ func main() {
 		result.UsedImports = nil
 	}
 
-	// Run fix commands BEFORE generating output (only if runFix is true)
-	if runFix {
+	// Run fix commands BEFORE generating output (only if fix is true)
+	if *fix {
 		// Convert to cli.Result for shared function compatibility
 		// Include all CVE assessment data for complete output
 		fixResult := &cli.Result{

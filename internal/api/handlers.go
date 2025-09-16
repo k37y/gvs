@@ -189,7 +189,7 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 		Repo   string `json:"repo"`
 		Branch string `json:"branch"`
 		CVE    string `json:"cve"`
-		RunFix bool   `json:"runFix"`
+		Fix    bool   `json:"fix"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -212,7 +212,7 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 	taskStore[taskId] = &TaskResult{Status: StatusPending}
 	taskMutex.Unlock()
 
-	go func(taskId, repo, branch, cve string, runFix bool) {
+	go func(taskId, repo, branch, cve string, fix bool) {
 		defer func() {
 			requestMutex.Lock()
 			inProgress = false
@@ -227,25 +227,25 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 
 		updateStatus(StatusRunning, "", "")
 
-		cacheKey := fmt.Sprintf("%s@%s:%s:runFix=%t", repo, branch, cve, runFix)
+		cacheKey := fmt.Sprintf("%s@%s:%s:fix=%t", repo, branch, cve, fix)
 		if cachedData, err := RetrieveCacheFromDisk(cacheKey); err == nil {
 			updateStatus(StatusCompleted, string(cachedData), "")
 			log.Printf("[Task %s] Retrieved callgraph from cache", taskId)
 			return
 		}
 
-		// If runFix=true and no direct cache, check for runFix=false cache
+		// If fix=true and no direct cache, check for fix=false cache
 		// We can reuse the cached directory and execute fix commands from the cached data
-		if runFix {
-			fallbackCacheKey := fmt.Sprintf("%s@%s:%s:runFix=false", repo, branch, cve)
+		if fix {
+			fallbackCacheKey := fmt.Sprintf("%s@%s:%s:fix=false", repo, branch, cve)
 			if fallbackCachedData, err := RetrieveCacheFromDisk(fallbackCacheKey); err == nil {
-				// Parse the cached data, execute fix commands, and create runFix=true response
+				// Parse the cached data, execute fix commands, and create fix=true response
 				start := time.Now()
-				log.Printf("[Task %s] Converting runFix=false cache to runFix=true cache and executing fixes ...", taskId)
+				log.Printf("[Task %s] Converting fix=false cache to fix=true cache and executing fixes ...", taskId)
 				if optimizedOutput, err := ConvertCacheForRunFix(fallbackCachedData); err == nil {
 					updateStatus(StatusCompleted, string(optimizedOutput), "")
-					log.Printf("[Task %s] Retrieved and executed fixes using runFix=false cache - Took %s", taskId, time.Since(start))
-					// Save the converted output to runFix=true cache for future use
+					log.Printf("[Task %s] Retrieved and executed fixes using fix=false cache - Took %s", taskId, time.Since(start))
+					// Save the converted output to fix=true cache for future use
 					if err := SaveCacheToDisk(cacheKey, optimizedOutput); err != nil {
 						log.Printf("[Task %s] Failed to save converted cache: %v", taskId, err)
 					}
@@ -273,8 +273,8 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[Task %s] Running cg ...", taskId)
 		start = time.Now()
 		var cmd *exec.Cmd
-		if runFix {
-			cmd = exec.Command("bin/cg", "-runfix", cve, cloneDir)
+		if fix {
+			cmd = exec.Command("bin/cg", "-fix", cve, cloneDir)
 		} else {
 			cmd = exec.Command("bin/cg", cve, cloneDir)
 		}
@@ -292,7 +292,7 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 		if err := SaveCacheToDisk(cacheKey, output); err != nil {
 			log.Printf("[Task %s] Failed to save cache: %v", taskId, err)
 		}
-	}(taskId, req.Repo, req.Branch, req.CVE, req.RunFix)
+	}(taskId, req.Repo, req.Branch, req.CVE, req.Fix)
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]string{"taskId": taskId}); err != nil {
