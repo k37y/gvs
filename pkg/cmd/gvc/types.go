@@ -1,9 +1,9 @@
 package gvc
 
 type ScanRequest struct {
-	Repo   string `json:"repo"`
-	Branch string `json:"branch"`
-	CVE    string `json:"cve"`
+	Repo           string `json:"repo"`
+	BranchOrCommit string `json:"branchOrCommit"` // Branch name or commit hash (7+ hex characters for commit detection)
+	CVE            string `json:"cve"`
 }
 
 type ScanResponse struct {

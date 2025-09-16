@@ -34,14 +34,14 @@
 					<input type="text" id="repo" class="form-control" placeholder="Enter repo URL" value="https://github.com/openshift/sriov-network-device-plugin">
 				</div>
 				<div class="col-md-2">
-					<label for="branch" class="form-label">
-						Branch
+					<label for="branchOrCommit" class="form-label">
+						Branch or Commit ID
 						<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted" 
 							  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
 							  data-bs-toggle="tooltip" data-bs-placement="top" 
-							  title="Specific branch to scan (e.g., main, master, develop, release-4.18). The scanner will checkout this branch before analysis.">?</span>
+							  title="Branch name (e.g., main, master, develop) or commit hash (e.g., abc123f, 1a2b3c4d5e6f7a8b). For commit hashes, use 7+ character SHA hashes for reliable detection.">?</span>
 					</label>
-					<input type="text" id="branch" class="form-control" placeholder="Enter branch name" value="release-4.18">
+					<input type="text" id="branchOrCommit" class="form-control" placeholder="Branch or commit hash" value="release-4.18">
 				</div>
 				<div class="col-md-2">
 					<label for="cve" class="form-label">

@@ -75,7 +75,7 @@ func UniqueStrings(input []string) []string {
 	return result
 }
 
-func CloneRepo(repoURL, branch, cloneDir string) error {
+func CloneRepo(repoURL, branchOrCommit, cloneDir string) error {
 	os.Setenv("GIT_TERMINAL_PROMPT", "0")
 
 	checkCmd := exec.Command("git", "ls-remote", "--exit-code", repoURL)
@@ -86,6 +86,37 @@ func CloneRepo(repoURL, branch, cloneDir string) error {
 		return fmt.Errorf("repository is not publicly accessible: %s", checkStderr.String())
 	}
 
+	// Determine if branchOrCommit is a commit hash or branch name
+	isCommitHash := isCommitHash(branchOrCommit)
+
+	if isCommitHash {
+		// For commit hashes, we need to clone the entire repo first, then checkout the specific commit
+		return cloneByCommit(repoURL, branchOrCommit, cloneDir)
+	} else {
+		// For branches, use the existing optimized approach
+		return cloneByBranch(repoURL, branchOrCommit, cloneDir)
+	}
+}
+
+// isCommitHash checks if the given string looks like a Git commit hash
+func isCommitHash(ref string) bool {
+	// Git commit hashes are typically 40 characters (full SHA-1) or 7+ characters (short SHA)
+	// and contain only hexadecimal characters
+	if len(ref) < 7 || len(ref) > 40 {
+		return false
+	}
+
+	// Check if all characters are hexadecimal
+	for _, char := range ref {
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+// cloneByBranch clones a repository by branch name (optimized with shallow clone)
+func cloneByBranch(repoURL, branch, cloneDir string) error {
 	cmd := exec.Command("git", "clone", "--depth", "1", "--branch", branch, "--single-branch", repoURL, cloneDir)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -94,6 +125,31 @@ func CloneRepo(repoURL, branch, cloneDir string) error {
 	if err != nil {
 		return fmt.Errorf("git clone failed: %v\n%s", err, stderr.String())
 	}
+	return nil
+}
+
+// cloneByCommit clones a repository and checks out a specific commit
+func cloneByCommit(repoURL, commit, cloneDir string) error {
+	// Step 1: Clone the full repository (no --depth for commits)
+	cmd := exec.Command("git", "clone", repoURL, cloneDir)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		return fmt.Errorf("git clone failed: %v\n%s", err, stderr.String())
+	}
+
+	// Step 2: Checkout the specific commit
+	checkoutCmd := exec.Command("git", "-C", cloneDir, "checkout", commit)
+	var checkoutStderr bytes.Buffer
+	checkoutCmd.Stderr = &checkoutStderr
+
+	err = checkoutCmd.Run()
+	if err != nil {
+		return fmt.Errorf("commit checkout failed: %v\n%s", err, checkoutStderr.String())
+	}
+
 	return nil
 }
 
