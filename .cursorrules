@@ -1,0 +1,161 @@
+# GVS Project Cursor Rules
+# Guidelines for code changes, suggestions, and development practices
+
+## Core Principles
+- **Minimal Changes**: Make the smallest possible change to achieve the goal
+- **Backward Compatibility**: Preserve existing functionality unless explicitly changing it
+- **Cross-Binary Compatibility**: Ensure changes work across gvc and gvs binaries
+- **Performance First**: Prioritize performance and efficiency in all changes
+
+## Code Style Guidelines
+
+### Comments
+- **Minimal Comments**: Only add comments for complex logic or non-obvious behavior
+- Use package-level comments for major functionality
+- Avoid redundant comments that restate the code
+- Focus on WHY, not WHAT
+
+### Code Structure
+- **Minimal Code**: Write the least amount of code necessary
+- Prefer composition over inheritance
+- Use standard library functions when available
+- Avoid premature optimization unless performance is critical
+
+### Variable Naming
+- Use short, clear names for local variables
+- Use descriptive names for package-level variables
+- Follow Go conventions (camelCase, avoid underscores)
+
+## File-Specific Rules
+
+### Makefile Changes
+- Document any new targets or variables in comments
+- Use consistent formatting with existing targets
+- Ensure cross-platform compatibility (Linux/macOS)
+- Test all combinations of environment variables
+- Always use `?=` for optional variables to allow overrides
+- Group related targets together
+
+### Test Files (*_test.go)
+- **Comprehensive Testing**: Write tests for all new functions
+- Use table-driven tests for multiple scenarios
+- Include edge cases and error conditions
+- Add benchmarks for performance-critical functions
+- Test environment variable handling end-to-end
+- Mock external dependencies when necessary
+
+### Dockerfile Changes
+- Minimize layer count and image size
+- Use multi-stage builds when appropriate
+- Document new ARG variables with comments
+- Ensure security best practices (non-root user, minimal packages)
+- Test with different base images if changing FROM
+- Validate all ARG variables have sensible defaults
+
+### systemd Service (gvs.service)
+- Validate service configuration with `systemd-analyze verify`
+- Document any new configuration options
+- Ensure compatibility with different systemd versions
+- Test service start/stop/restart functionality
+- Include appropriate security settings
+- Document environment variable usage
+
+### Frontend Changes (site/*)
+- Minimize JavaScript and CSS footprint
+- Ensure cross-browser compatibility
+- Use semantic HTML elements
+- Implement responsive design principles
+- Validate HTML/CSS/JS syntax
+- Test with different screen sizes
+
+### Binary Cross-Usage (gvc/gvs)
+- **Shared Code**: Place common functionality in internal/ or pkg/
+- Ensure consistent API between binaries
+- Test both binaries with shared components
+- Document any breaking changes between versions
+- Maintain consistent command-line interfaces
+- Share configuration formats when possible
+
+## Development Workflow
+
+### Before Making Changes
+1. Understand the existing architecture
+2. Identify minimal change points
+3. Check for existing similar functionality
+4. Plan for backward compatibility
+
+### During Development
+1. Write tests before implementation (TDD)
+2. Make incremental commits
+3. Test cross-binary functionality
+4. Validate performance impact
+
+### After Changes
+1. Run full test suite: `go test ./...`
+2. Build both binaries: `make gvs cg`
+3. Test container build: `make image`
+4. Update documentation if API changes
+5. Verify systemd service if relevant
+
+## Specific Component Guidelines
+
+### Algorithm Changes (scanner.go)
+- Benchmark performance impact
+- Ensure all algorithms work consistently
+- Test panic recovery mechanisms
+- Document trade-offs in algorithm selection
+
+### API Changes (handlers.go)
+- Maintain JSON response compatibility
+- Add new fields as optional
+- Document breaking changes
+- Test with existing clients
+
+### CLI Changes (commands.go)
+- Maintain backward compatibility for flags
+- Add new flags as optional
+- Document usage changes
+- Test with existing scripts
+
+### Configuration Changes
+- Environment variables should have sensible defaults
+- Document all configuration options
+- Test with minimal and maximal configurations
+- Ensure case-insensitive handling where appropriate
+
+## Performance Requirements
+- Algorithm selection should show measurable differences
+- API responses should be under 500ms for typical requests
+- Container startup should be under 30 seconds
+- Memory usage should scale linearly with workload
+
+## Security Guidelines
+- Validate all input parameters
+- Use secure defaults for configurations
+- Avoid logging sensitive information
+- Follow principle of least privilege
+- Sanitize user inputs in web interfaces
+
+## Documentation Standards
+- Update README.md for user-facing changes
+- Document environment variables in table format
+- Include usage examples for new features
+- Maintain changelog for breaking changes
+- Comment complex algorithms with trade-off explanations
+
+## Error Handling
+- Use structured error messages
+- Provide actionable error information
+- Log errors at appropriate levels
+- Fail fast for invalid configurations
+- Provide fallback mechanisms where possible
+
+## Testing Requirements
+- Unit tests for all new functions
+- Integration tests for cross-component changes
+- Performance benchmarks for algorithms
+- End-to-end tests for API changes
+- Container build verification
+- Service deployment testing
+
+Remember: The goal is maintainable, efficient, and reliable code that serves the vulnerability scanning mission effectively.
