@@ -143,9 +143,31 @@ func (j Job) isVulnerable(result *Result) *Result {
 	uentry.CurrentVersion = curVer
 	uentry.ReplaceVersion = repVer
 	if used {
+		// Determine the version to compare against (prefer replace version if available)
+		compareVer := curVer
+		if repVer != "" {
+			compareVer = repVer
+		}
+
 		if result.AffectedImports[j.Package].Type != "stdlib" {
-			if semver.Compare(curVer, fv) <= 0 {
+			// For non-stdlib packages: vulnerable if current/replace version is less than fixed version
+			if semver.Compare(compareVer, fv) < 0 {
 				result.IsVulnerable = "true"
+			} else {
+				result.IsVulnerable = "false"
+			}
+		} else {
+			// For stdlib packages: compare against the Go version fix
+			if len(fixVer) > 0 {
+				// Extract the Go version number from fixVer (e.g., "1.21.4" from various formats)
+				goFixVersion := extractGoVersion(fixVer[0])
+				if goFixVersion != "" && semver.Compare(compareVer, goFixVersion) < 0 {
+					result.IsVulnerable = "true"
+				} else {
+					result.IsVulnerable = "false"
+				}
+			} else {
+				result.IsVulnerable = "unknown"
 			}
 		}
 	} else if unknown {
@@ -650,8 +672,27 @@ func getGitBranch(result *Result) {
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), result.Directory, strings.TrimSpace(string(out)))
 		result.Errors = append(result.Errors, errMsg)
+		return
 	}
-	result.Branch = strings.TrimSpace(string(out))
+
+	branchName := strings.TrimSpace(string(out))
+
+	// If we're in detached HEAD state (happens when checking out a commit hash),
+	// get the actual commit hash instead of "HEAD"
+	if branchName == "HEAD" {
+		commitCmd := "git"
+		commitArgs := []string{"rev-parse", "HEAD"}
+		commitOut, err := cli.RunCommand(result.Directory, commitCmd, commitArgs...)
+		if err != nil {
+			errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", commitCmd, strings.Join(commitArgs, " "), result.Directory, strings.TrimSpace(string(commitOut)))
+			result.Errors = append(result.Errors, errMsg)
+			result.Branch = branchName // fallback to "HEAD"
+		} else {
+			result.Branch = strings.TrimSpace(string(commitOut))
+		}
+	} else {
+		result.Branch = branchName
+	}
 }
 
 func getGitURL(result *Result) {
@@ -685,6 +726,32 @@ func formatIntroducedFixed(events []Event) []string {
 	}
 
 	return result
+}
+
+// extractGoVersion extracts a Go version from various formats like "go1.21.4", "1.21.4", etc.
+func extractGoVersion(fixedVersion string) string {
+	// Handle various formats of Go version strings
+	fixedVersion = strings.TrimSpace(fixedVersion)
+
+	// Extract version from "Introduced in X and fixed in Y" format
+	if strings.Contains(fixedVersion, "fixed in") {
+		parts := strings.Split(fixedVersion, "fixed in")
+		if len(parts) > 1 {
+			fixedVersion = strings.TrimSpace(parts[1])
+		}
+	}
+
+	// Remove "go" prefix if present
+	if strings.HasPrefix(fixedVersion, "go") {
+		fixedVersion = strings.TrimPrefix(fixedVersion, "go")
+	}
+
+	// Ensure it's a valid semver format (add "v" prefix if missing)
+	if !strings.HasPrefix(fixedVersion, "v") && regexp.MustCompile(`^\d+\.\d+`).MatchString(fixedVersion) {
+		fixedVersion = "v" + fixedVersion
+	}
+
+	return fixedVersion
 }
 
 // ConvertUsedImports converts from cmd/cg UsedImportsDetails to common interface format
