@@ -1,3 +1,23 @@
+// Package cg provides call graph analysis for vulnerability scanning
+//
+// Call Graph Algorithms:
+// The scanner supports multiple call graph algorithms, configurable via the ALGO environment variable:
+//
+// - vta (default): Variable Type Analysis - Most precise but slower. Recommended for accuracy.
+// - cha: Class Hierarchy Analysis - Fast but less precise. Good for large codebases where speed matters.
+// - rta: Rapid Type Analysis - Good balance of speed and precision. Suitable for most use cases.
+// - static: Static analysis - Very fast but least precise (only direct calls). Use for quick scans.
+//
+// Usage:
+//
+//	export ALGO=rta  # Use Rapid Type Analysis
+//	export ALGO=cha  # Use Class Hierarchy Analysis
+//	export ALGO=static  # Use static analysis
+//	# Default (no env var set) uses VTA
+//
+// Algorithm Trade-offs:
+// - Precision: static < cha < rta < vta
+// - Speed: vta < rta < cha < static
 package cg
 
 import (
@@ -17,6 +37,10 @@ import (
 	"time"
 
 	"golang.org/x/mod/semver"
+	"golang.org/x/tools/go/callgraph"
+	"golang.org/x/tools/go/callgraph/cha"
+	"golang.org/x/tools/go/callgraph/rta"
+	"golang.org/x/tools/go/callgraph/static"
 	"golang.org/x/tools/go/callgraph/vta"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
@@ -26,17 +50,17 @@ import (
 	"github.com/k37y/gvs/internal/common"
 )
 
-func InitResult(cve, dir string, runFix bool) *Result {
+func InitResult(cve, dir string, fix bool) *Result {
 	r := &Result{
 		CVE:          cve,
 		Directory:    dir,
 		IsVulnerable: "unknown",
 	}
 
-	// Only initialize fix-related fields if runFix is true
-	// When runFix is false, these fields remain as nil pointers
+	// Only initialize fix-related fields if fix is true
+	// When fix is false, these fields remain as nil pointers
 	// and will be omitted from JSON due to the omitempty tags
-	if runFix {
+	if fix {
 		cursorCmd := fmt.Sprintf("cursor --remote ssh-remote+gvs-host %s", dir)
 		r.CursorCommand = &cursorCmd
 		fixErrors := []string{}
@@ -313,7 +337,7 @@ func (r *Result) isSymbolUsed(pkg, dir string, symbols, files []string) string {
 		symbols = append(symbols, fmt.Sprintf("(*%s).%s", pkg, symbol))
 	}
 
-	// Use callgraph library and use vta algorithm to list all the Callers and Callees
+	// Use callgraph library to list all the Callers and Callees (algorithm configurable via ALGO env var)
 	callGraphOutput, err := r.generateCallGraphWithLib(dir, files)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to generate call graph in %s: %v", dir, err)
@@ -422,13 +446,13 @@ func (r *Result) generateCallGraphWithLib(dir string, files []string) (string, e
 		return "", fmt.Errorf("no valid packages found after loading")
 	}
 
-	// Create SSA program with InstantiateGenerics for VTA analysis
+	// Create SSA program with InstantiateGenerics for call graph analysis
 	prog, _ := ssautil.AllPackages(validPkgs, ssa.InstantiateGenerics)
 	prog.Build()
 
-	// Build call graph using VTA (Variable Type Analysis)
-	allFuncs := ssautil.AllFunctions(prog)
-	cg := vta.CallGraph(allFuncs, nil) // VTA can work with nil initial callgraph
+	// Get the algorithm from environment variable and build call graph
+	algo := getCallGraphAlgorithm()
+	cg := buildCallGraph(prog, algo)
 
 	// Convert call graph to string format matching callgraph binary output
 	var output strings.Builder
@@ -460,6 +484,70 @@ func matchSymbol(out []byte, symbol string) bool {
 		}
 	}
 	return false
+}
+
+// getCallGraphAlgorithm returns the algorithm to use for call graph generation
+// based on the ALGO environment variable.
+// Supported algorithms: vta (default), cha, rta, static
+func getCallGraphAlgorithm() string {
+	algo := os.Getenv("ALGO")
+	if algo == "" {
+		algo = "vta" // default algorithm
+	}
+	return strings.ToLower(algo)
+}
+
+// buildCallGraph builds a call graph using the specified algorithm
+func buildCallGraph(prog *ssa.Program, algo string) *callgraph.Graph {
+	allFuncs := ssautil.AllFunctions(prog)
+
+	switch algo {
+	case "cha":
+		// Class Hierarchy Analysis - fast but less precise
+		return cha.CallGraph(prog)
+	case "rta":
+		// Rapid Type Analysis - good balance of speed and precision
+		return buildRTACallGraph(prog, allFuncs)
+	case "static":
+		// Static analysis - very fast but least precise (only direct calls)
+		return static.CallGraph(prog)
+	case "vta":
+		// Variable Type Analysis - most precise but slower (default)
+		return vta.CallGraph(allFuncs, nil)
+	default:
+		// Default to VTA if unknown algorithm specified
+		return vta.CallGraph(allFuncs, nil)
+	}
+}
+
+// buildRTACallGraph safely builds an RTA call graph with panic recovery
+func buildRTACallGraph(prog *ssa.Program, allFuncs map[*ssa.Function]bool) (result *callgraph.Graph) {
+	// RTA can panic on certain code patterns, so we recover and fallback
+	defer func() {
+		if r := recover(); r != nil {
+			// RTA panicked, fallback to static analysis
+			result = static.CallGraph(prog)
+		}
+	}()
+
+	var roots []*ssa.Function
+	for fn := range allFuncs {
+		if fn.Pkg != nil && fn.Pkg.Pkg.Name() == "main" && fn.Name() == "main" {
+			roots = append(roots, fn)
+		}
+	}
+	// If no main function found, fall back to static analysis
+	if len(roots) == 0 {
+		return static.CallGraph(prog)
+	}
+
+	// Try RTA analysis
+	rtaResult := rta.Analyze(roots, true)
+	if rtaResult != nil {
+		return rtaResult.CallGraph
+	}
+	// Fallback to static if RTA returns nil
+	return static.CallGraph(prog)
 }
 
 func getCurrentVersion(pkg string, dir string, result *Result) string {

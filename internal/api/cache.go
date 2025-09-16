@@ -34,7 +34,7 @@ func keyToFilename(key string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(key, "/", "_"), ":", "_") + ".json"
 }
 
-// ConvertCacheForRunFix converts cached runFix=false data to runFix=true format
+// ConvertCacheForRunFix converts cached fix=false data to fix=true format
 // by parsing fixCommands from cache and executing them in the cached directory
 func ConvertCacheForRunFix(cachedData []byte) ([]byte, error) {
 	var result map[string]interface{}
@@ -90,7 +90,7 @@ func ConvertCacheForRunFix(cachedData []byte) ([]byte, error) {
 						}
 
 						if len(fixCmds) > 0 {
-							// Use the shared runFixCommands function
+							// Use the shared fix commands function
 							cli.RunFixCommands(pkg, cachedDir, fixCmds, tempResult)
 						}
 					}

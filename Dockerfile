@@ -10,8 +10,10 @@ RUN go build -buildvcs=false -o /usr/bin/cg ./cmd/cg
 FROM quay.io/fedora/fedora:latest
 
 ARG WORKER_COUNT
+ARG ALGO
 
 ENV WORKER_COUNT=${WORKER_COUNT}
+ENV ALGO=${ALGO}
 ENV GOPATH=/go
 ENV PATH=${PATH}:${GOPATH}/bin
 ENV PATH=${PATH}:/go/src/github.com/k37y/gvs/bin

@@ -6,6 +6,7 @@ VERSION = $(shell git describe --tags --long --dirty 2>/dev/null)
 IMAGE = quay.io/kevy/${NAME}:${VERSION}
 IMAGE_NAME = $(basename $(IMAGE))
 PORT ?= 8082
+ALGO ?= vta
 GEMINI_CONF = $(HOME)/.gemini.conf
 PREFIX ?= /usr
 BINDIR ?= $(PREFIX)/bin
@@ -50,13 +51,15 @@ cg: $(CG_SOURCES)
 .PHONY: image
 
 image:
-	@if [ -n "$(WORKER_COUNT)" ]; then \
+	@BUILD_ARGS="--build-arg ALGO=$(ALGO)"; \
+	echo "Using ALGO=$(ALGO)"; \
+	if [ -n "$(WORKER_COUNT)" ]; then \
 		echo "Using WORKER_COUNT=$(WORKER_COUNT)"; \
-		podman build --build-arg WORKER_COUNT=$(WORKER_COUNT) --no-cache --file Dockerfile --tag ${IMAGE}; \
+		BUILD_ARGS="$$BUILD_ARGS --build-arg WORKER_COUNT=$(WORKER_COUNT)"; \
 	else \
-		echo "No WORKER_COUNT provided, building with #cpu/2 ..."; \
-		podman build --no-cache --file Dockerfile --tag ${IMAGE}; \
-	fi
+		echo "No WORKER_COUNT provided, building with default (#cpu/2)"; \
+	fi; \
+	podman build $$BUILD_ARGS --no-cache --file Dockerfile --tag ${IMAGE}
 
 .PHONY: image-run
 
@@ -77,8 +80,16 @@ image-push:
 	@if [ -z "$${REGISTRY_AUTH_FILE}" ]; then \
 		echo "ERROR: REGISTRY_AUTH_FILE is not set. Please export it before running make image"; \
 		exit 1; \
-	fi
-	podman build --no-cache --file Dockerfile --tag ${IMAGE}
+	fi; \
+	BUILD_ARGS="--build-arg ALGO=$(ALGO)"; \
+	echo "Using ALGO=$(ALGO)"; \
+	if [ -n "$(WORKER_COUNT)" ]; then \
+		echo "Using WORKER_COUNT=$(WORKER_COUNT)"; \
+		BUILD_ARGS="$$BUILD_ARGS --build-arg WORKER_COUNT=$(WORKER_COUNT)"; \
+	else \
+		echo "No WORKER_COUNT provided, building with default (#cpu/2)"; \
+	fi; \
+	podman build $$BUILD_ARGS --no-cache --file Dockerfile --tag ${IMAGE}
 	podman push --authfile ${REGISTREY_AUTH_FILE} ${IMAGE}
 
 .PHONY: set-image-ocp
