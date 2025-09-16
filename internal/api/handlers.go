@@ -62,9 +62,9 @@ func ScanHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Received request - Repo: %s, Branch: %s, Client IP: %s", scanRequest.Repo, scanRequest.Branch, clientIP)
+	log.Printf("Received request - Repo: %s, Branch: %s, Client IP: %s", scanRequest.Repo, scanRequest.BranchOrCommit, clientIP)
 
-	cacheKey := scanRequest.Repo + "@" + scanRequest.Branch
+	cacheKey := scanRequest.Repo + "@" + scanRequest.BranchOrCommit
 	if cachedData, err := RetrieveCacheFromDisk(cacheKey); err == nil {
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write(cachedData); err != nil {
@@ -86,9 +86,9 @@ func ScanHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = common.CloneRepo(scanRequest.Repo, scanRequest.Branch, cloneDir)
+	err = common.CloneRepo(scanRequest.Repo, scanRequest.BranchOrCommit, cloneDir)
 	if err != nil {
-		log.Printf("Clone failed for Repo: %s, Branch: %s, Error: %s", scanRequest.Repo, scanRequest.Branch, err.Error())
+		log.Printf("Clone failed for Repo: %s, Branch: %s, Error: %s", scanRequest.Repo, scanRequest.BranchOrCommit, err.Error())
 		response, _ := json.Marshal(gvc.ScanResponse{Success: false, ExitCode: 1, Error: err.Error()})
 		w.WriteHeader(http.StatusInternalServerError)
 		if _, err := w.Write(response); err != nil {
@@ -186,10 +186,10 @@ func writeJSONError(w http.ResponseWriter, statusCode int, msg string) {
 
 func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Repo   string `json:"repo"`
-		Branch string `json:"branch"`
-		CVE    string `json:"cve"`
-		Fix    bool   `json:"fix"`
+		Repo           string `json:"repo"`
+		BranchOrCommit string `json:"branchOrCommit"`
+		CVE            string `json:"cve"`
+		Fix            bool   `json:"fix"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -212,7 +212,7 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 	taskStore[taskId] = &TaskResult{Status: StatusPending}
 	taskMutex.Unlock()
 
-	go func(taskId, repo, branch, cve string, fix bool) {
+	go func(taskId, repo, branchOrCommit, cve string, fix bool) {
 		defer func() {
 			requestMutex.Lock()
 			inProgress = false
@@ -227,7 +227,7 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 
 		updateStatus(StatusRunning, "", "")
 
-		cacheKey := fmt.Sprintf("%s@%s:%s:fix=%t", repo, branch, cve, fix)
+		cacheKey := fmt.Sprintf("%s@%s:%s:fix=%t", repo, branchOrCommit, cve, fix)
 		if cachedData, err := RetrieveCacheFromDisk(cacheKey); err == nil {
 			updateStatus(StatusCompleted, string(cachedData), "")
 			log.Printf("[Task %s] Retrieved callgraph from cache", taskId)
@@ -237,7 +237,7 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 		// If fix=true and no direct cache, check for fix=false cache
 		// We can reuse the cached directory and execute fix commands from the cached data
 		if fix {
-			fallbackCacheKey := fmt.Sprintf("%s@%s:%s:fix=false", repo, branch, cve)
+			fallbackCacheKey := fmt.Sprintf("%s@%s:%s:fix=false", repo, branchOrCommit, cve)
 			if fallbackCachedData, err := RetrieveCacheFromDisk(fallbackCacheKey); err == nil {
 				// Parse the cached data, execute fix commands, and create fix=true response
 				start := time.Now()
@@ -263,8 +263,8 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		start := time.Now()
-		log.Printf("[Task %s] Cloning repository %s (%s) ...", taskId, repo, branch)
-		if err := common.CloneRepo(repo, branch, cloneDir); err != nil {
+		log.Printf("[Task %s] Cloning repository %s (%s) ...", taskId, repo, branchOrCommit)
+		if err := common.CloneRepo(repo, branchOrCommit, cloneDir); err != nil {
 			updateStatus(StatusFailed, "", fmt.Sprintf("git clone failed: %v", err))
 			return
 		}
@@ -292,7 +292,7 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 		if err := SaveCacheToDisk(cacheKey, output); err != nil {
 			log.Printf("[Task %s] Failed to save cache: %v", taskId, err)
 		}
-	}(taskId, req.Repo, req.Branch, req.CVE, req.Fix)
+	}(taskId, req.Repo, req.BranchOrCommit, req.CVE, req.Fix)
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]string{"taskId": taskId}); err != nil {

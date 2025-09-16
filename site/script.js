@@ -75,7 +75,7 @@ function runScan() {
 	scanInProgress = true;
 
 	const repo = document.getElementById("repo").value.trim();
-	const branch = document.getElementById("branch").value.trim();
+	const branchOrCommit = document.getElementById("branchOrCommit").value.trim();
 	const cve = document.getElementById("cve").value.trim();
 	// Automatically set fix to false if CVE ID is empty
 	const fix = cve ? document.getElementById("fix").value === "true" : false;
@@ -88,7 +88,7 @@ function runScan() {
 	scanButton.disabled = true;
 	scanButton.innerText = "Scanning...";
 
-	if (repo && branch && cve) {
+	if (repo && branchOrCommit && cve) {
 		const hostUrl = `${location.protocol}//${location.host}`;
 		outputDiv.innerHTML = getRandomSustainingQuestion();
 		outputDiv.classList.add("alert-warning");
@@ -99,7 +99,7 @@ function runScan() {
 			headers: {
 				"Content-Type": "application/json"
 			},
-			body: JSON.stringify({ repo, branch, cve, fix: fix })
+			body: JSON.stringify({ repo, branchOrCommit, cve, fix: fix })
 		})
 			.then(response => response.json())
 			.then(data => {
@@ -131,7 +131,7 @@ function runScan() {
 		fetch("/scan", {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ repo, branch }),
+			body: JSON.stringify({ repo, branchOrCommit }),
 			signal: controller.signal,
 		})
 			.then(response => response.json())

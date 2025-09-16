@@ -1,6 +1,6 @@
 ![gvs](https://github.com/user-attachments/assets/e726bf74-5bc4-48de-8b89-bc57ee6d53e4)
 
-Find vulnerability status from **Git repository URL**, **Git branch name**, and **CVE ID**
+Find vulnerability status from **Git repository URL**, **Git branch/commit**, and **CVE ID**
 ## Demo 1
 [!demo-1](https://github.com/user-attachments/assets/3b013256-368f-45b1-8cd3-897173a48814)
 ## Demo 2
@@ -9,7 +9,7 @@ Find vulnerability status from **Git repository URL**, **Git branch name**, and 
 ```mermaid
 flowchart TD
     A[Start: Input Parameters] --> B[Clone Repository]
-    B --> C[Checkout Branch]
+    B --> C[Checkout Branch or Commit ID]
     C --> D[Find Project Endpoint Files]
     D --> E[Find Affected Symbols from CVE ID]
     E --> F[Generate Endpoint-Symbol Combinations]
@@ -167,6 +167,45 @@ No errors or issues were encountered during the scanning process.
   }
 }
 ```
+## Branch and Commit Support
+
+The scanner supports both **branch names** and **commit hashes** for repository analysis:
+
+### Using Branch Names
+```bash
+# API request with branch name
+{
+  "repo": "https://github.com/example/repo",
+  "branchOrCommit": "main",           # ← Branch name
+  "cve": "CVE-2024-45339"
+}
+```
+
+### Using Commit Hashes
+```bash
+# API request with commit hash
+{
+  "repo": "https://github.com/example/repo", 
+  "branchOrCommit": "abc123f",        # ← Commit hash (7+ hex characters)
+  "cve": "CVE-2024-45339"
+}
+```
+
+### How It Works
+
+- **Branch Detection**: Names containing non-hex characters (e.g., `main`, `feature/test`, `release-4.18`)
+- **Commit Detection**: 7-40 character strings containing only hexadecimal characters (0-9, a-f, A-F)
+- **Performance**: Branch cloning uses `--depth 1` for speed, commit cloning uses full history to ensure commit accessibility
+
+### Examples
+
+| Input | Detected As | Clone Method |
+|-------|-------------|--------------|
+| `main` | Branch | `git clone --depth 1 --branch main` |
+| `feature/auth` | Branch | `git clone --depth 1 --branch feature/auth` |
+| `abc123f` | Commit | `git clone` → `git checkout abc123f` |
+| `1a2b3c4d5e6f7a8b` | Commit | `git clone` → `git checkout 1a2b3c4d5e6f7a8b` |
+
 ## Advanced usage
 ### Call Graph Algorithm Configuration
 The scanner supports multiple call graph algorithms, configurable via the `ALGO` environment variable:
