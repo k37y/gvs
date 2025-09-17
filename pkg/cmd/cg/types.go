@@ -91,5 +91,6 @@ type Replace struct {
 }
 
 type GoModEdit struct {
-	Replace []Replace
+	Go      string    `json:"Go"`
+	Replace []Replace `json:"Replace"`
 }
