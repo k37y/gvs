@@ -159,9 +159,24 @@ func (j Job) isVulnerable(result *Result) *Result {
 		} else {
 			// For stdlib packages: compare against the Go version fix
 			if len(fixVer) > 0 {
-				// Extract the Go version number from fixVer (e.g., "1.21.4" from various formats)
-				goFixVersion := extractGoVersion(fixVer[0])
-				if goFixVersion != "" && semver.Compare(compareVer, goFixVersion) < 0 {
+				// Get the actual Go toolchain version
+				goToolchainVersion := getGoToolchainVersion(filepath.Join(result.Directory, j.Dir), result)
+
+				// Check against all fixed versions to determine if vulnerable
+				isVulnerable := false
+				if goToolchainVersion != "" {
+					for _, fixVersion := range fixVer {
+						goFixVersion := extractGoVersion(fixVersion)
+						if goFixVersion != "" && semver.Compare(goToolchainVersion, goFixVersion) < 0 {
+							isVulnerable = true
+							break
+						}
+					}
+				}
+
+				if goToolchainVersion == "" {
+					result.IsVulnerable = "unknown"
+				} else if isVulnerable {
 					result.IsVulnerable = "true"
 				} else {
 					result.IsVulnerable = "false"
@@ -582,6 +597,37 @@ func getCurrentVersion(pkg string, dir string, result *Result) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func getGoToolchainVersion(dir string, result *Result) string {
+	cmd := "go"
+	args := []string{"mod", "edit", "-json"}
+	out, err := cli.RunCommand(dir, cmd, args...)
+	if err != nil {
+		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
+		result.Errors = append(result.Errors, errMsg)
+		return ""
+	}
+
+	var goModEdit GoModEdit
+	err = json.Unmarshal(out, &goModEdit)
+	if err != nil {
+		errMsg := fmt.Sprintf("Failed to parse go.mod JSON in %s: %v", dir, err)
+		result.Errors = append(result.Errors, errMsg)
+		return ""
+	}
+
+	// Get the Go version from go.mod
+	if goModEdit.Go != "" {
+		goVersion := goModEdit.Go
+		// Add 'v' prefix for semver compatibility if not present
+		if !strings.HasPrefix(goVersion, "v") {
+			goVersion = "v" + goVersion
+		}
+		return goVersion
+	}
+
+	return ""
 }
 
 func getReplaceVersion(pkg string, dir string, result *Result) string {
