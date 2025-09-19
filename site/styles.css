@@ -1,11 +1,172 @@
+/* CSS Variables for theming */
+:root {
+	--bg-color: #ffffff;
+	--text-color: #212529;
+	--card-bg: #ffffff;
+	--border-color: #dee2e6;
+	--muted-color: #6c757d;
+	--code-bg: #f8f9fa;
+	--code-color: #212529;
+	--result-card-border: #bbb;
+	--alert-success-bg: #d4edda;
+	--alert-success-border: #5cb85c;
+	--alert-warning-bg: #fff3cd;
+	--alert-warning-border: #f0ad4e;
+	--alert-warning-color: #856404;
+	--alert-danger-bg: #f8d7da;
+	--alert-danger-border: #d9534f;
+	--alert-danger-color: #721c24;
+	--highlight-key-color: #b30000;
+	--highlight-value-color: #007b00;
+	--btn-primary-bg: #0d6efd;
+	--btn-primary-border: #0d6efd;
+	--form-control-bg: #ffffff;
+	--form-control-border: #ced4da;
+	--shadow-color: rgba(0, 0, 0, 0.125);
+	--select-arrow: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23212529' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m1 6 6 6 6-6'/%3e%3c/svg%3e");
+}
+
+/* Dark mode variables */
+[data-theme="dark"] {
+	--bg-color: #212529;
+	--text-color: #f8f9fa;
+	--card-bg: #343a40;
+	--border-color: #495057;
+	--muted-color: #adb5bd;
+	--code-bg: #2d3748;
+	--code-color: #f8f9fa;
+	--result-card-border: #6c757d;
+	--alert-success-bg: #1e4d2b;
+	--alert-success-border: #28a745;
+	--alert-warning-bg: #5d4e00;
+	--alert-warning-border: #ffc107;
+	--alert-warning-color: #fff3cd;
+	--alert-danger-bg: #5f1a2b;
+	--alert-danger-border: #dc3545;
+	--alert-danger-color: #f8d7da;
+	--highlight-key-color: #ff6b6b;
+	--highlight-value-color: #51cf66;
+	--btn-primary-bg: #0d6efd;
+	--btn-primary-border: #0d6efd;
+	--form-control-bg: #495057;
+	--form-control-border: #6c757d;
+	--shadow-color: rgba(0, 0, 0, 0.3);
+	--select-arrow: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='white' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m1 6 6 6 6-6'/%3e%3c/svg%3e");
+}
+
+/* Apply theme variables to body */
+body {
+	background-color: var(--bg-color) !important;
+	color: var(--text-color) !important;
+	transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* Theme toggle button */
+.theme-toggle {
+	position: fixed;
+	top: 15px;
+	right: 15px;
+	z-index: 1000;
+	border: none;
+	border-radius: 50%;
+	width: 32px;
+	height: 32px;
+	background: var(--card-bg);
+	color: var(--text-color);
+	border: 1px solid var(--border-color);
+	cursor: pointer;
+	transition: all 0.2s ease;
+	box-shadow: 0 1px 3px var(--shadow-color);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 0;
+}
+
+/* Theme toggle icons using CSS */
+.theme-icon {
+	width: 12px;
+	height: 12px;
+	display: block;
+	transition: all 0.2s ease;
+}
+
+/* Light mode icon - filled circle */
+.theme-icon.sun {
+	background: var(--text-color);
+	border-radius: 50%;
+	position: relative;
+}
+
+/* Dark mode icon - empty circle */
+.theme-icon.moon {
+	background: transparent;
+	border: 2px solid var(--text-color);
+	border-radius: 50%;
+	position: relative;
+}
+
+.theme-toggle:hover {
+	transform: scale(1.05);
+	box-shadow: 0 2px 8px var(--shadow-color);
+}
+
+/* Card styling */
+.card {
+	background-color: var(--card-bg) !important;
+	border-color: var(--border-color) !important;
+	color: var(--text-color) !important;
+	box-shadow: 0 0.125rem 0.25rem var(--shadow-color) !important;
+}
+
+/* Form controls */
+.form-control, .form-select {
+	background-color: var(--form-control-bg) !important;
+	border-color: var(--form-control-border) !important;
+	color: var(--text-color) !important;
+}
+
+.form-select {
+	background-image: var(--select-arrow) !important;
+}
+
+.form-control:focus, .form-select:focus {
+	background-color: var(--form-control-bg) !important;
+	border-color: var(--btn-primary-border) !important;
+	color: var(--text-color) !important;
+	box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25) !important;
+}
+
+/* Text color utilities */
+.text-muted {
+	color: var(--muted-color) !important;
+}
+
+/* Code blocks */
+code {
+	font-family: monospace;
+	background-color: var(--code-bg) !important;
+	color: var(--code-color) !important;
+	padding: 0.2rem 0.4rem;
+	border-radius: 0.25rem;
+}
+
+/* Code blocks inside cards should match card background */
+.card code {
+	background-color: var(--card-bg) !important;
+	color: var(--text-color) !important;
+}
+
 .result-card {
 	display: none;
 	padding: 15px;
 	border-radius: 8px;
 	font-family: monospace;
-	border-left: 5px solid #bbb;
+	border-left: 5px solid var(--result-card-border);
 	margin-top: 20px;
 	overflow: auto;
+	background-color: var(--card-bg);
+	color: var(--text-color);
 }
 
 .result-card pre {
@@ -13,14 +174,108 @@
 	white-space: pre-wrap;
 	word-wrap: break-word;
 	overflow-wrap: break-word;
+	color: var(--text-color);
 }
 
-code {
-	font-family: monospace;
+.alert-success { 
+	background-color: var(--alert-success-bg) !important; 
+	border-left-color: var(--alert-success-border) !important; 
+	color: var(--text-color) !important;
 }
 
-.alert-success { background-color: #d4edda; border-left-color: #5cb85c; }
-.alert-warning { background-color: #fff3cd; border-left-color: #f0ad4e; color: #856404; }
-.alert-danger  { background-color: #f8d7da; border-left-color: #d9534f; color: #721c24; }
-.highlight-key { color: #b30000; font-weight: bold; }
-.highlight-value { color: #007b00; font-weight: bold; }
+.alert-warning { 
+	background-color: var(--alert-warning-bg) !important; 
+	border-left-color: var(--alert-warning-border) !important; 
+	color: var(--alert-warning-color) !important; 
+}
+
+.alert-danger { 
+	background-color: var(--alert-danger-bg) !important; 
+	border-left-color: var(--alert-danger-border) !important; 
+	color: var(--alert-danger-color) !important; 
+}
+
+.highlight-key { 
+	color: var(--highlight-key-color) !important; 
+	font-weight: bold; 
+}
+
+.highlight-value { 
+	color: var(--highlight-value-color) !important; 
+	font-weight: bold; 
+}
+
+/* Bootstrap component overrides for dark mode */
+[data-theme="dark"] .btn-primary {
+	background-color: var(--btn-primary-bg) !important;
+	border-color: var(--btn-primary-border) !important;
+}
+
+[data-theme="dark"] .btn-primary:hover {
+	background-color: #0b5ed7 !important;
+	border-color: #0a58ca !important;
+}
+
+[data-theme="dark"] .btn-primary:focus {
+	background-color: #0b5ed7 !important;
+	border-color: #0a58ca !important;
+	box-shadow: 0 0 0 0.25rem rgba(49, 132, 253, 0.5) !important;
+}
+
+[data-theme="dark"] .btn-primary:disabled {
+	background-color: #0d6efd !important;
+	border-color: #0d6efd !important;
+	opacity: 0.65;
+}
+
+/* Tooltip styling for light mode */
+.tooltip .tooltip-inner {
+	background-color: white !important;
+	color: black !important;
+	border: 1px solid #dee2e6;
+}
+
+.tooltip .tooltip-arrow::before {
+	border-top-color: #dee2e6 !important;
+}
+
+/* Tooltip styling for dark mode */
+[data-theme="dark"] .tooltip .tooltip-inner {
+	background-color: var(--card-bg) !important;
+	color: var(--text-color) !important;
+	border: 1px solid var(--border-color);
+}
+
+[data-theme="dark"] .tooltip .tooltip-arrow::before {
+	border-top-color: var(--border-color) !important;
+}
+
+/* Ensure smooth transitions for all themed elements */
+* {
+	transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+}
+
+/* Responsive design for theme toggle on mobile */
+@media (max-width: 768px) {
+	.theme-toggle {
+		top: 10px;
+		right: 10px;
+		width: 28px;
+		height: 28px;
+	}
+	
+	.theme-icon {
+		width: 10px;
+		height: 10px;
+	}
+	
+	.theme-icon.moon {
+		border: 1px solid var(--text-color);
+	}
+}
+
+/* Focus styles for accessibility */
+.theme-toggle:focus {
+	outline: 2px solid var(--btn-primary-bg);
+	outline-offset: 2px;
+}
