@@ -1,7 +1,41 @@
 let scanInProgress = false;
 
-// Add event listener to CVE ID field to automatically set Run Fix to "No" and disable when empty
+// Dark Mode Toggle Functionality
+class ThemeManager {
+	constructor() {
+		this.themeToggle = document.getElementById('themeToggle');
+		this.themeIcon = document.getElementById('themeIcon');
+		this.currentTheme = localStorage.getItem('theme') || 'light';
+		
+		this.init();
+	}
+	
+	init() {
+		this.applyTheme(this.currentTheme);
+		this.themeToggle.addEventListener('click', () => this.toggleTheme());
+	}
+	
+	toggleTheme() {
+		this.currentTheme = this.currentTheme === 'light' ? 'dark' : 'light';
+		this.applyTheme(this.currentTheme);
+		localStorage.setItem('theme', this.currentTheme);
+	}
+	
+	applyTheme(theme) {
+		document.documentElement.setAttribute('data-theme', theme);
+		this.themeIcon.className = theme === 'light' ? 'theme-icon moon' : 'theme-icon sun';
+		this.themeToggle.setAttribute('aria-label', 
+			theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'
+		);
+	}
+}
+
+// Initialize all components on DOM content loaded
 document.addEventListener('DOMContentLoaded', function() {
+	// Initialize theme manager
+	new ThemeManager();
+	
+	// Add event listener to CVE ID field to automatically set Run Fix to "No" and disable when empty
 	const cveInput = document.getElementById('cve');
 	const fixSelect = document.getElementById('fix');
 	

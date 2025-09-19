@@ -8,10 +8,15 @@
 		<link href="styles.css" rel="stylesheet">
 	</head>
 	<body class="container mt-5">
+		<!-- Dark Mode Toggle Button -->
+		<button class="theme-toggle" id="themeToggle" aria-label="Toggle dark mode">
+			<span id="themeIcon" class="theme-icon moon"></span>
+		</button>
+		
 		<h2 class="text-center">Golang Vulnerability Scanner</h2>
 		<p class="text-center text-muted">Analyze your Golang-based repository for vulnerabilities</p>	
 		<div class="card p-3 shadow-sm mb-4">
-			<code class="d-block text-dark rounded p-3 text-start" style="font-size: 0.9em;">
+			<code class="d-block rounded p-3 text-start" style="font-size: 0.9em;">
 				Important fields that need to be checked in the JSON output<br><br>
 				<strong>IsVulnerable:</strong> It has three values - true, false, and unknown. If it is true, then the repository is vulnerable to the CVE ID. If it is false, then the repository is not vulnerable to the CVE ID. If it is unknown, then the scanning is failed.<br>
 				<strong>AffectedImports:</strong> It is a list of symbols that are affected by the CVE ID. It contains information about the symbol's name, version, and its library name.<br>
