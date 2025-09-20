@@ -1,15 +1,23 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/k37y/gvs/internal/cli"
 	"github.com/k37y/gvs/internal/common"
@@ -26,6 +34,7 @@ func main() {
 	// Define flags
 	var fix = flag.Bool("fix", false, "run fix commands after analysis")
 	var algo = flag.String("algo", "vta", "call graph algorithm: vta (default), cha, rta, static")
+	var progress = flag.Bool("progress", false, "show progress of completed and pending jobs")
 
 	// Custom usage function
 	flag.Usage = func() {
@@ -82,14 +91,52 @@ func main() {
 		}
 	}
 
-	result := cg.InitResult(cveID, directory, *fix)
+	// Initialize result with progress tracking if enabled
+	var result *cg.Result
+	if *progress {
+		fmt.Fprintf(os.Stderr, "Initializing vulnerability scan...\n")
+		result = initResultWithProgress(cveID, directory, *fix)
+	} else {
+		result = cg.InitResult(cveID, directory, *fix)
+	}
 
 	jobs := make(chan cg.Job)
 	results := make(chan *cg.Result)
 
 	var wg sync.WaitGroup
 
+	// Progress tracking variables
+	var totalJobs int64
+	var completedJobs int64
+	var progressDone = make(chan bool)
+	var lastPrintedPercentage float64 = -1
+
 	workerCount := defaultWorkers
+
+	// Start progress display goroutine if progress flag is enabled
+	if *progress {
+		go func() {
+			ticker := time.NewTicker(3 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-progressDone:
+					return
+				case <-ticker.C:
+					completed := atomic.LoadInt64(&completedJobs)
+					total := atomic.LoadInt64(&totalJobs)
+					if total > 0 {
+						percentage := float64(completed) / float64(total) * 100
+						// Only print if percentage has changed
+						if percentage != lastPrintedPercentage {
+							fmt.Fprintf(os.Stderr, "Progress: %d/%d jobs completed (%.1f%%)\n", completed, total, percentage)
+							lastPrintedPercentage = percentage
+						}
+					}
+				}
+			}
+		}()
+	}
 
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
@@ -97,6 +144,18 @@ func main() {
 	}
 
 	go func() {
+		// Count total jobs first if progress is enabled
+		if *progress {
+			for _, sets := range result.Files {
+				for range sets {
+					for range result.AffectedImports {
+						atomic.AddInt64(&totalJobs, 1)
+					}
+				}
+			}
+		}
+
+		// Send jobs to workers
 		for modDir, sets := range result.Files {
 			for _, fset := range sets {
 				for pkg, syms := range result.AffectedImports {
@@ -115,6 +174,11 @@ func main() {
 	mergedImports := make(map[string]cg.UsedImportsDetails)
 
 	for res := range results {
+		// Increment completed jobs counter for progress tracking
+		if *progress {
+			atomic.AddInt64(&completedJobs, 1)
+		}
+
 		if res.IsVulnerable != "true" {
 			continue
 		}
@@ -142,6 +206,17 @@ func main() {
 				mergedImports[pkg] = entry
 				result.Mu.Unlock()
 			}
+		}
+	}
+
+	// Stop progress display
+	if *progress {
+		close(progressDone)
+		completed := atomic.LoadInt64(&completedJobs)
+		total := atomic.LoadInt64(&totalJobs)
+		// Only print final progress if 100% hasn't been printed yet
+		if lastPrintedPercentage != 100.0 {
+			fmt.Fprintf(os.Stderr, "Progress: %d/%d jobs completed (100.0%%)\n", completed, total)
 		}
 	}
 
@@ -191,10 +266,33 @@ func main() {
 			Summary:         result.Summary,
 		}
 
+		// Count packages with fix commands for progress tracking
+		packagesWithFixes := 0
+		for _, details := range result.UsedImports {
+			if len(details.FixCommands) > 0 {
+				packagesWithFixes++
+			}
+		}
+
+		if packagesWithFixes > 0 && *progress {
+			fmt.Fprintf(os.Stderr, "Running fix commands for %d package(s)...\n", packagesWithFixes)
+		}
+
+		processedPackages := 0
 		for pkg, details := range result.UsedImports {
 			if len(details.FixCommands) > 0 {
+				if *progress {
+					processedPackages++
+					fmt.Fprintf(os.Stderr, "Fix progress: %d/%d packages processed (%.1f%%) - Running fixes for %s\n",
+						processedPackages, packagesWithFixes,
+						float64(processedPackages)/float64(packagesWithFixes)*100, pkg)
+				}
 				cli.RunFixCommands(pkg, result.Directory, details.FixCommands, fixResult)
 			}
+		}
+
+		if packagesWithFixes > 0 && *progress {
+			fmt.Fprintf(os.Stderr, "Fix commands completed for all packages\n")
 		}
 
 		// Read gvs-output.txt to populate fix results (only if fixes were run)
@@ -215,4 +313,260 @@ func main() {
 	} else {
 		fmt.Println(string(jsonOutput))
 	}
+}
+
+// initResultWithProgress initializes the result with progress tracking for each phase
+func initResultWithProgress(cve, dir string, fix bool) *cg.Result {
+	r := &cg.Result{
+		CVE:          cve,
+		Directory:    dir,
+		IsVulnerable: "unknown",
+	}
+
+	// Only initialize fix-related fields if fix is true
+	if fix {
+		cursorCmd := fmt.Sprintf("cursor --remote ssh-remote+gvs-host %s", dir)
+		r.CursorCommand = &cursorCmd
+		fixErrors := []string{}
+		fixSuccess := []string{}
+		r.FixErrors = &fixErrors
+		r.FixSuccess = &fixSuccess
+	}
+
+	// Phase 1: Fetch Go vulnerability ID
+	fmt.Fprintf(os.Stderr, "Phase 1/5: Fetching Go vulnerability ID...\n")
+	fetchGoVulnIDWithProgress(r)
+
+	// Phase 2: Fetch affected symbols
+	fmt.Fprintf(os.Stderr, "Phase 2/5: Fetching affected symbols...\n")
+	fetchAffectedSymbolsWithProgress(r)
+
+	// Phase 3: Find main Go files and directories
+	fmt.Fprintf(os.Stderr, "Phase 3/5: Discovering Go modules and main files...\n")
+	findMainGoFilesWithProgress(r)
+
+	// Phase 4: Get git branch
+	fmt.Fprintf(os.Stderr, "Phase 4/5: Getting git branch information...\n")
+	getGitBranchWithProgress(r)
+
+	// Phase 5: Get git URL
+	fmt.Fprintf(os.Stderr, "Phase 5/5: Getting git repository URL...\n")
+	getGitURLWithProgress(r)
+
+	if r.GoCVE == "" {
+		r = &cg.Result{
+			GoCVE:        "No Go CVE ID found",
+			IsVulnerable: "unknown",
+			CVE:          r.CVE,
+			Directory:    r.Directory,
+			Branch:       r.Branch,
+			Repository:   r.Repository,
+		}
+		jsonOutput, err := json.MarshalIndent(r, "", "  ")
+		if err != nil {
+			errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
+			r.Errors = append(r.Errors, errMsg)
+		}
+		fmt.Println(string(jsonOutput))
+		os.Exit(0)
+	}
+
+	fmt.Fprintf(os.Stderr, "Initialization complete. Starting vulnerability analysis...\n")
+	return r
+}
+
+// Progress-aware wrapper functions for initialization phases
+
+func fetchGoVulnIDWithProgress(result *cg.Result) {
+	client := http.Client{Timeout: 10 * time.Second}
+	url := fmt.Sprintf("https://vuln.go.dev/index/vulns.json")
+
+	resp, err := client.Get(url)
+	if err != nil {
+		errMsg := fmt.Sprintf("Failed to get response from %s: %v", url, err)
+		result.Errors = append(result.Errors, errMsg)
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		errMsg := fmt.Sprintf("Failed to read response body from %s: %v", url, err)
+		result.Errors = append(result.Errors, errMsg)
+		return
+	}
+
+	var vulns []cg.VulnReport
+	if err := json.Unmarshal(body, &vulns); err != nil {
+		errMsg := fmt.Sprintf("Failed to marshal response body from %s: %v", url, err)
+		result.Errors = append(result.Errors, errMsg)
+		return
+	}
+
+	for _, v := range vulns {
+		if slices.Contains(v.Aliases, result.CVE) {
+			result.GoCVE = v.ID
+			break
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "  ✓ Go vulnerability ID fetched: %s\n", result.GoCVE)
+}
+
+func fetchAffectedSymbolsWithProgress(result *cg.Result) {
+	client := http.Client{Timeout: 10 * time.Second}
+	url := fmt.Sprintf("https://vuln.go.dev/ID/%s.json", result.GoCVE)
+
+	resp, err := client.Get(url)
+	if err != nil {
+		errMsg := fmt.Sprintf("Failed HTTP request to %s: %v", url, err)
+		result.Errors = append(result.Errors, errMsg)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		errMsg := fmt.Sprintf("Failed to connect %s: %s", url, resp.Status)
+		result.Errors = append(result.Errors, errMsg)
+		return
+	}
+
+	var detail cg.VulnReport
+	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
+		errMsg := fmt.Sprintf("Failed to parse JSON: %v", err)
+		result.Errors = append(result.Errors, errMsg)
+		return
+	}
+
+	imports := make(map[string]cg.AffectedImportsDetails)
+	symbolCount := 0
+
+	for _, aff := range detail.Affected {
+		typ := "non-stdlib"
+		if aff.Package.Name == "stdlib" {
+			typ = "stdlib"
+		}
+		for _, imp := range aff.EcosystemSpecific.Imports {
+			entry := imports[imp.Path]
+			entry.Symbols = append(entry.Symbols, imp.Symbols...)
+			entry.Type = typ
+			imports[imp.Path] = entry
+			symbolCount += len(imp.Symbols)
+		}
+	}
+
+	result.AffectedImports = imports
+	fmt.Fprintf(os.Stderr, "  ✓ Affected symbols fetched: %d symbols across %d packages\n", symbolCount, len(imports))
+}
+
+func findMainGoFilesWithProgress(result *cg.Result) {
+	fmt.Fprintf(os.Stderr, "  Scanning directory structure...\n")
+
+	fileResult := make(map[string][][]string)
+	var modDirs []string
+
+	// Walk directory with progress feedback
+	err := filepath.WalkDir(result.Directory, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && (strings.HasPrefix(d.Name(), ".")) {
+			return filepath.SkipDir
+		}
+		if d.IsDir() && d.Name() == "vendor" {
+			return filepath.SkipDir
+		}
+		if d.Name() == "go.mod" {
+			modDirs = append(modDirs, filepath.Dir(path))
+			fmt.Fprintf(os.Stderr, "  Found Go module: %s\n", filepath.Dir(path))
+		}
+		return nil
+	})
+	if err != nil {
+		errMsg := fmt.Sprintf("Failed to run filepath.WalkDir in %s: %v", result.Directory, err)
+		result.Errors = append(result.Errors, errMsg)
+	}
+
+	fmt.Fprintf(os.Stderr, "  Analyzing %d Go modules...\n", len(modDirs))
+
+	for i, modDir := range modDirs {
+		fmt.Fprintf(os.Stderr, "  Processing module %d/%d: %s\n", i+1, len(modDirs), modDir)
+
+		cmd := "go"
+		args := []string{"list", "-f", `{{if eq .Name "main"}}{{.Name}}: {{.Dir}}{{end}}`, "./..."}
+		out, err := cli.RunCommand(modDir, cmd, args...)
+		if err != nil {
+			errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), modDir, strings.TrimSpace(string(out)))
+			result.Errors = append(result.Errors, errMsg)
+			continue
+		}
+
+		modKey, err := filepath.Rel(result.Directory, modDir)
+		if err != nil {
+			modKey = modDir
+		}
+
+		var sets [][]string
+		mainPackageCount := 0
+
+		scanner := bufio.NewScanner(bytes.NewReader(out))
+		for scanner.Scan() {
+			line := scanner.Text()
+			if !strings.HasPrefix(line, "main") {
+				continue
+			}
+			parts := strings.SplitN(line, ": ", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			dirPath := parts[1]
+			files, _ := filepath.Glob(filepath.Join(dirPath, "*.go"))
+			var group []string
+			for _, file := range files {
+				if strings.HasSuffix(file, "_test.go") || strings.Contains(filepath.Base(file), "windows") {
+					continue
+				}
+				rel, _ := filepath.Rel(modDir, file)
+				group = append(group, rel)
+			}
+			if len(group) > 0 {
+				sort.Strings(group)
+				sets = append(sets, group)
+				mainPackageCount++
+			}
+		}
+
+		if mainPackageCount > 0 {
+			fmt.Fprintf(os.Stderr, "    Found %d main package(s) with %d file set(s)\n", mainPackageCount, len(sets))
+		}
+
+		fileResult[modKey] = sets
+	}
+
+	result.Files = fileResult
+	fmt.Fprintf(os.Stderr, "  ✓ Directory and fileset discovery complete\n")
+}
+
+func getGitBranchWithProgress(result *cg.Result) {
+	cmd := "git"
+	args := []string{"rev-parse", "--abbrev-ref", "HEAD"}
+	out, err := cli.RunCommand(result.Directory, cmd, args...)
+	if err != nil {
+		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), result.Directory, strings.TrimSpace(string(out)))
+		result.Errors = append(result.Errors, errMsg)
+	}
+	result.Branch = strings.TrimSpace(string(out))
+	fmt.Fprintf(os.Stderr, "  ✓ Git branch information retrieved: %s\n", result.Branch)
+}
+
+func getGitURLWithProgress(result *cg.Result) {
+	cmd := "git"
+	args := []string{"remote", "get-url", "origin"}
+	out, err := cli.RunCommand(result.Directory, cmd, args...)
+	if err != nil {
+		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), result.Directory, strings.TrimSpace(string(out)))
+		result.Errors = append(result.Errors, errMsg)
+	}
+	result.Repository = strings.TrimSpace(string(out))
+	fmt.Fprintf(os.Stderr, "  ✓ Git repository URL retrieved: %s\n", result.Repository)
 }

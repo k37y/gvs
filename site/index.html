@@ -26,53 +26,62 @@
 				<strong>Summary:</strong> It is a summary of the JSON output using the Gemini API.<br>
 			</code>
 		</div>
-		<div class="card p-4 shadow-sm">
-			<div class="row mb-3 align-items-end">
-				<div class="col-md-5">
-					<label for="repo" class="form-label">
-						Repository URL
-						<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted" 
-							  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
-							  data-bs-toggle="tooltip" data-bs-placement="top" 
-							  title="Git repository URL from GitHub, GitLab, Bitbucket, etc. Must be publicly accessible.">?</span>
-					</label>
-					<input type="text" id="repo" class="form-control" placeholder="Enter repo URL" value="https://github.com/openshift/sriov-network-device-plugin">
+		<div class="card p-4 shadow-sm expandable-card" onclick="handleCardClick(event)">
+			<div class="card-header-section">
+				<div class="row mb-3 align-items-end">
+					<div class="col-md-5">
+						<label for="repo" class="form-label">
+							Repository URL
+							<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted" 
+								  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
+								  data-bs-toggle="tooltip" data-bs-placement="top" 
+								  title="Git repository URL from GitHub, GitLab, Bitbucket, etc. Must be publicly accessible.">?</span>
+						</label>
+						<input type="text" id="repo" class="form-control" placeholder="Enter repo URL" value="https://github.com/openshift/sriov-network-device-plugin">
+					</div>
+					<div class="col-md-2">
+						<label for="branchOrCommit" class="form-label">
+							Branch or Commit ID
+							<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted" 
+								  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
+								  data-bs-toggle="tooltip" data-bs-placement="top" 
+								  title="Branch name (e.g., main, master, develop) or commit hash (e.g., abc123f, 1a2b3c4d5e6f7a8b). For commit hashes, use 7+ character SHA hashes for reliable detection.">?</span>
+						</label>
+						<input type="text" id="branchOrCommit" class="form-control" placeholder="Branch or commit id" value="release-4.18">
+					</div>
+					<div class="col-md-2">
+						<label for="cve" class="form-label">
+							CVE ID (optional)
+							<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted" 
+								  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
+								  data-bs-toggle="tooltip" data-bs-placement="top" 
+								  title="Specific CVE identifier to check (e.g., CVE-2024-45338). If left empty, scans for all known Go vulnerabilities in the repository.">?</span>
+						</label>
+						<input type="text" id="cve" class="form-control" placeholder="Enter CVE ID" value="CVE-2024-45339">
+					</div>
+					<div class="col-md-1">
+						<label for="fix" class="form-label">
+							Run Fix
+							<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted" 
+								  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
+								  data-bs-toggle="tooltip" data-bs-placement="top" 
+								  title="Select 'Yes' to execute fix commands automatically and get CursorCommand, FixError, and FixSuccess in the results. Select 'No' for vulnerability scanning only.">?</span>
+						</label>
+						<select id="fix" class="form-select">
+							<option value="false">No</option>
+							<option value="true">Yes</option>
+						</select>
+					</div>
+					<div class="col-md-2 text-end">
+						<button id="scanButton" class="btn btn-primary w-100" onclick="runScan()">Run Scan</button>
+					</div>
 				</div>
-				<div class="col-md-2">
-					<label for="branchOrCommit" class="form-label">
-						Branch or Commit ID
-						<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted" 
-							  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
-							  data-bs-toggle="tooltip" data-bs-placement="top" 
-							  title="Branch name (e.g., main, master, develop) or commit hash (e.g., abc123f, 1a2b3c4d5e6f7a8b). For commit hashes, use 7+ character SHA hashes for reliable detection.">?</span>
-					</label>
-					<input type="text" id="branchOrCommit" class="form-control" placeholder="Branch or commit hash" value="release-4.18">
-				</div>
-				<div class="col-md-2">
-					<label for="cve" class="form-label">
-						CVE ID (optional)
-						<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted" 
-							  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
-							  data-bs-toggle="tooltip" data-bs-placement="top" 
-							  title="Specific CVE identifier to check (e.g., CVE-2024-45338). If left empty, scans for all known Go vulnerabilities in the repository.">?</span>
-					</label>
-					<input type="text" id="cve" class="form-control" placeholder="Enter CVE ID" value="CVE-2024-45339">
-				</div>
-				<div class="col-md-1">
-					<label for="fix" class="form-label">
-						Run Fix
-						<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted" 
-							  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
-							  data-bs-toggle="tooltip" data-bs-placement="top" 
-							  title="Select 'Yes' to execute fix commands automatically and get CursorCommand, FixError, and FixSuccess in the results. Select 'No' for vulnerability scanning only.">?</span>
-					</label>
-					<select id="fix" class="form-select">
-						<option value="false">No</option>
-						<option value="true">Yes</option>
-					</select>
-				</div>
-				<div class="col-md-2 text-end">
-					<button id="scanButton" class="btn btn-primary w-100" onclick="runScan()">Run Scan</button>
+			</div>
+			
+			<!-- Integrated Progress Section -->
+			<div class="progress-section">
+				<div id="progressContent" class="progress-content collapsed">
+					<div class="progress-placeholder">Server progress will appear here during scans. Progress from previous scans is preserved until the next scan starts.</div>
 				</div>
 			</div>
 		</div>

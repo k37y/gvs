@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -18,10 +19,12 @@ import (
 )
 
 var (
-	requestMutex sync.Mutex
-	inProgress   bool
-	taskStore    = make(map[string]*TaskResult)
-	taskMutex    sync.Mutex
+	requestMutex    sync.Mutex
+	inProgress      bool
+	taskStore       = make(map[string]*TaskResult)
+	taskMutex       sync.Mutex
+	progressStreams = make(map[string]chan string)
+	progressMutex   sync.Mutex
 )
 
 type TaskStatus string
@@ -40,133 +43,183 @@ type TaskResult struct {
 }
 
 func ScanHandler(w http.ResponseWriter, r *http.Request) {
-	if inProgress {
-		http.Error(w, `{"error": "Another scan is in progress. Please wait."}`, http.StatusTooManyRequests)
+	var req struct {
+		Repo           string `json:"repo"`
+		BranchOrCommit string `json:"branchOrCommit"`
+		ShowProgress   bool   `json:"showProgress"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "Invalid request payload")
 		return
+	}
+
+	// Convert to legacy format for backward compatibility
+	scanRequest := gvc.ScanRequest{
+		Repo:           req.Repo,
+		BranchOrCommit: req.BranchOrCommit,
 	}
 
 	requestMutex.Lock()
-	inProgress = true
-	defer func() {
-		inProgress = false
+	if inProgress {
 		requestMutex.Unlock()
-	}()
-
-	startTime := time.Now()
-	clientIP := r.RemoteAddr
-
-	var scanRequest gvc.ScanRequest
-	err := json.NewDecoder(r.Body).Decode(&scanRequest)
-	if err != nil {
-		http.Error(w, `{"error": "Invalid JSON format"}`, http.StatusBadRequest)
+		writeJSONError(w, http.StatusTooManyRequests, "Another scan is in progress. Please wait.")
 		return
 	}
+	inProgress = true
+	requestMutex.Unlock()
 
-	log.Printf("Received request - Repo: %s, Branch: %s, Client IP: %s", scanRequest.Repo, scanRequest.BranchOrCommit, clientIP)
+	// Create task ID for progress tracking
+	taskId := fmt.Sprintf("%d", time.Now().UnixNano())
 
-	cacheKey := scanRequest.Repo + "@" + scanRequest.BranchOrCommit
-	if cachedData, err := RetrieveCacheFromDisk(cacheKey); err == nil {
-		w.WriteHeader(http.StatusOK)
-		if _, err := w.Write(cachedData); err != nil {
-			log.Printf("failed to write response: %v", err)
-		}
-		log.Print("Retrieved from cache")
-		return
-	}
+	taskMutex.Lock()
+	taskStore[taskId] = &TaskResult{Status: StatusPending}
+	taskMutex.Unlock()
 
-	repoName := filepath.Base(scanRequest.Repo)
-	cloneDir, err := os.MkdirTemp("", "gvc-"+path.Base(repoName)+"-*")
-	if err != nil {
-		log.Printf("failed to create temp dir: %v", err)
-		response, _ := json.Marshal(gvc.ScanResponse{Success: false, ExitCode: 1, Error: err.Error()})
-		w.WriteHeader(http.StatusInternalServerError)
-		if _, err := w.Write(response); err != nil {
-			log.Printf("failed to write response: %v", err)
-		}
-		return
-	}
+	// Always initialize progress stream
+	progressMutex.Lock()
+	progressStreams[taskId] = make(chan string, 100)
+	progressMutex.Unlock()
 
-	err = common.CloneRepo(scanRequest.Repo, scanRequest.BranchOrCommit, cloneDir)
-	if err != nil {
-		log.Printf("Clone failed for Repo: %s, Branch: %s, Error: %s", scanRequest.Repo, scanRequest.BranchOrCommit, err.Error())
-		response, _ := json.Marshal(gvc.ScanResponse{Success: false, ExitCode: 1, Error: err.Error()})
-		w.WriteHeader(http.StatusInternalServerError)
-		if _, err := w.Write(response); err != nil {
-			log.Printf("failed to write response: %v", err)
-		}
-		return
-	}
+	go func(taskId string, scanRequest gvc.ScanRequest) {
+		defer func() {
+			requestMutex.Lock()
+			inProgress = false
+			requestMutex.Unlock()
 
-	moduleDirs, err := common.FindGoModDirs(cloneDir)
-	if err != nil || len(moduleDirs) == 0 {
-		log.Printf("No go.mod files found in Repo: %s", scanRequest.Repo)
-		response, _ := json.Marshal(gvc.ScanResponse{Success: false, ExitCode: 1, Error: "No Go modules found"})
-		w.WriteHeader(http.StatusInternalServerError)
-		if _, err := w.Write(response); err != nil {
-			log.Printf("failed to write response: %v", err)
-		}
-		return
-	}
-
-	var combinedOutput []map[string]any
-	finalExitCode := 0
-
-	for _, modDir := range moduleDirs {
-		output, exitCode, err := common.RunGovulncheck(modDir, "./...")
-		if exitCode > finalExitCode {
-			finalExitCode = exitCode
-		}
-
-		if err != nil && exitCode != 3 {
-			log.Printf("govulncheck failed in %s: %v", modDir, err)
-			continue
-		}
-
-		var sarif gvc.Sarif
-		err = json.Unmarshal([]byte(output), &sarif)
-		if err != nil {
-			log.Printf("Failed to parse govulncheck output in %s", modDir)
-			continue
-		}
-
-		var findings []map[string]any
-		for _, run := range sarif.Runs {
-			for _, result := range run.Results {
-				findings = append(findings, map[string]any{
-					"ruleId":  result.RuleID,
-					"message": result.Message.Text,
-				})
+			// Always close progress stream
+			progressMutex.Lock()
+			if ch, exists := progressStreams[taskId]; exists {
+				close(ch)
+				delete(progressStreams, taskId)
 			}
+			progressMutex.Unlock()
+		}()
+
+		updateStatus := func(status TaskStatus, output, errMsg string) {
+			taskMutex.Lock()
+			defer taskMutex.Unlock()
+			taskStore[taskId] = &TaskResult{Status: status, Output: output, Error: errMsg}
 		}
 
-		var relativePath string
-		if modDir == cloneDir {
-			relativePath = repoName
-		} else {
-			relativePath = filepath.Join(repoName, strings.TrimPrefix(modDir, cloneDir+"/"))
+		sendProgress := func(message string) {
+			progressMutex.Lock()
+			if ch, exists := progressStreams[taskId]; exists {
+				select {
+				case ch <- message:
+				default:
+					// Channel full, skip message
+				}
+			}
+			progressMutex.Unlock()
 		}
 
-		combinedOutput = append(combinedOutput, map[string]any{
-			"directory": relativePath,
-			"results":   findings,
+		updateStatus(StatusRunning, "", "")
+		startTime := time.Now()
+		clientIP := r.RemoteAddr
+
+		log.Printf("[Task %s] Received request - Repo: %s, Branch: %s, Client IP: %s", taskId, scanRequest.Repo, scanRequest.BranchOrCommit, clientIP)
+
+		cacheKey := scanRequest.Repo + "@" + scanRequest.BranchOrCommit
+		if cachedData, err := RetrieveCacheFromDisk(cacheKey); err == nil {
+			updateStatus(StatusCompleted, string(cachedData), "")
+			log.Printf("[Task %s] Retrieved from cache", taskId)
+			return
+		}
+
+		repoName := filepath.Base(scanRequest.Repo)
+		cloneDir, err := os.MkdirTemp("", "gvc-"+path.Base(repoName)+"-*")
+		if err != nil {
+			log.Printf("[Task %s] failed to create temp dir: %v", taskId, err)
+			updateStatus(StatusFailed, "", fmt.Sprintf("failed to create temp dir: %v", err))
+			return
+		}
+
+		start := time.Now()
+		log.Printf("[Task %s] Cloning repository %s (%s)...", taskId, scanRequest.Repo, scanRequest.BranchOrCommit)
+		sendProgress(fmt.Sprintf("Cloning repository %s (%s)...", scanRequest.Repo, scanRequest.BranchOrCommit))
+		err = common.CloneRepo(scanRequest.Repo, scanRequest.BranchOrCommit, cloneDir)
+		if err != nil {
+			log.Printf("[Task %s] Clone failed for Repo: %s, Branch: %s, Error: %s", taskId, scanRequest.Repo, scanRequest.BranchOrCommit, err.Error())
+			updateStatus(StatusFailed, "", fmt.Sprintf("git clone failed: %v", err))
+			return
+		}
+		log.Printf("[Task %s] Clone successful - Took %s", taskId, time.Since(start))
+		sendProgress(fmt.Sprintf("Clone successful - Took %s", time.Since(start)))
+
+		sendProgress("Discovering Go modules...")
+		moduleDirs, err := common.FindGoModDirs(cloneDir)
+		if err != nil || len(moduleDirs) == 0 {
+			log.Printf("[Task %s] No go.mod files found in Repo: %s", taskId, scanRequest.Repo)
+			updateStatus(StatusFailed, "", "No Go modules found")
+			return
+		}
+		sendProgress(fmt.Sprintf("Found %d Go module(s)", len(moduleDirs)))
+
+		var combinedOutput []map[string]any
+		finalExitCode := 0
+
+		for i, modDir := range moduleDirs {
+			sendProgress(fmt.Sprintf("Running govulncheck on module %d/%d", i+1, len(moduleDirs)))
+			output, exitCode, err := runGovulncheckWithProgress(modDir, "./...", sendProgress)
+			if exitCode > finalExitCode {
+				finalExitCode = exitCode
+			}
+
+			if err != nil && exitCode != 3 {
+				log.Printf("[Task %s] govulncheck failed in %s: %v", taskId, modDir, err)
+				continue
+			}
+
+			var sarif gvc.Sarif
+			err = json.Unmarshal([]byte(output), &sarif)
+			if err != nil {
+				log.Printf("[Task %s] Failed to parse govulncheck output in %s", taskId, modDir)
+				continue
+			}
+
+			var findings []map[string]any
+			for _, run := range sarif.Runs {
+				for _, result := range run.Results {
+					findings = append(findings, map[string]any{
+						"ruleId":  result.RuleID,
+						"message": result.Message.Text,
+					})
+				}
+			}
+
+			var relativePath string
+			if modDir == cloneDir {
+				relativePath = repoName
+			} else {
+				relativePath = filepath.Join(repoName, strings.TrimPrefix(modDir, cloneDir+"/"))
+			}
+
+			combinedOutput = append(combinedOutput, map[string]any{
+				"directory": relativePath,
+				"results":   findings,
+			})
+		}
+
+		response, _ := json.Marshal(gvc.ScanResponse{
+			Success:  true,
+			ExitCode: finalExitCode,
+			Output:   combinedOutput,
 		})
-	}
 
-	response, _ := json.Marshal(gvc.ScanResponse{
-		Success:  true,
-		ExitCode: finalExitCode,
-		Output:   combinedOutput,
-	})
-	w.WriteHeader(http.StatusOK)
-	if _, err := w.Write(response); err != nil {
-		log.Printf("failed to write response: %v", err)
-	}
+		updateStatus(StatusCompleted, string(response), "")
 
-	if err = SaveCacheToDisk(cacheKey, response); err != nil {
-		log.Printf("Error saving the cache to disk: %v", err)
-	}
+		if err := SaveCacheToDisk(cacheKey, response); err != nil {
+			log.Printf("[Task %s] Error saving the cache to disk: %v", taskId, err)
+		}
 
-	log.Printf("Request completed - Time Taken: %s", time.Since(startTime))
+		log.Printf("[Task %s] Request completed - Time Taken: %s", taskId, time.Since(startTime))
+	}(taskId, scanRequest)
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]string{"taskId": taskId}); err != nil {
+		log.Printf("failed to write taskId response: %v", err)
+	}
 }
 
 func HealthHandler(w http.ResponseWriter, r *http.Request) {
@@ -190,6 +243,7 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 		BranchOrCommit string `json:"branchOrCommit"`
 		CVE            string `json:"cve"`
 		Fix            bool   `json:"fix"`
+		ShowProgress   bool   `json:"showProgress"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -212,17 +266,42 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 	taskStore[taskId] = &TaskResult{Status: StatusPending}
 	taskMutex.Unlock()
 
+	// Always initialize progress stream
+	progressMutex.Lock()
+	progressStreams[taskId] = make(chan string, 100)
+	progressMutex.Unlock()
+
 	go func(taskId, repo, branchOrCommit, cve string, fix bool) {
 		defer func() {
 			requestMutex.Lock()
 			inProgress = false
 			requestMutex.Unlock()
+
+			// Always close progress stream
+			progressMutex.Lock()
+			if ch, exists := progressStreams[taskId]; exists {
+				close(ch)
+				delete(progressStreams, taskId)
+			}
+			progressMutex.Unlock()
 		}()
 
 		updateStatus := func(status TaskStatus, output, errMsg string) {
 			taskMutex.Lock()
 			defer taskMutex.Unlock()
 			taskStore[taskId] = &TaskResult{Status: status, Output: output, Error: errMsg}
+		}
+
+		sendProgress := func(message string) {
+			progressMutex.Lock()
+			if ch, exists := progressStreams[taskId]; exists {
+				select {
+				case ch <- message:
+				default:
+					// Channel full, skip message
+				}
+			}
+			progressMutex.Unlock()
 		}
 
 		updateStatus(StatusRunning, "", "")
@@ -264,21 +343,25 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 
 		start := time.Now()
 		log.Printf("[Task %s] Cloning repository %s (%s) ...", taskId, repo, branchOrCommit)
+		sendProgress(fmt.Sprintf("Cloning repository %s (%s)...", repo, branchOrCommit))
 		if err := common.CloneRepo(repo, branchOrCommit, cloneDir); err != nil {
 			updateStatus(StatusFailed, "", fmt.Sprintf("git clone failed: %v", err))
 			return
 		}
 		log.Printf("[Task %s] Clone successful - Took %s", taskId, time.Since(start))
+		sendProgress(fmt.Sprintf("Clone successful - Took %s", time.Since(start)))
 
 		log.Printf("[Task %s] Running cg ...", taskId)
+		sendProgress("Running vulnerability analysis...")
 		start = time.Now()
 		var cmd *exec.Cmd
 		if fix {
-			cmd = exec.Command("bin/cg", "-fix", cve, cloneDir)
+			cmd = exec.Command("bin/cg", "-fix", "-progress", cve, cloneDir)
 		} else {
-			cmd = exec.Command("bin/cg", cve, cloneDir)
+			cmd = exec.Command("bin/cg", "-progress", cve, cloneDir)
 		}
-		output, err := cmd.CombinedOutput()
+
+		output, err := runCgWithProgressCapture(cmd, sendProgress)
 
 		if err != nil {
 			log.Printf("[Task %s] cg execution failed: %v", taskId, err)
@@ -340,4 +423,115 @@ func StatusHandler(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		log.Printf("failed to write status response: %v", err)
 	}
+}
+
+func ProgressHandler(w http.ResponseWriter, r *http.Request) {
+	// Extract taskId from URL path
+	taskId := strings.TrimPrefix(r.URL.Path, "/progress/")
+	if taskId == "" {
+		http.Error(w, "Missing task ID", http.StatusBadRequest)
+		return
+	}
+
+	// Check if progress stream exists
+	progressMutex.Lock()
+	progressChan, exists := progressStreams[taskId]
+	progressMutex.Unlock()
+
+	if !exists {
+		http.Error(w, "Progress stream not found", http.StatusNotFound)
+		return
+	}
+
+	// Set headers for Server-Sent Events
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Create a flusher
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	// Stream progress messages
+	for {
+		select {
+		case message, ok := <-progressChan:
+			if !ok {
+				// Channel closed, end stream silently
+				return
+			}
+			fmt.Fprintf(w, "data: %s\n\n", message)
+			flusher.Flush()
+		case <-r.Context().Done():
+			// Client disconnected
+			return
+		}
+	}
+}
+
+func runCgWithProgressCapture(cmd *exec.Cmd, sendProgress func(string)) ([]byte, error) {
+	// Create pipes for stdout and stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	// Start the command
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	var outputBuffer strings.Builder
+	var wg sync.WaitGroup
+
+	// Read stdout
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			outputBuffer.WriteString(line + "\n")
+		}
+	}()
+
+	// Read stderr (progress output)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			line := scanner.Text()
+			sendProgress(line)
+		}
+	}()
+
+	// Wait for command to finish
+	err = cmd.Wait()
+	wg.Wait()
+
+	return []byte(outputBuffer.String()), err
+}
+
+func runGovulncheckWithProgress(directory, target string, sendProgress func(string)) (string, int, error) {
+	sendProgress(fmt.Sprintf("Running govulncheck in %s", directory))
+
+	// Use the existing RunGovulncheck function
+	output, exitCode, err := common.RunGovulncheck(directory, target)
+
+	if err != nil && exitCode != 3 {
+		sendProgress(fmt.Sprintf("govulncheck completed with exit code %d", exitCode))
+	} else {
+		sendProgress(fmt.Sprintf("govulncheck completed successfully"))
+	}
+
+	return output, exitCode, err
 }

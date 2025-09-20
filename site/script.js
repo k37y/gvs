@@ -114,11 +114,19 @@ function runScan() {
 	// Automatically set fix to false if CVE ID is empty
 	const fix = cve ? document.getElementById("fix").value === "true" : false;
 	const outputDiv = document.getElementById("output");
+	const progressContent = document.getElementById("progressContent");
 	const scanButton = document.getElementById("scanButton");
 
 	outputDiv.style.display = "none";
 	outputDiv.className = "result-card";
 	outputDiv.innerHTML = "";
+	
+	// Clear previous progress output and initialize new scan
+	const timestamp = new Date().toLocaleTimeString();
+	progressContent.innerHTML = `Scan Started at ${timestamp}\nInitializing scan...\n`;
+	// Auto-expand progress card when scan starts
+	expandProgressCard();
+	
 	scanButton.disabled = true;
 	scanButton.innerText = "Scanning...";
 
@@ -133,7 +141,7 @@ function runScan() {
 			headers: {
 				"Content-Type": "application/json"
 			},
-			body: JSON.stringify({ repo, branchOrCommit, cve, fix: fix })
+			body: JSON.stringify({ repo, branchOrCommit, cve, fix: fix, showProgress: true })
 		})
 			.then(response => response.json())
 			.then(data => {
@@ -141,16 +149,25 @@ function runScan() {
 					outputDiv.innerHTML = "";
 					outputDiv.innerHTML = `<strong>Error:</strong> ${data.error}<br>`;
 					outputDiv.classList.add("alert-danger");
+					
+					// Add error message to progress output
+					progressContent.innerHTML += `Error: ${data.error}\n`;
+					progressContent.scrollTop = progressContent.scrollHeight;
+					
 					cleanup()
 					return;
 				}
 
 				const taskId = data.taskId;
-				pollStatus(taskId);
+				pollStatus(taskId, true);
 			})
 			.catch(err => {
 				outputDiv.innerHTML += `<strong>Network Error:</strong> ${err.message}<br>`;
 				outputDiv.classList.add("alert-danger");
+				
+				// Add error message to progress output
+				progressContent.innerHTML += `Network Error: ${err.message}\n`;
+				progressContent.scrollTop = progressContent.scrollHeight;
 			});
 
 	} else {
@@ -165,27 +182,26 @@ function runScan() {
 		fetch("/scan", {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ repo, branchOrCommit }),
+			body: JSON.stringify({ repo, branchOrCommit, showProgress: true }),
 			signal: controller.signal,
 		})
 			.then(response => response.json())
 			.then(data => {
-				let message = "";
-
-				if (data.error === "Another scan is in progress. Please wait.") {
-					message = `<strong>${data.error}</strong>`;
-					alertClass = "alert-warning";
-				} else if (data.exit_code === 1) {
-					message = `<strong>Error:</strong> ${data.error || "Unknown error occurred."}`;
-					alertClass = "alert-danger";
-				} else {
-					message = `<pre class='text-break'>${syntaxHighlight(JSON.stringify(data, null, 2))}</pre>`;
+				if (data.error) {
+					outputDiv.innerHTML = "";
+					outputDiv.innerHTML = `<strong>Error:</strong> ${data.error}<br>`;
+					outputDiv.classList.add("alert-danger");
+					
+					// Add error message to progress output
+					progressContent.innerHTML += `Error: ${data.error}\n`;
+					progressContent.scrollTop = progressContent.scrollHeight;
+					
+					cleanup()
+					return;
 				}
 
-				outputDiv.innerHTML = message;
-				outputDiv.classList.remove("alert-success", "alert-danger", "alert-warning");
-				outputDiv.classList.add("alert-success");
-				outputDiv.style.display = "block";
+				const taskId = data.taskId;
+				pollStatus(taskId, true);
 			})
 			.catch(error => {
 				const errMsg = error.name === "AbortError"
@@ -194,15 +210,23 @@ function runScan() {
 				outputDiv.innerHTML = `<strong>Error:</strong> ${errMsg}`;
 				outputDiv.classList.add("alert-danger");
 				outputDiv.style.display = "block";
+				
+				// Add error message to progress output
+				progressContent.innerHTML += `Network Error: ${errMsg}\n`;
+				progressContent.scrollTop = progressContent.scrollHeight;
 			})
 			.finally(() => {
 				clearTimeout(timeoutId);
-				cleanup();
 			});
 	}
 
-	function pollStatus(taskId) {
+	function pollStatus(taskId, showProgress) {
 		const pollInterval = 3000;
+		const progressContent = document.getElementById("progressContent");
+		
+		// Always start progress streaming
+		startProgressStream(taskId);
+		
 		const intervalId = setInterval(() => {
 			fetch("/status", {
 				method: "POST",
@@ -217,6 +241,13 @@ function runScan() {
 						outputDiv.innerHTML = "";
 						outputDiv.innerHTML = `<strong>Error:</strong> ${statusData.error}<br>`;
 						outputDiv.classList.add("alert-danger");
+						
+						// Add error message to progress output
+						const progressContent = document.getElementById("progressContent");
+						const timestamp = new Date().toLocaleTimeString();
+						progressContent.innerHTML += `Scan Failed at ${timestamp}: ${statusData.error}\n`;
+						progressContent.scrollTop = progressContent.scrollHeight;
+						
 						clearInterval(intervalId);
 						cleanup();
 						return;
@@ -228,6 +259,19 @@ function runScan() {
 						outputDiv.classList.remove("alert-warning");
 						outputDiv.classList.add("alert-success");
 						clearInterval(intervalId);
+						
+						// Add completion message to progress output
+						const progressContent = document.getElementById("progressContent");
+						const timestamp = new Date().toLocaleTimeString();
+						progressContent.innerHTML += `Scan Completed Successfully at ${timestamp}\n`;
+						progressContent.scrollTop = progressContent.scrollHeight;
+						
+						// Close progress stream if active
+						if (window.currentProgressStream) {
+							window.currentProgressStream.close();
+							window.currentProgressStream = null;
+						}
+						
 						cleanup();
 					}
 
@@ -237,6 +281,12 @@ function runScan() {
 					outputDiv.innerHTML = "";
 					outputDiv.innerHTML = `<br><strong>Error polling status:</strong> ${err.message}<br>`;
 					outputDiv.classList.add("alert-danger");
+					
+					// Add error message to progress output
+					const progressContent = document.getElementById("progressContent");
+					progressContent.innerHTML += `Network Error: ${err.message}\n`;
+					progressContent.scrollTop = progressContent.scrollHeight;
+					
 					clearInterval(intervalId);
 					cleanup();
 				});
@@ -247,5 +297,78 @@ function runScan() {
 		scanButton.disabled = false;
 		scanButton.innerText = "Run Scan";
 		scanInProgress = false;
+		
+		// Close progress stream if active
+		if (window.currentProgressStream) {
+			window.currentProgressStream.close();
+			window.currentProgressStream = null;
+		}
+		
+		// Keep progress output visible after scan completion
+		// Don't reset the progress card here
 	}
+}
+
+function startProgressStream(taskId) {
+	const progressContent = document.getElementById("progressContent");
+	
+	// Use Server-Sent Events for real-time progress updates
+	const eventSource = new EventSource(`/progress/${taskId}`);
+	
+	eventSource.onmessage = function(event) {
+		const data = event.data;
+		if (data && data.trim()) {
+			progressContent.innerHTML += data + '\n';
+			progressContent.scrollTop = progressContent.scrollHeight;
+		}
+	};
+	
+	eventSource.onerror = function(event) {
+		console.log('Progress stream error:', event);
+		eventSource.close();
+	};
+	
+	// Store reference to close later
+	window.currentProgressStream = eventSource;
+}
+
+function handleCardClick(event) {
+	// Prevent expansion when clicking on form elements
+	const clickableElements = ['INPUT', 'SELECT', 'BUTTON', 'LABEL', 'SPAN'];
+	const isFormElement = clickableElements.includes(event.target.tagName);
+	const isTooltip = event.target.hasAttribute('data-bs-toggle');
+	
+	if (isFormElement || isTooltip) {
+		return;
+	}
+	
+	toggleProgressExpansion();
+}
+
+function toggleProgressExpansion() {
+	const progressContent = document.getElementById("progressContent");
+	
+	if (progressContent.classList.contains("collapsed")) {
+		expandProgressCard();
+	} else {
+		collapseProgressCard();
+	}
+}
+
+function expandProgressCard() {
+	const progressContent = document.getElementById("progressContent");
+	progressContent.classList.remove("collapsed");
+}
+
+function collapseProgressCard() {
+	const progressContent = document.getElementById("progressContent");
+	progressContent.classList.add("collapsed");
+}
+
+function resetProgressCard() {
+	const progressContent = document.getElementById("progressContent");
+	
+	// Reset to collapsed state with placeholder (only used on page load)
+	collapseProgressCard();
+	progressContent.innerHTML = '<div class="progress-placeholder">Server progress will appear here during scans. Progress from previous scans is preserved until the next scan starts.</div>';
 }

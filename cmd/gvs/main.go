@@ -37,6 +37,7 @@ func main() {
 	http.HandleFunc("/healthz", api.HealthHandler)
 	http.HandleFunc("/callgraph", api.CallgraphHandler)
 	http.HandleFunc("/status", api.StatusHandler)
+	http.HandleFunc("/progress/", api.ProgressHandler)
 
 	srv := &http.Server{Addr: ":" + port}
 
