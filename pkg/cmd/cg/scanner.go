@@ -143,9 +143,46 @@ func (j Job) isVulnerable(result *Result) *Result {
 	uentry.CurrentVersion = curVer
 	uentry.ReplaceVersion = repVer
 	if used {
+		// Determine the version to compare against (prefer replace version if available)
+		compareVer := curVer
+		if repVer != "" {
+			compareVer = repVer
+		}
+
 		if result.AffectedImports[j.Package].Type != "stdlib" {
-			if semver.Compare(curVer, fv) <= 0 {
+			// For non-stdlib packages: vulnerable if current/replace version is less than fixed version
+			if semver.Compare(compareVer, fv) < 0 {
 				result.IsVulnerable = "true"
+			} else {
+				result.IsVulnerable = "false"
+			}
+		} else {
+			// For stdlib packages: compare against the Go version fix
+			if len(fixVer) > 0 {
+				// Get the actual Go toolchain version
+				goToolchainVersion := getGoToolchainVersion(filepath.Join(result.Directory, j.Dir), result)
+
+				// Check against all fixed versions to determine if vulnerable
+				isVulnerable := false
+				if goToolchainVersion != "" {
+					for _, fixVersion := range fixVer {
+						goFixVersion := extractGoVersion(fixVersion)
+						if goFixVersion != "" && semver.Compare(goToolchainVersion, goFixVersion) < 0 {
+							isVulnerable = true
+							break
+						}
+					}
+				}
+
+				if goToolchainVersion == "" {
+					result.IsVulnerable = "unknown"
+				} else if isVulnerable {
+					result.IsVulnerable = "true"
+				} else {
+					result.IsVulnerable = "false"
+				}
+			} else {
+				result.IsVulnerable = "unknown"
 			}
 		}
 	} else if unknown {
@@ -562,6 +599,37 @@ func getCurrentVersion(pkg string, dir string, result *Result) string {
 	return strings.TrimSpace(string(out))
 }
 
+func getGoToolchainVersion(dir string, result *Result) string {
+	cmd := "go"
+	args := []string{"mod", "edit", "-json"}
+	out, err := cli.RunCommand(dir, cmd, args...)
+	if err != nil {
+		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
+		result.Errors = append(result.Errors, errMsg)
+		return ""
+	}
+
+	var goModEdit GoModEdit
+	err = json.Unmarshal(out, &goModEdit)
+	if err != nil {
+		errMsg := fmt.Sprintf("Failed to parse go.mod JSON in %s: %v", dir, err)
+		result.Errors = append(result.Errors, errMsg)
+		return ""
+	}
+
+	// Get the Go version from go.mod
+	if goModEdit.Go != "" {
+		goVersion := goModEdit.Go
+		// Add 'v' prefix for semver compatibility if not present
+		if !strings.HasPrefix(goVersion, "v") {
+			goVersion = "v" + goVersion
+		}
+		return goVersion
+	}
+
+	return ""
+}
+
 func getReplaceVersion(pkg string, dir string, result *Result) string {
 	cmd := "go"
 	args := []string{"mod", "edit", "-json"}
@@ -650,8 +718,27 @@ func getGitBranch(result *Result) {
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), result.Directory, strings.TrimSpace(string(out)))
 		result.Errors = append(result.Errors, errMsg)
+		return
 	}
-	result.Branch = strings.TrimSpace(string(out))
+
+	branchName := strings.TrimSpace(string(out))
+
+	// If we're in detached HEAD state (happens when checking out a commit hash),
+	// get the actual commit hash instead of "HEAD"
+	if branchName == "HEAD" {
+		commitCmd := "git"
+		commitArgs := []string{"rev-parse", "HEAD"}
+		commitOut, err := cli.RunCommand(result.Directory, commitCmd, commitArgs...)
+		if err != nil {
+			errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", commitCmd, strings.Join(commitArgs, " "), result.Directory, strings.TrimSpace(string(commitOut)))
+			result.Errors = append(result.Errors, errMsg)
+			result.Branch = branchName // fallback to "HEAD"
+		} else {
+			result.Branch = strings.TrimSpace(string(commitOut))
+		}
+	} else {
+		result.Branch = branchName
+	}
 }
 
 func getGitURL(result *Result) {
@@ -685,6 +772,32 @@ func formatIntroducedFixed(events []Event) []string {
 	}
 
 	return result
+}
+
+// extractGoVersion extracts a Go version from various formats like "go1.21.4", "1.21.4", etc.
+func extractGoVersion(fixedVersion string) string {
+	// Handle various formats of Go version strings
+	fixedVersion = strings.TrimSpace(fixedVersion)
+
+	// Extract version from "Introduced in X and fixed in Y" format
+	if strings.Contains(fixedVersion, "fixed in") {
+		parts := strings.Split(fixedVersion, "fixed in")
+		if len(parts) > 1 {
+			fixedVersion = strings.TrimSpace(parts[1])
+		}
+	}
+
+	// Remove "go" prefix if present
+	if strings.HasPrefix(fixedVersion, "go") {
+		fixedVersion = strings.TrimPrefix(fixedVersion, "go")
+	}
+
+	// Ensure it's a valid semver format (add "v" prefix if missing)
+	if !strings.HasPrefix(fixedVersion, "v") && regexp.MustCompile(`^\d+\.\d+`).MatchString(fixedVersion) {
+		fixedVersion = "v" + fixedVersion
+	}
+
+	return fixedVersion
 }
 
 // ConvertUsedImports converts from cmd/cg UsedImportsDetails to common interface format
