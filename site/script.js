@@ -1,5 +1,108 @@
 let scanInProgress = false;
 
+// Form Field History Manager
+class FormHistoryManager {
+	constructor() {
+		this.maxHistoryItems = 10;
+		this.storagePrefix = 'gvs-history-';
+		this.fields = ['repo', 'branchOrCommit', 'cve'];
+		this.init();
+	}
+	
+	init() {
+		this.setupHistoryForFields();
+		this.loadHistoryForFields();
+	}
+	
+	setupHistoryForFields() {
+		this.fields.forEach(fieldId => {
+			const field = document.getElementById(fieldId);
+			if (field) {
+				// Create datalist for autocomplete
+				const datalistId = `${fieldId}-history`;
+				let datalist = document.getElementById(datalistId);
+				if (!datalist) {
+					datalist = document.createElement('datalist');
+					datalist.id = datalistId;
+					field.parentNode.appendChild(datalist);
+					field.setAttribute('list', datalistId);
+				}
+				
+				// Save to history on blur (when user leaves the field)
+				field.addEventListener('blur', () => {
+					const value = field.value.trim();
+					if (value) {
+						this.saveToHistory(fieldId, value);
+						this.updateDatalist(fieldId);
+					}
+				});
+			}
+		});
+	}
+	
+	saveToHistory(fieldId, value) {
+		const storageKey = this.storagePrefix + fieldId;
+		let history = this.getHistory(fieldId);
+		
+		// Remove value if it already exists (to avoid duplicates)
+		history = history.filter(item => item !== value);
+		
+		// Add new value to the beginning
+		history.unshift(value);
+		
+		// Limit history size
+		if (history.length > this.maxHistoryItems) {
+			history = history.slice(0, this.maxHistoryItems);
+		}
+		
+		localStorage.setItem(storageKey, JSON.stringify(history));
+	}
+	
+	getHistory(fieldId) {
+		const storageKey = this.storagePrefix + fieldId;
+		try {
+			const stored = localStorage.getItem(storageKey);
+			return stored ? JSON.parse(stored) : [];
+		} catch (e) {
+			console.warn('Failed to parse history for field:', fieldId);
+			return [];
+		}
+	}
+	
+	updateDatalist(fieldId) {
+		const datalist = document.getElementById(`${fieldId}-history`);
+		const history = this.getHistory(fieldId);
+		
+		if (datalist) {
+			datalist.innerHTML = '';
+			history.forEach(value => {
+				const option = document.createElement('option');
+				option.value = value;
+				datalist.appendChild(option);
+			});
+		}
+	}
+	
+	loadHistoryForFields() {
+		this.fields.forEach(fieldId => {
+			this.updateDatalist(fieldId);
+		});
+	}
+	
+	clearHistory(fieldId = null) {
+		if (fieldId) {
+			localStorage.removeItem(this.storagePrefix + fieldId);
+			this.updateDatalist(fieldId);
+		} else {
+			// Clear all history
+			this.fields.forEach(field => {
+				localStorage.removeItem(this.storagePrefix + field);
+				this.updateDatalist(field);
+			});
+		}
+	}
+}
+
 // Dark Mode Toggle Functionality
 class ThemeManager {
 	constructor() {
@@ -34,6 +137,9 @@ class ThemeManager {
 document.addEventListener('DOMContentLoaded', function() {
 	// Initialize theme manager
 	new ThemeManager();
+	
+	// Initialize form history manager
+	window.formHistory = new FormHistoryManager();
 	
 	// Add event listener to CVE ID field to automatically set Run Fix to "No" and disable when empty
 	const cveInput = document.getElementById('cve');
@@ -129,6 +235,20 @@ function runScan() {
 	
 	scanButton.disabled = true;
 	scanButton.innerText = "Scanning...";
+	
+	// Save form values to history when scan starts
+	if (repo) {
+		window.formHistory?.saveToHistory('repo', repo);
+		window.formHistory?.updateDatalist('repo');
+	}
+	if (branchOrCommit) {
+		window.formHistory?.saveToHistory('branchOrCommit', branchOrCommit);
+		window.formHistory?.updateDatalist('branchOrCommit');
+	}
+	if (cve) {
+		window.formHistory?.saveToHistory('cve', cve);
+		window.formHistory?.updateDatalist('cve');
+	}
 
 	if (repo && branchOrCommit && cve) {
 		const hostUrl = `${location.protocol}//${location.host}`;
