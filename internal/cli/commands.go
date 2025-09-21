@@ -84,6 +84,15 @@ Special Instructions:
 	f.WriteString(prompt)
 	f.WriteString(fmt.Sprintf("Package: %s\n", pkg))
 
+	// Copy data/se-code-cursorrules to root directory as .cursorrules
+	srcFile := "./data/se-code-cursorrules"
+	dstFile := filepath.Join(dir, ".cursorrules")
+	if data, err := os.ReadFile(srcFile); err == nil {
+		os.WriteFile(dstFile, data, 0644)
+	} else {
+		result.Errors = append(result.Errors, fmt.Sprintf("Failed to copy cursorrules file: %v", err))
+	}
+
 	_, err = RunCommand(dir, "go", "clean", "-modcache")
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("Failed to run go clean -modcache: %v", err))
