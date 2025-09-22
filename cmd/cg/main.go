@@ -172,39 +172,51 @@ func main() {
 	}()
 
 	mergedImports := make(map[string]cg.UsedImportsDetails)
+	hasVulnerable := false
+	hasUnknown := false
+	hasProcessedAny := false
 
 	for res := range results {
+		hasProcessedAny = true
+
 		// Increment completed jobs counter for progress tracking
 		if *progress {
 			atomic.AddInt64(&completedJobs, 1)
 		}
 
-		if res.IsVulnerable != "true" {
-			continue
+		// Track the overall vulnerability status across all packages
+		switch res.IsVulnerable {
+		case "true":
+			hasVulnerable = true
+		case "unknown":
+			hasUnknown = true
 		}
 
-		for pkg, symbols := range res.UsedImports {
-			for _, sym := range symbols.Symbols {
-				if strings.HasPrefix(sym, pkg+".") {
-					sym = strings.TrimPrefix(sym, pkg+".")
-				}
+		// Only merge imports for vulnerable packages
+		if res.IsVulnerable == "true" {
+			for pkg, symbols := range res.UsedImports {
+				for _, sym := range symbols.Symbols {
+					if strings.HasPrefix(sym, pkg+".") {
+						sym = strings.TrimPrefix(sym, pkg+".")
+					}
 
-				entry := mergedImports[pkg]
-				entry.Symbols = append(entry.Symbols, sym)
+					entry := mergedImports[pkg]
+					entry.Symbols = append(entry.Symbols, sym)
 
-				if entry.CurrentVersion == "" {
-					entry.CurrentVersion = symbols.CurrentVersion
-				}
-				if entry.ReplaceVersion == "" {
-					entry.ReplaceVersion = symbols.ReplaceVersion
-				}
-				if entry.FixCommands == nil {
-					entry.FixCommands = symbols.FixCommands
-				}
+					if entry.CurrentVersion == "" {
+						entry.CurrentVersion = symbols.CurrentVersion
+					}
+					if entry.ReplaceVersion == "" {
+						entry.ReplaceVersion = symbols.ReplaceVersion
+					}
+					if entry.FixCommands == nil {
+						entry.FixCommands = symbols.FixCommands
+					}
 
-				result.Mu.Lock()
-				mergedImports[pkg] = entry
-				result.Mu.Unlock()
+					result.Mu.Lock()
+					mergedImports[pkg] = entry
+					result.Mu.Unlock()
+				}
 			}
 		}
 	}
@@ -238,10 +250,19 @@ func main() {
 		mergedImports[pkg] = details
 	}
 
-	if len(mergedImports) > 0 {
+	// Properly determine final vulnerability status
+	if hasVulnerable {
 		result.IsVulnerable = "true"
 		result.UsedImports = mergedImports
+	} else if hasUnknown {
+		result.IsVulnerable = "unknown"
+		result.UsedImports = nil
+	} else if hasProcessedAny {
+		result.IsVulnerable = "false"
+		result.UsedImports = nil
 	} else {
+		// No packages were processed (shouldn't happen, but safe fallback)
+		result.IsVulnerable = "unknown"
 		result.UsedImports = nil
 	}
 

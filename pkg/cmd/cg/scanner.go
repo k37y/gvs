@@ -143,9 +143,48 @@ func (j Job) isVulnerable(result *Result) *Result {
 	uentry.CurrentVersion = curVer
 	uentry.ReplaceVersion = repVer
 	if used {
+		// Determine the version to compare against (prefer replace version if available)
+		compareVer := curVer
+		if repVer != "" {
+			compareVer = repVer
+		}
+
 		if result.AffectedImports[j.Package].Type != "stdlib" {
-			if semver.Compare(curVer, fv) <= 0 {
+			// For non-stdlib packages: vulnerable if current/replace version is less than fixed version
+			if semver.Compare(compareVer, fv) < 0 {
 				result.IsVulnerable = "true"
+			} else {
+				result.IsVulnerable = "false"
+			}
+		} else {
+			// For stdlib packages: compare against the Go version fix
+			if len(fixVer) > 0 {
+				// Get the actual Go toolchain version
+				goToolchainVersion := getGoToolchainVersion(filepath.Join(result.Directory, j.Dir), result)
+
+				// Find the appropriate fixed version for the current Go major.minor version
+				isVulnerable := false
+				if goToolchainVersion != "" {
+					appropriateFixVersion := findAppropriateFixVersion(goToolchainVersion, fixVer)
+					if appropriateFixVersion != "" {
+						if semver.Compare(goToolchainVersion, appropriateFixVersion) < 0 {
+							isVulnerable = true
+						}
+					} else {
+						// No appropriate fix version found, assume vulnerable
+						isVulnerable = true
+					}
+				}
+
+				if goToolchainVersion == "" {
+					result.IsVulnerable = "unknown"
+				} else if isVulnerable {
+					result.IsVulnerable = "true"
+				} else {
+					result.IsVulnerable = "false"
+				}
+			} else {
+				result.IsVulnerable = "unknown"
 			}
 		}
 	} else if unknown {
@@ -161,8 +200,11 @@ func (j Job) isVulnerable(result *Result) *Result {
 		}
 	} else if result.IsVulnerable == "true" {
 		if result.AffectedImports[j.Package].Type == "stdlib" {
+			// For stdlib packages, select the appropriate Go version to upgrade to
+			goToolchainVersion := getGoToolchainVersion(filepath.Join(result.Directory, j.Dir), result)
+			selectedFixVersion := selectFixVersionForCurrentGoVersion(goToolchainVersion, fixVer)
 			uentry.FixCommands = []string{
-				fmt.Sprintf("go mod edit -go=%s", fixVer),
+				fmt.Sprintf("go mod edit -go=%s", selectedFixVersion),
 				"go mod tidy",
 				"go mod vendor",
 			}
@@ -551,6 +593,13 @@ func buildRTACallGraph(prog *ssa.Program, allFuncs map[*ssa.Function]bool) (resu
 }
 
 func getCurrentVersion(pkg string, dir string, result *Result) string {
+	// Check if this is a stdlib package
+	if result.AffectedImports != nil {
+		if details, exists := result.AffectedImports[pkg]; exists && details.Type == "stdlib" {
+			return getGoToolchainVersion(dir, result)
+		}
+	}
+
 	cmd := "go"
 	args := []string{"list", "-f", "{{if .Module}}{{.Module.Version}}{{end}}", pkg}
 	out, err := cli.RunCommand(dir, cmd, args...)
@@ -560,6 +609,37 @@ func getCurrentVersion(pkg string, dir string, result *Result) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func getGoToolchainVersion(dir string, result *Result) string {
+	cmd := "go"
+	args := []string{"mod", "edit", "-json"}
+	out, err := cli.RunCommand(dir, cmd, args...)
+	if err != nil {
+		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
+		result.Errors = append(result.Errors, errMsg)
+		return ""
+	}
+
+	var goModEdit GoModEdit
+	err = json.Unmarshal(out, &goModEdit)
+	if err != nil {
+		errMsg := fmt.Sprintf("Failed to parse go.mod JSON in %s: %v", dir, err)
+		result.Errors = append(result.Errors, errMsg)
+		return ""
+	}
+
+	// Get the Go version from go.mod
+	if goModEdit.Go != "" {
+		goVersion := goModEdit.Go
+		// Add 'v' prefix for semver compatibility if not present
+		if !strings.HasPrefix(goVersion, "v") {
+			goVersion = "v" + goVersion
+		}
+		return goVersion
+	}
+
+	return ""
 }
 
 func getReplaceVersion(pkg string, dir string, result *Result) string {
@@ -650,8 +730,27 @@ func getGitBranch(result *Result) {
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), result.Directory, strings.TrimSpace(string(out)))
 		result.Errors = append(result.Errors, errMsg)
+		return
 	}
-	result.Branch = strings.TrimSpace(string(out))
+
+	branchName := strings.TrimSpace(string(out))
+
+	// If we're in detached HEAD state (happens when checking out a commit hash),
+	// get the actual commit hash instead of "HEAD"
+	if branchName == "HEAD" {
+		commitCmd := "git"
+		commitArgs := []string{"rev-parse", "HEAD"}
+		commitOut, err := cli.RunCommand(result.Directory, commitCmd, commitArgs...)
+		if err != nil {
+			errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", commitCmd, strings.Join(commitArgs, " "), result.Directory, strings.TrimSpace(string(commitOut)))
+			result.Errors = append(result.Errors, errMsg)
+			result.Branch = branchName // fallback to "HEAD"
+		} else {
+			result.Branch = strings.TrimSpace(string(commitOut))
+		}
+	} else {
+		result.Branch = branchName
+	}
 }
 
 func getGitURL(result *Result) {
@@ -685,6 +784,145 @@ func formatIntroducedFixed(events []Event) []string {
 	}
 
 	return result
+}
+
+// extractGoVersion extracts a Go version from various formats like "go1.21.4", "1.21.4", etc.
+func extractGoVersion(fixedVersion string) string {
+	// Handle various formats of Go version strings
+	fixedVersion = strings.TrimSpace(fixedVersion)
+
+	// Extract version from "Introduced in X and fixed in Y" format
+	if strings.Contains(fixedVersion, "fixed in") {
+		parts := strings.Split(fixedVersion, "fixed in")
+		if len(parts) > 1 {
+			fixedVersion = strings.TrimSpace(parts[1])
+		}
+	}
+
+	// Remove "go" prefix if present
+	if strings.HasPrefix(fixedVersion, "go") {
+		fixedVersion = strings.TrimPrefix(fixedVersion, "go")
+	}
+
+	// Ensure it's a valid semver format (add "v" prefix if missing)
+	if !strings.HasPrefix(fixedVersion, "v") && regexp.MustCompile(`^\d+\.\d+`).MatchString(fixedVersion) {
+		fixedVersion = "v" + fixedVersion
+	}
+
+	return fixedVersion
+}
+
+// findAppropriateFixVersion finds the fixed version that corresponds to the same major.minor branch
+// as the current Go version. For example, if current is v1.23.8 and fixes are ["1.23.8", "1.24.2"],
+// it returns "v1.23.8" since they're on the same 1.23.x branch.
+func findAppropriateFixVersion(currentGoVersion string, fixedVersions []string) string {
+	currentVersion := extractGoVersion(currentGoVersion)
+	if currentVersion == "" {
+		return ""
+	}
+
+	// Extract major.minor from current version (e.g., "v1.23.8" -> "v1.23")
+	currentMajorMinor := getMajorMinor(currentVersion)
+	if currentMajorMinor == "" {
+		return ""
+	}
+
+	// Find a fixed version that matches the same major.minor
+	for _, fixVer := range fixedVersions {
+		fixVersion := extractGoVersion(fixVer)
+		if fixVersion == "" {
+			continue
+		}
+
+		fixMajorMinor := getMajorMinor(fixVersion)
+		if fixMajorMinor == currentMajorMinor {
+			return fixVersion
+		}
+	}
+
+	// If no exact major.minor match, find the closest applicable version
+	// This handles cases where the fix might be in a newer major.minor branch
+	var bestMatch string
+	for _, fixVer := range fixedVersions {
+		fixVersion := extractGoVersion(fixVer)
+		if fixVersion == "" {
+			continue
+		}
+
+		// If this fix version is greater than or equal to current, it's applicable
+		if semver.Compare(fixVersion, currentVersion) >= 0 {
+			if bestMatch == "" || semver.Compare(fixVersion, bestMatch) < 0 {
+				bestMatch = fixVersion
+			}
+		}
+	}
+
+	return bestMatch
+}
+
+// getMajorMinor extracts the major.minor version from a semver string
+// e.g., "v1.23.8" -> "v1.23"
+func getMajorMinor(version string) string {
+	if !strings.HasPrefix(version, "v") {
+		return ""
+	}
+
+	parts := strings.Split(version[1:], ".")
+	if len(parts) < 2 {
+		return ""
+	}
+
+	return "v" + parts[0] + "." + parts[1]
+}
+
+// selectFixVersionForCurrentGoVersion selects the appropriate fixed version from a slice of fixed versions
+// based on the current Go version. It returns the smallest fixed version that is greater than the current version.
+func selectFixVersionForCurrentGoVersion(currentGoVersion string, fixedVersions []string) string {
+	if len(fixedVersions) == 0 {
+		return ""
+	}
+
+	// If there's only one fixed version, return it
+	if len(fixedVersions) == 1 {
+		return extractGoVersion(fixedVersions[0])
+	}
+
+	// Extract and normalize the current Go version
+	currentVersion := extractGoVersion(currentGoVersion)
+	if currentVersion == "" {
+		// If we can't determine the current version, return the first fixed version
+		return extractGoVersion(fixedVersions[0])
+	}
+
+	// Find the smallest fixed version that is greater than the current version
+	var bestFix string
+	for _, fixVer := range fixedVersions {
+		fixVersion := extractGoVersion(fixVer)
+		if fixVersion == "" {
+			continue
+		}
+
+		// If this fixed version is greater than current version
+		if semver.Compare(fixVersion, currentVersion) > 0 {
+			// If we haven't found a best fix yet, or this one is smaller than our current best
+			if bestFix == "" || semver.Compare(fixVersion, bestFix) < 0 {
+				bestFix = fixVersion
+			}
+		}
+	}
+
+	// If no version is greater than current (shouldn't happen in vulnerable cases),
+	// return the latest fixed version
+	if bestFix == "" {
+		return extractGoVersion(fixedVersions[len(fixedVersions)-1])
+	}
+
+	// Remove the 'v' prefix for go.mod compatibility
+	if strings.HasPrefix(bestFix, "v") {
+		bestFix = strings.TrimPrefix(bestFix, "v")
+	}
+
+	return bestFix
 }
 
 // ConvertUsedImports converts from cmd/cg UsedImportsDetails to common interface format
