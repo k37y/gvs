@@ -162,15 +162,17 @@ func (j Job) isVulnerable(result *Result) *Result {
 				// Get the actual Go toolchain version
 				goToolchainVersion := getGoToolchainVersion(filepath.Join(result.Directory, j.Dir), result)
 
-				// Check against all fixed versions to determine if vulnerable
+				// Find the appropriate fixed version for the current Go major.minor version
 				isVulnerable := false
 				if goToolchainVersion != "" {
-					for _, fixVersion := range fixVer {
-						goFixVersion := extractGoVersion(fixVersion)
-						if goFixVersion != "" && semver.Compare(goToolchainVersion, goFixVersion) < 0 {
+					appropriateFixVersion := findAppropriateFixVersion(goToolchainVersion, fixVer)
+					if appropriateFixVersion != "" {
+						if semver.Compare(goToolchainVersion, appropriateFixVersion) < 0 {
 							isVulnerable = true
-							break
 						}
+					} else {
+						// No appropriate fix version found, assume vulnerable
+						isVulnerable = true
 					}
 				}
 
@@ -198,8 +200,11 @@ func (j Job) isVulnerable(result *Result) *Result {
 		}
 	} else if result.IsVulnerable == "true" {
 		if result.AffectedImports[j.Package].Type == "stdlib" {
+			// For stdlib packages, select the appropriate Go version to upgrade to
+			goToolchainVersion := getGoToolchainVersion(filepath.Join(result.Directory, j.Dir), result)
+			selectedFixVersion := selectFixVersionForCurrentGoVersion(goToolchainVersion, fixVer)
 			uentry.FixCommands = []string{
-				fmt.Sprintf("go mod edit -go=%s", fixVer),
+				fmt.Sprintf("go mod edit -go=%s", selectedFixVersion),
 				"go mod tidy",
 				"go mod vendor",
 			}
@@ -588,6 +593,13 @@ func buildRTACallGraph(prog *ssa.Program, allFuncs map[*ssa.Function]bool) (resu
 }
 
 func getCurrentVersion(pkg string, dir string, result *Result) string {
+	// Check if this is a stdlib package
+	if result.AffectedImports != nil {
+		if details, exists := result.AffectedImports[pkg]; exists && details.Type == "stdlib" {
+			return getGoToolchainVersion(dir, result)
+		}
+	}
+
 	cmd := "go"
 	args := []string{"list", "-f", "{{if .Module}}{{.Module.Version}}{{end}}", pkg}
 	out, err := cli.RunCommand(dir, cmd, args...)
@@ -798,6 +810,119 @@ func extractGoVersion(fixedVersion string) string {
 	}
 
 	return fixedVersion
+}
+
+// findAppropriateFixVersion finds the fixed version that corresponds to the same major.minor branch
+// as the current Go version. For example, if current is v1.23.8 and fixes are ["1.23.8", "1.24.2"],
+// it returns "v1.23.8" since they're on the same 1.23.x branch.
+func findAppropriateFixVersion(currentGoVersion string, fixedVersions []string) string {
+	currentVersion := extractGoVersion(currentGoVersion)
+	if currentVersion == "" {
+		return ""
+	}
+
+	// Extract major.minor from current version (e.g., "v1.23.8" -> "v1.23")
+	currentMajorMinor := getMajorMinor(currentVersion)
+	if currentMajorMinor == "" {
+		return ""
+	}
+
+	// Find a fixed version that matches the same major.minor
+	for _, fixVer := range fixedVersions {
+		fixVersion := extractGoVersion(fixVer)
+		if fixVersion == "" {
+			continue
+		}
+
+		fixMajorMinor := getMajorMinor(fixVersion)
+		if fixMajorMinor == currentMajorMinor {
+			return fixVersion
+		}
+	}
+
+	// If no exact major.minor match, find the closest applicable version
+	// This handles cases where the fix might be in a newer major.minor branch
+	var bestMatch string
+	for _, fixVer := range fixedVersions {
+		fixVersion := extractGoVersion(fixVer)
+		if fixVersion == "" {
+			continue
+		}
+
+		// If this fix version is greater than or equal to current, it's applicable
+		if semver.Compare(fixVersion, currentVersion) >= 0 {
+			if bestMatch == "" || semver.Compare(fixVersion, bestMatch) < 0 {
+				bestMatch = fixVersion
+			}
+		}
+	}
+
+	return bestMatch
+}
+
+// getMajorMinor extracts the major.minor version from a semver string
+// e.g., "v1.23.8" -> "v1.23"
+func getMajorMinor(version string) string {
+	if !strings.HasPrefix(version, "v") {
+		return ""
+	}
+
+	parts := strings.Split(version[1:], ".")
+	if len(parts) < 2 {
+		return ""
+	}
+
+	return "v" + parts[0] + "." + parts[1]
+}
+
+// selectFixVersionForCurrentGoVersion selects the appropriate fixed version from a slice of fixed versions
+// based on the current Go version. It returns the smallest fixed version that is greater than the current version.
+func selectFixVersionForCurrentGoVersion(currentGoVersion string, fixedVersions []string) string {
+	if len(fixedVersions) == 0 {
+		return ""
+	}
+
+	// If there's only one fixed version, return it
+	if len(fixedVersions) == 1 {
+		return extractGoVersion(fixedVersions[0])
+	}
+
+	// Extract and normalize the current Go version
+	currentVersion := extractGoVersion(currentGoVersion)
+	if currentVersion == "" {
+		// If we can't determine the current version, return the first fixed version
+		return extractGoVersion(fixedVersions[0])
+	}
+
+	// Find the smallest fixed version that is greater than the current version
+	var bestFix string
+	for _, fixVer := range fixedVersions {
+		fixVersion := extractGoVersion(fixVer)
+		if fixVersion == "" {
+			continue
+		}
+
+		// If this fixed version is greater than current version
+		if semver.Compare(fixVersion, currentVersion) > 0 {
+			// If we haven't found a best fix yet, or this one is smaller than our current best
+			if bestFix == "" || semver.Compare(fixVersion, bestFix) < 0 {
+				bestFix = fixVersion
+			}
+		}
+	}
+
+	// If no version is greater than current (shouldn't happen in vulnerable cases),
+	// return the latest fixed version
+	if bestFix == "" {
+		return extractGoVersion(fixedVersions[len(fixedVersions)-1])
+	}
+
+	// Remove the 'v' prefix for go.mod compatibility
+	if strings.HasPrefix(bestFix, "v") {
+		bestFix = strings.TrimPrefix(bestFix, "v")
+	}
+
+	return bestFix
 }
 
 // ConvertUsedImports converts from cmd/cg UsedImportsDetails to common interface format
