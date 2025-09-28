@@ -329,7 +329,7 @@ func main() {
 	cg.GenerateSummaryWithGemini(result)
 	jsonOutput, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
-		errMsg := fmt.Sprintf("Failed to marshal result to JSON: %v\n", err)
+		errMsg := "Failed to marshal result to JSON: " + err.Error()
 		result.Errors = append(result.Errors, errMsg)
 	} else {
 		fmt.Println(string(jsonOutput))
@@ -355,24 +355,30 @@ func initResultWithProgress(cve, dir string, fix bool) *cg.Result {
 	}
 
 	// Phase 1: Fetch Go vulnerability ID
-	fmt.Fprintf(os.Stderr, "Phase 1/5: Fetching Go vulnerability ID...\n")
+	fmt.Fprintf(os.Stderr, "Phase 1/6: Fetching Go vulnerability ID...\n")
 	fetchGoVulnIDWithProgress(r)
 
 	// Phase 2: Fetch affected symbols
-	fmt.Fprintf(os.Stderr, "Phase 2/5: Fetching affected symbols...\n")
+	fmt.Fprintf(os.Stderr, "Phase 2/6: Fetching affected symbols...\n")
 	fetchAffectedSymbolsWithProgress(r)
 
 	// Phase 3: Find main Go files and directories
-	fmt.Fprintf(os.Stderr, "Phase 3/5: Discovering Go modules and main files...\n")
+	fmt.Fprintf(os.Stderr, "Phase 3/6: Discovering Go modules and main files...\n")
 	findMainGoFilesWithProgress(r)
 
 	// Phase 4: Get git branch
-	fmt.Fprintf(os.Stderr, "Phase 4/5: Getting git branch information...\n")
+	fmt.Fprintf(os.Stderr, "Phase 4/6: Getting git branch information...\n")
 	getGitBranchWithProgress(r)
 
 	// Phase 5: Get git URL
-	fmt.Fprintf(os.Stderr, "Phase 5/5: Getting git repository URL...\n")
+	fmt.Fprintf(os.Stderr, "Phase 5/6: Getting git repository URL...\n")
 	getGitURLWithProgress(r)
+
+	// Phase 6: Detect unsafe/reflect usage
+	fmt.Fprintf(os.Stderr, "Phase 6/6: Detecting unsafe and reflect package usage...\n")
+	cg.DetectUnsafeReflectUsage(r, func(msg string) {
+		fmt.Fprintf(os.Stderr, "%s\n", msg)
+	})
 
 	if r.GoCVE == "" {
 		r = &cg.Result{
@@ -382,10 +388,12 @@ func initResultWithProgress(cve, dir string, fix bool) *cg.Result {
 			Directory:    r.Directory,
 			Branch:       r.Branch,
 			Repository:   r.Repository,
+			Unsafe:       r.Unsafe,
+			Reflect:      r.Reflect,
 		}
 		jsonOutput, err := json.MarshalIndent(r, "", "  ")
 		if err != nil {
-			errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
+			errMsg := "Failed to marshal results to JSON: " + err.Error()
 			r.Errors = append(r.Errors, errMsg)
 		}
 		fmt.Println(string(jsonOutput))
@@ -400,7 +408,7 @@ func initResultWithProgress(cve, dir string, fix bool) *cg.Result {
 
 func fetchGoVulnIDWithProgress(result *cg.Result) {
 	client := http.Client{Timeout: 10 * time.Second}
-	url := fmt.Sprintf("https://vuln.go.dev/index/vulns.json")
+	url := "https://vuln.go.dev/index/vulns.json"
 
 	resp, err := client.Get(url)
 	if err != nil {
