@@ -85,8 +85,8 @@ Special Instructions:
 	f.WriteString(fmt.Sprintf("Package: %s\n", pkg))
 
 	// Copy data/se-code-cursorrules to root directory as .cursorrules
-	srcFile := "./data/se-code-cursorrules"
-	dstFile := filepath.Join(dir, ".cursorrules")
+	srcFile := "./data/AGENTS.md"
+	dstFile := filepath.Join(dir, "AGENTS.md")
 	if data, err := os.ReadFile(srcFile); err == nil {
 		os.WriteFile(dstFile, data, 0644)
 	} else {
