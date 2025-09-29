@@ -25,6 +25,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"net/http"
 	"os"
@@ -74,6 +77,7 @@ func InitResult(cve, dir string, fix bool) *Result {
 	findMainGoFiles(r)
 	getGitBranch(r)
 	getGitURL(r)
+	DetectUnsafeReflectUsage(r, nil)
 
 	if r.GoCVE == "" {
 		r = &Result{
@@ -83,6 +87,8 @@ func InitResult(cve, dir string, fix bool) *Result {
 			Directory:    r.Directory,
 			Branch:       r.Branch,
 			Repository:   r.Repository,
+			Unsafe:       r.Unsafe,
+			Reflect:      r.Reflect,
 		}
 		jsonOutput, err := json.MarshalIndent(r, "", "  ")
 		if err != nil {
@@ -800,13 +806,11 @@ func extractGoVersion(fixedVersion string) string {
 	}
 
 	// Remove "go" prefix if present
-	if strings.HasPrefix(fixedVersion, "go") {
-		fixedVersion = strings.TrimPrefix(fixedVersion, "go")
-	}
+	fixedVersion = strings.TrimPrefix(fixedVersion, "go")
 
 	// Ensure it's a valid semver format (add "v" prefix if missing)
-	if !strings.HasPrefix(fixedVersion, "v") && regexp.MustCompile(`^\d+\.\d+`).MatchString(fixedVersion) {
-		fixedVersion = "v" + fixedVersion
+	if regexp.MustCompile(`^\d+\.\d+`).MatchString(fixedVersion) {
+		fixedVersion = "v" + strings.TrimPrefix(fixedVersion, "v")
 	}
 
 	return fixedVersion
@@ -918,11 +922,198 @@ func selectFixVersionForCurrentGoVersion(currentGoVersion string, fixedVersions 
 	}
 
 	// Remove the 'v' prefix for go.mod compatibility
-	if strings.HasPrefix(bestFix, "v") {
-		bestFix = strings.TrimPrefix(bestFix, "v")
-	}
+	bestFix = strings.TrimPrefix(bestFix, "v")
 
 	return bestFix
+}
+
+// ProgressCallback is a function type for progress reporting
+type ProgressCallback func(message string)
+
+// DetectUnsafeReflectUsage scans the repository for usage of unsafe and reflect packages
+// Uses AST parsing to avoid false positives from comments, strings, etc.
+// progressFn is optional - pass nil for no progress reporting
+func DetectUnsafeReflectUsage(result *Result, progressFn ProgressCallback) {
+	// Initialize to false
+	result.Unsafe = false
+	result.Reflect = false
+
+	var fileCount int
+	var processedFiles int
+
+	// Count files if progress reporting is enabled
+	if progressFn != nil {
+		filepath.WalkDir(result.Directory, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !d.IsDir() && strings.HasSuffix(d.Name(), ".go") &&
+				!strings.Contains(path, "/vendor/") && !strings.HasSuffix(d.Name(), "_test.go") {
+				fileCount++
+			}
+			return nil
+		})
+		progressFn(fmt.Sprintf("  Scanning %d Go files for unsafe/reflect usage...", fileCount))
+	}
+
+	// Walk through all Go files in the directory
+	err := filepath.WalkDir(result.Directory, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Skip directories and non-Go files
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".go") {
+			return nil
+		}
+
+		// Skip vendor directories and test files for cleaner analysis
+		if strings.Contains(path, "/vendor/") || strings.HasSuffix(d.Name(), "_test.go") {
+			return nil
+		}
+
+		if progressFn != nil {
+			processedFiles++
+		}
+
+		// Parse the Go file using AST
+		fset := token.NewFileSet()
+		node, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+		if err != nil {
+			// Don't fail the entire scan for parse errors, just log
+			errMsg := fmt.Sprintf("Failed to parse Go file %s for unsafe/reflect detection: %v", path, err)
+			result.Errors = append(result.Errors, errMsg)
+			return nil
+		}
+
+		// Check imports and usage using AST
+		hasUnsafe, hasReflect := analyzeASTForPackages(node)
+
+		if hasUnsafe && !result.Unsafe {
+			result.Unsafe = true
+			if progressFn != nil {
+				progressFn(fmt.Sprintf("    Found unsafe package usage in: %s", path))
+			}
+		}
+
+		if hasReflect && !result.Reflect {
+			result.Reflect = true
+			if progressFn != nil {
+				progressFn(fmt.Sprintf("    Found reflect package usage in: %s", path))
+			}
+		}
+
+		// Early exit if both are found
+		if result.Unsafe && result.Reflect {
+			if progressFn != nil {
+				progressFn(fmt.Sprintf("  ✓ Both unsafe and reflect usage detected (processed %d/%d files)", processedFiles, fileCount))
+			}
+			return filepath.SkipAll
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		errMsg := fmt.Sprintf("Failed to scan directory for unsafe/reflect usage: %v", err)
+		result.Errors = append(result.Errors, errMsg)
+	}
+
+	if progressFn != nil {
+		progressFn(fmt.Sprintf("  ✓ Package usage detection complete: unsafe=%t, reflect=%t", result.Unsafe, result.Reflect))
+	}
+}
+
+// analyzeASTForPackages analyzes an AST node for actual usage of unsafe and reflect packages
+// Returns (hasUnsafe, hasReflect)
+func analyzeASTForPackages(node *ast.File) (bool, bool) {
+	hasUnsafe := false
+	hasReflect := false
+
+	// Track imported package names and their aliases
+	importedPackages := make(map[string]string) // alias -> package path
+
+	// First pass: collect imports
+	for _, imp := range node.Imports {
+		if imp.Path == nil {
+			continue
+		}
+
+		pkgPath := strings.Trim(imp.Path.Value, `"`)
+		var alias string
+
+		if imp.Name != nil {
+			// Explicit alias (import alias "package" or import . "package")
+			alias = imp.Name.Name
+		} else {
+			// Default alias is the last part of the package path
+			parts := strings.Split(pkgPath, "/")
+			alias = parts[len(parts)-1]
+		}
+
+		importedPackages[alias] = pkgPath
+	}
+
+	// Check if unsafe or reflect are imported
+	for alias, pkgPath := range importedPackages {
+		if pkgPath == "unsafe" {
+			hasUnsafe = true
+		}
+		if pkgPath == "reflect" {
+			hasReflect = true
+		}
+		// Handle dot imports
+		if alias == "." && (pkgPath == "unsafe" || pkgPath == "reflect") {
+			if pkgPath == "unsafe" {
+				hasUnsafe = true
+			}
+			if pkgPath == "reflect" {
+				hasReflect = true
+			}
+		}
+	}
+
+	// Second pass: look for actual usage in the code
+	// Only check for usage if the packages are imported
+	if hasUnsafe || hasReflect {
+		ast.Inspect(node, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.SelectorExpr:
+				// Check for package.Function calls (e.g., unsafe.Pointer, reflect.TypeOf)
+				if ident, ok := x.X.(*ast.Ident); ok {
+					if pkgPath, exists := importedPackages[ident.Name]; exists {
+						if pkgPath == "unsafe" {
+							hasUnsafe = true
+						}
+						if pkgPath == "reflect" {
+							hasReflect = true
+						}
+					}
+				}
+			case *ast.CallExpr:
+				// Handle dot imports where functions are called directly
+				if _, ok := x.Fun.(*ast.Ident); ok {
+					// Check if this could be a function from a dot-imported package
+					// This is less precise but catches dot import usage
+					for alias, pkgPath := range importedPackages {
+						if alias == "." {
+							// For dot imports, we assume usage if the package is imported
+							// since we can't easily distinguish between local and imported functions
+							if pkgPath == "unsafe" {
+								hasUnsafe = true
+							}
+							if pkgPath == "reflect" {
+								hasReflect = true
+							}
+						}
+					}
+				}
+			}
+			return true
+		})
+	}
+
+	return hasUnsafe, hasReflect
 }
 
 // ConvertUsedImports converts from cmd/cg UsedImportsDetails to common interface format

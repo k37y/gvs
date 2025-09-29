@@ -40,6 +40,8 @@ type Result struct {
 	Errors          []string   `json:"Errors"`
 	FixErrors       *[]string  `json:"FixErrors,omitempty"`
 	FixSuccess      *[]string  `json:"FixSuccess,omitempty"`
+	Unsafe          bool       `json:"unsafe"`
+	Reflect         bool       `json:"reflect"`
 	Mu              sync.Mutex `json:"-"`
 	Summary         string
 }
