@@ -1,18 +1,29 @@
 [Unit]
 Description=GVS Service
-After=network.target
+After=network.target podman.service
+Requires=podman.service
 
 [Service]
-ExecStart=/usr/bin/gvs
+Type=simple
+ExecStartPre=-/usr/bin/podman stop gvs
+ExecStartPre=-/usr/bin/podman rm gvs
+ExecStart=/usr/bin/podman run --rm --name gvs \
+    --pull=never \
+    --publish 8082:8082 \
+    --security-opt label=disable \
+    --log-driver journald \
+    --log-opt tag=gvs \
+    quay.io/k37y/gvs:latest
+ExecStop=/usr/bin/podman stop gvs
+ExecStopPost=-/usr/bin/podman rm gvs
 
 Restart=on-failure
 RestartSec=5
+TimeoutStartSec=60
+TimeoutStopSec=30
 
 StandardOutput=journal
 StandardError=journal
-
-User=gvs
-Group=gvs
 
 # WorkingDirectory=/var/lib/gvs
 

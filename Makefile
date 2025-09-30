@@ -3,8 +3,7 @@ CG_SOURCES = $(wildcard cmd/cg/*.go)
 NAME = gvs
 RUNNING_CONTAINER = $(shell podman ps --format json | jq -r '.[] | select(.Names[] | contains("$(NAME)")) | .Names[]')
 VERSION = $(shell git describe --tags --long --dirty 2>/dev/null)
-IMAGE = quay.io/kevy/${NAME}:${VERSION}
-IMAGE_NAME = $(basename $(IMAGE))
+IMAGE = quay.io/k37y/${NAME}:${VERSION}
 PORT ?= 8082
 ALGO ?= vta
 GEMINI_CONF = $(HOME)/.gemini.conf
@@ -95,15 +94,18 @@ image-push:
 .PHONY: set-image-ocp
 
 set-image-ocp:
-	oc set image deployment/gvs gvs=$$(echo ${IMAGE_NAME}@$$(/usr/bin/skopeo inspect docker://${IMAGE} | jq -r .Digest))
+	oc set image deployment/gvs gvs=$$(echo ${IMAGE}@$$(/usr/bin/skopeo inspect docker://${IMAGE} | jq -r .Digest))
 
-install: cg gvs useradd gvs.service
+install: cg gvs useradd gvs.service image
 	@echo "Installing binaries to $(BINDIR)..."
 	for bin in $(BINS); do \
 		$(SUDO) install -Dm755 bin/$$bin $(DESTDIR)$(BINDIR)/$$bin; \
 	done
 	@echo "Installing systemd service to $(UNITDIR)..."
 	$(SUDO) install -Dm644 $(SERVICE) $(DESTDIR)$(UNITDIR)/$(SERVICE)
+	@echo "Creating latest tag and loading image for root user..."
+	podman tag $(IMAGE) quay.io/k37y/gvs:latest
+	podman save quay.io/k37y/gvs:latest | $(SUDO) podman load
 	@echo "Reloading systemd daemon..."
 	$(SUDO) systemctl daemon-reload
 	@echo "Enabling and starting service..."
