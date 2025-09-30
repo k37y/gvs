@@ -379,12 +379,53 @@ func fetchAffectedSymbols(result *Result) {
 }
 
 func (r *Result) isSymbolUsed(pkg, dir string, symbols, files []string) string {
-	for _, symbol := range symbols {
+	// Store original symbols for reflection analysis
+	originalSymbols := make([]string, len(symbols))
+	copy(originalSymbols, symbols)
+
+	// Prepare symbol variations for direct call detection
+	for _, symbol := range originalSymbols {
 		symbols = append(symbols, fmt.Sprintf("%s.%s", pkg, symbol))
 		symbols = append(symbols, fmt.Sprintf("(%s).%s", pkg, symbol))
 		symbols = append(symbols, fmt.Sprintf("(*%s).%s", pkg, symbol))
 	}
 
+	// Check for direct usage via call graph analysis
+	directUsage := r.checkDirectUsage(pkg, dir, symbols, files)
+
+	// Check for reflection-based usage
+	reflectionRisks := r.detectReflectionVulnerabilities(pkg, dir, originalSymbols, files)
+
+	// Store reflection risks
+	if len(reflectionRisks) > 0 {
+		r.Mu.Lock()
+		r.ReflectionRisks = append(r.ReflectionRisks, reflectionRisks...)
+		r.Mu.Unlock()
+	}
+
+	// Update used imports with reflection findings
+	if directUsage == "true" || len(reflectionRisks) > 0 {
+		r.Mu.Lock()
+		if r.UsedImports == nil {
+			r.UsedImports = make(map[string]UsedImportsDetails)
+		}
+		entry := r.UsedImports[pkg]
+
+		// Add reflection-detected symbols
+		for _, risk := range reflectionRisks {
+			entry.Symbols = append(entry.Symbols, risk.Symbol)
+		}
+
+		r.UsedImports[pkg] = entry
+		r.Mu.Unlock()
+		return "true"
+	}
+
+	return "false"
+}
+
+// checkDirectUsage handles the existing call graph analysis
+func (r *Result) checkDirectUsage(pkg, dir string, symbols []string, files []string) string {
 	// Use callgraph library to list all the Callers and Callees (algorithm configurable via ALGO env var)
 	callGraphOutput, err := r.generateCallGraphWithLib(dir, files)
 	if err != nil {
@@ -1114,6 +1155,517 @@ func analyzeASTForPackages(node *ast.File) (bool, bool) {
 	}
 
 	return hasUnsafe, hasReflect
+}
+
+// detectReflectionVulnerabilities analyzes code for reflection-based calls to vulnerable symbols
+func (r *Result) detectReflectionVulnerabilities(pkg, dir string, symbols []string, files []string) []ReflectionRisk {
+	var risks []ReflectionRisk
+
+	// Parse all Go files in the specified files list
+	fset := token.NewFileSet()
+
+	for _, file := range files {
+		filePath := filepath.Join(dir, file)
+		src, err := os.ReadFile(filePath)
+		if err != nil {
+			continue
+		}
+
+		parsed, err := parser.ParseFile(fset, filePath, src, parser.ParseComments)
+		if err != nil {
+			continue
+		}
+
+		// Analyze this file for reflection vulnerabilities
+		fileRisks := r.analyzeFileForReflection(parsed, fset, pkg, symbols, filePath)
+		risks = append(risks, fileRisks...)
+	}
+
+	return risks
+}
+
+// analyzeFileForReflection performs AST analysis on a single file
+func (r *Result) analyzeFileForReflection(file *ast.File, fset *token.FileSet, pkg string, symbols []string, filePath string) []ReflectionRisk {
+	var risks []ReflectionRisk
+
+	// Track imported packages and their aliases
+	importedPackages := make(map[string]string) // alias -> package path
+
+	// First pass: collect imports
+	for _, imp := range file.Imports {
+		if imp.Path == nil {
+			continue
+		}
+
+		pkgPath := strings.Trim(imp.Path.Value, `"`)
+		var alias string
+
+		if imp.Name != nil {
+			alias = imp.Name.Name
+		} else {
+			parts := strings.Split(pkgPath, "/")
+			alias = parts[len(parts)-1]
+		}
+
+		importedPackages[alias] = pkgPath
+	}
+
+	// Check if reflect package is imported
+	hasReflect := false
+	for _, pkgPath := range importedPackages {
+		if pkgPath == "reflect" {
+			hasReflect = true
+			break
+		}
+	}
+
+	// Only analyze if reflect is imported
+	if !hasReflect {
+		return risks
+	}
+
+	// Second pass: analyze for reflection patterns
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.CallExpr:
+			// Check for various reflection patterns
+			if risk := r.analyzeCallExpr(x, fset, pkg, symbols, filePath, importedPackages); risk != nil {
+				risks = append(risks, *risk)
+			}
+		case *ast.CompositeLit:
+			// Check for function maps/registries
+			if risk := r.analyzeFunctionRegistry(x, fset, pkg, symbols, filePath); risk != nil {
+				risks = append(risks, *risk)
+			}
+		case *ast.BasicLit:
+			// Check for string literals containing vulnerable symbols
+			if x.Kind == token.STRING {
+				if risk := r.analyzeStringLiteral(x, fset, pkg, symbols, filePath); risk != nil {
+					risks = append(risks, *risk)
+				}
+			}
+		case *ast.AssignStmt:
+			// Check for assignments that might involve reflection
+			if risk := r.analyzeAssignment(x, fset, pkg, symbols, filePath, importedPackages); risk != nil {
+				risks = append(risks, *risk)
+			}
+		case *ast.SelectorExpr:
+			// Check for direct field/method access on reflected values
+			if risk := r.analyzeSelectorExpr(x, fset, pkg, symbols, filePath); risk != nil {
+				risks = append(risks, *risk)
+			}
+		}
+		return true
+	})
+
+	return risks
+}
+
+// analyzeCallExpr checks function calls for reflection patterns
+func (r *Result) analyzeCallExpr(call *ast.CallExpr, fset *token.FileSet, pkg string, symbols []string, filePath string, importedPackages map[string]string) *ReflectionRisk {
+	// Check for reflect.ValueOf(vulnerableSymbol)
+	if r.isReflectValueOf(call, importedPackages) {
+		if symbol := r.extractSymbolFromValueOf(call, symbols); symbol != "" {
+			pos := fset.Position(call.Pos())
+			return &ReflectionRisk{
+				Type:       "value_of",
+				Confidence: "high",
+				Location:   fmt.Sprintf("%s:%d:%d", filePath, pos.Line, pos.Column),
+				Evidence:   []string{fmt.Sprintf("reflect.ValueOf(%s)", symbol)},
+				Symbol:     symbol,
+				Package:    pkg,
+			}
+		}
+	}
+
+	// Check for obj.MethodByName("vulnerableMethod")
+	if r.isMethodByName(call) {
+		if methodName := r.extractMethodName(call); methodName != "" {
+			if r.containsVulnerableSymbol(methodName, symbols) {
+				pos := fset.Position(call.Pos())
+				return &ReflectionRisk{
+					Type:       "method_by_name",
+					Confidence: "high",
+					Location:   fmt.Sprintf("%s:%d:%d", filePath, pos.Line, pos.Column),
+					Evidence:   []string{fmt.Sprintf("MethodByName(\"%s\")", methodName)},
+					Symbol:     methodName,
+					Package:    pkg,
+				}
+			}
+		}
+	}
+
+	// Check for Type.MethodByName patterns
+	if r.isTypeMethodByName(call) {
+		if methodName := r.extractMethodName(call); methodName != "" {
+			if r.containsVulnerableSymbol(methodName, symbols) {
+				pos := fset.Position(call.Pos())
+				return &ReflectionRisk{
+					Type:       "type_method_by_name",
+					Confidence: "medium",
+					Location:   fmt.Sprintf("%s:%d:%d", filePath, pos.Line, pos.Column),
+					Evidence:   []string{fmt.Sprintf("Type.MethodByName(\"%s\")", methodName)},
+					Symbol:     methodName,
+					Package:    pkg,
+				}
+			}
+		}
+	}
+
+	// Check for CallSlice (variadic function calls)
+	if r.isCallSlice(call) {
+		if symbol := r.extractSymbolFromCallSlice(call, symbols); symbol != "" {
+			pos := fset.Position(call.Pos())
+			return &ReflectionRisk{
+				Type:       "call_slice",
+				Confidence: "high",
+				Location:   fmt.Sprintf("%s:%d:%d", filePath, pos.Line, pos.Column),
+				Evidence:   []string{fmt.Sprintf("CallSlice with %s", symbol)},
+				Symbol:     symbol,
+				Package:    pkg,
+			}
+		}
+	}
+
+	// Check for Method by index (Method(i))
+	if r.isMethodByIndex(call) {
+		pos := fset.Position(call.Pos())
+		return &ReflectionRisk{
+			Type:       "method_by_index",
+			Confidence: "medium",
+			Location:   fmt.Sprintf("%s:%d:%d", filePath, pos.Line, pos.Column),
+			Evidence:   []string{"Method call by index - potential vulnerable symbol"},
+			Symbol:     "method_by_index",
+			Package:    pkg,
+		}
+	}
+
+	// Check for FieldByName (field access that might contain function pointers)
+	if r.isFieldByName(call) {
+		if fieldName := r.extractMethodName(call); fieldName != "" {
+			if r.containsVulnerableSymbol(fieldName, symbols) {
+				pos := fset.Position(call.Pos())
+				return &ReflectionRisk{
+					Type:       "field_by_name",
+					Confidence: "medium",
+					Location:   fmt.Sprintf("%s:%d:%d", filePath, pos.Line, pos.Column),
+					Evidence:   []string{fmt.Sprintf("FieldByName(\"%s\")", fieldName)},
+					Symbol:     fieldName,
+					Package:    pkg,
+				}
+			}
+		}
+	}
+
+	// Check for Indirect() calls (pointer dereferencing)
+	if r.isIndirect(call, importedPackages) {
+		pos := fset.Position(call.Pos())
+		return &ReflectionRisk{
+			Type:       "indirect",
+			Confidence: "medium",
+			Location:   fmt.Sprintf("%s:%d:%d", filePath, pos.Line, pos.Column),
+			Evidence:   []string{"reflect.Indirect - potential vulnerable symbol access"},
+			Symbol:     "indirect_access",
+			Package:    pkg,
+		}
+	}
+
+	// Check for NewAt() calls (unsafe pointer creation)
+	if r.isNewAt(call, importedPackages) {
+		pos := fset.Position(call.Pos())
+		return &ReflectionRisk{
+			Type:       "new_at",
+			Confidence: "high",
+			Location:   fmt.Sprintf("%s:%d:%d", filePath, pos.Line, pos.Column),
+			Evidence:   []string{"reflect.NewAt - unsafe pointer creation"},
+			Symbol:     "unsafe_new_at",
+			Package:    pkg,
+		}
+	}
+
+	// Check for Convert() calls (type conversion)
+	if r.isConvert(call) {
+		pos := fset.Position(call.Pos())
+		return &ReflectionRisk{
+			Type:       "convert",
+			Confidence: "low",
+			Location:   fmt.Sprintf("%s:%d:%d", filePath, pos.Line, pos.Column),
+			Evidence:   []string{"Type conversion - potential symbol access"},
+			Symbol:     "type_convert",
+			Package:    pkg,
+		}
+	}
+
+	// Check for Interface() calls (interface conversion)
+	if r.isInterface(call) {
+		pos := fset.Position(call.Pos())
+		return &ReflectionRisk{
+			Type:       "interface",
+			Confidence: "medium",
+			Location:   fmt.Sprintf("%s:%d:%d", filePath, pos.Line, pos.Column),
+			Evidence:   []string{"Interface() conversion - potential symbol access"},
+			Symbol:     "interface_convert",
+			Package:    pkg,
+		}
+	}
+
+	return nil
+}
+
+// analyzeFunctionRegistry checks for function maps containing vulnerable symbols
+func (r *Result) analyzeFunctionRegistry(comp *ast.CompositeLit, fset *token.FileSet, pkg string, symbols []string, filePath string) *ReflectionRisk {
+	// Check if this is a map literal
+	if mapType, ok := comp.Type.(*ast.MapType); ok {
+		// Check if it's map[string]interface{} or similar
+		if r.isStringToInterfaceMap(mapType) {
+			// Check elements for vulnerable symbols
+			for _, elt := range comp.Elts {
+				if kv, ok := elt.(*ast.KeyValueExpr); ok {
+					if r.containsVulnerableInKeyValue(kv, symbols) {
+						pos := fset.Position(comp.Pos())
+						return &ReflectionRisk{
+							Type:       "function_registry",
+							Confidence: "medium",
+							Location:   fmt.Sprintf("%s:%d:%d", filePath, pos.Line, pos.Column),
+							Evidence:   []string{"Function registry with vulnerable symbols"},
+							Symbol:     "function_registry",
+							Package:    pkg,
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// analyzeStringLiteral checks string literals for vulnerable symbol names
+func (r *Result) analyzeStringLiteral(lit *ast.BasicLit, fset *token.FileSet, pkg string, symbols []string, filePath string) *ReflectionRisk {
+	value := strings.Trim(lit.Value, `"`)
+
+	for _, symbol := range symbols {
+		if strings.Contains(value, symbol) {
+			pos := fset.Position(lit.Pos())
+			return &ReflectionRisk{
+				Type:       "string_literal",
+				Confidence: "low",
+				Location:   fmt.Sprintf("%s:%d:%d", filePath, pos.Line, pos.Column),
+				Evidence:   []string{fmt.Sprintf("String literal: \"%s\"", value)},
+				Symbol:     symbol,
+				Package:    pkg,
+			}
+		}
+	}
+
+	return nil
+}
+
+// analyzeAssignment checks assignments that might involve reflection
+func (r *Result) analyzeAssignment(assign *ast.AssignStmt, fset *token.FileSet, pkg string, symbols []string, filePath string, importedPackages map[string]string) *ReflectionRisk {
+	// Check if the right-hand side involves reflection
+	for _, rhs := range assign.Rhs {
+		if call, ok := rhs.(*ast.CallExpr); ok {
+			// Check for reflect.TypeOf, reflect.ValueOf assignments
+			if r.isReflectTypeOf(call, importedPackages) || r.isReflectValueOf(call, importedPackages) {
+				pos := fset.Position(assign.Pos())
+				return &ReflectionRisk{
+					Type:       "reflection_assignment",
+					Confidence: "medium",
+					Location:   fmt.Sprintf("%s:%d:%d", filePath, pos.Line, pos.Column),
+					Evidence:   []string{"Assignment involving reflection - potential symbol storage"},
+					Symbol:     "reflection_assignment",
+					Package:    pkg,
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// analyzeSelectorExpr checks direct field/method access on reflected values
+func (r *Result) analyzeSelectorExpr(sel *ast.SelectorExpr, fset *token.FileSet, pkg string, symbols []string, filePath string) *ReflectionRisk {
+	// Check if the selector might be accessing a vulnerable symbol
+	if r.containsVulnerableSymbol(sel.Sel.Name, symbols) {
+		pos := fset.Position(sel.Pos())
+		return &ReflectionRisk{
+			Type:       "selector_access",
+			Confidence: "low",
+			Location:   fmt.Sprintf("%s:%d:%d", filePath, pos.Line, pos.Column),
+			Evidence:   []string{fmt.Sprintf("Direct access to %s", sel.Sel.Name)},
+			Symbol:     sel.Sel.Name,
+			Package:    pkg,
+		}
+	}
+	return nil
+}
+
+// Helper functions for pattern detection
+
+func (r *Result) isReflectValueOf(call *ast.CallExpr, importedPackages map[string]string) bool {
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		if ident, ok := sel.X.(*ast.Ident); ok {
+			if pkgPath, exists := importedPackages[ident.Name]; exists {
+				return pkgPath == "reflect" && sel.Sel.Name == "ValueOf"
+			}
+		}
+	}
+	return false
+}
+
+func (r *Result) extractSymbolFromValueOf(call *ast.CallExpr, symbols []string) string {
+	if len(call.Args) > 0 {
+		// Try to extract the symbol from the argument
+		if sel, ok := call.Args[0].(*ast.SelectorExpr); ok {
+			symbolName := sel.Sel.Name
+			if r.containsVulnerableSymbol(symbolName, symbols) {
+				return symbolName
+			}
+		}
+	}
+	return ""
+}
+
+func (r *Result) isMethodByName(call *ast.CallExpr) bool {
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		return sel.Sel.Name == "MethodByName"
+	}
+	return false
+}
+
+func (r *Result) isTypeMethodByName(call *ast.CallExpr) bool {
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		if sel.Sel.Name == "MethodByName" {
+			// Check if the receiver might be a Type
+			if selExpr, ok := sel.X.(*ast.SelectorExpr); ok {
+				return selExpr.Sel.Name == "Elem" || selExpr.Sel.Name == "Type"
+			}
+		}
+	}
+	return false
+}
+
+func (r *Result) extractMethodName(call *ast.CallExpr) string {
+	if len(call.Args) > 0 {
+		if lit, ok := call.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+			return strings.Trim(lit.Value, `"`)
+		}
+	}
+	return ""
+}
+
+func (r *Result) containsVulnerableSymbol(candidate string, symbols []string) bool {
+	for _, symbol := range symbols {
+		if strings.Contains(candidate, symbol) || strings.Contains(symbol, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Result) isStringToInterfaceMap(mapType *ast.MapType) bool {
+	// Check if key is string
+	if ident, ok := mapType.Key.(*ast.Ident); ok && ident.Name == "string" {
+		// Check if value is interface{} or interface type
+		if intf, ok := mapType.Value.(*ast.InterfaceType); ok {
+			return len(intf.Methods.List) == 0 // empty interface{}
+		}
+		if ident, ok := mapType.Value.(*ast.Ident); ok {
+			return ident.Name == "interface"
+		}
+	}
+	return false
+}
+
+func (r *Result) containsVulnerableInKeyValue(kv *ast.KeyValueExpr, symbols []string) bool {
+	// Check the value part of key-value pair
+	if sel, ok := kv.Value.(*ast.SelectorExpr); ok {
+		symbolName := sel.Sel.Name
+		return r.containsVulnerableSymbol(symbolName, symbols)
+	}
+	return false
+}
+
+// Additional helper functions for comprehensive reflection pattern detection
+
+func (r *Result) isCallSlice(call *ast.CallExpr) bool {
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		return sel.Sel.Name == "CallSlice"
+	}
+	return false
+}
+
+func (r *Result) extractSymbolFromCallSlice(call *ast.CallExpr, symbols []string) string {
+	// CallSlice is typically called on a function value, check the receiver
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		if ident, ok := sel.X.(*ast.Ident); ok {
+			// Check if this identifier might reference a vulnerable symbol
+			if r.containsVulnerableSymbol(ident.Name, symbols) {
+				return ident.Name
+			}
+		}
+	}
+	return ""
+}
+
+func (r *Result) isMethodByIndex(call *ast.CallExpr) bool {
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		return sel.Sel.Name == "Method"
+	}
+	return false
+}
+
+func (r *Result) isFieldByName(call *ast.CallExpr) bool {
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		return sel.Sel.Name == "FieldByName"
+	}
+	return false
+}
+
+func (r *Result) isIndirect(call *ast.CallExpr, importedPackages map[string]string) bool {
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		if ident, ok := sel.X.(*ast.Ident); ok {
+			if pkgPath, exists := importedPackages[ident.Name]; exists {
+				return pkgPath == "reflect" && sel.Sel.Name == "Indirect"
+			}
+		}
+	}
+	return false
+}
+
+func (r *Result) isNewAt(call *ast.CallExpr, importedPackages map[string]string) bool {
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		if ident, ok := sel.X.(*ast.Ident); ok {
+			if pkgPath, exists := importedPackages[ident.Name]; exists {
+				return pkgPath == "reflect" && sel.Sel.Name == "NewAt"
+			}
+		}
+	}
+	return false
+}
+
+func (r *Result) isConvert(call *ast.CallExpr) bool {
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		return sel.Sel.Name == "Convert"
+	}
+	return false
+}
+
+func (r *Result) isInterface(call *ast.CallExpr) bool {
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		return sel.Sel.Name == "Interface"
+	}
+	return false
+}
+
+func (r *Result) isReflectTypeOf(call *ast.CallExpr, importedPackages map[string]string) bool {
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		if ident, ok := sel.X.(*ast.Ident); ok {
+			if pkgPath, exists := importedPackages[ident.Name]; exists {
+				return pkgPath == "reflect" && sel.Sel.Name == "TypeOf"
+			}
+		}
+	}
+	return false
 }
 
 // ConvertUsedImports converts from cmd/cg UsedImportsDetails to common interface format

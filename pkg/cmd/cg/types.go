@@ -26,6 +26,16 @@ type UsedImportsDetails struct {
 	FixCommands    []string `json:"FixCommands,omitempty"`
 }
 
+// ReflectionRisk represents a potential vulnerability through reflection usage
+type ReflectionRisk struct {
+	Type       string   `json:"type"`       // "method_by_name", "value_of", "string_literal", "function_registry"
+	Confidence string   `json:"confidence"` // "high", "medium", "low"
+	Location   string   `json:"location"`   // file:line
+	Evidence   []string `json:"evidence"`   // What was found
+	Symbol     string   `json:"symbol"`     // The vulnerable symbol detected
+	Package    string   `json:"package"`    // The package containing the symbol
+}
+
 type Result struct {
 	IsVulnerable    string
 	UsedImports     map[string]UsedImportsDetails
@@ -36,13 +46,14 @@ type Result struct {
 	Repository      string
 	Branch          string
 	Directory       string
-	CursorCommand   *string    `json:"CursorCommand,omitempty"`
-	Errors          []string   `json:"Errors"`
-	FixErrors       *[]string  `json:"FixErrors,omitempty"`
-	FixSuccess      *[]string  `json:"FixSuccess,omitempty"`
-	Unsafe          bool       `json:"unsafe"`
-	Reflect         bool       `json:"reflect"`
-	Mu              sync.Mutex `json:"-"`
+	CursorCommand   *string          `json:"CursorCommand,omitempty"`
+	Errors          []string         `json:"Errors"`
+	FixErrors       *[]string        `json:"FixErrors,omitempty"`
+	FixSuccess      *[]string        `json:"FixSuccess,omitempty"`
+	Unsafe          bool             `json:"unsafe"`
+	Reflect         bool             `json:"reflect"`
+	ReflectionRisks []ReflectionRisk `json:"reflection_risks,omitempty"` // New field
+	Mu              sync.Mutex       `json:"-"`
 	Summary         string
 }
 

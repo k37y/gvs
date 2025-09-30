@@ -1,5 +1,5 @@
 # Build stage
-FROM registry.access.redhat.com/ubi9/go-toolset:1.21 AS builder
+FROM registry.access.redhat.com/ubi9/go-toolset:1.23 AS builder
 WORKDIR /go/src/github.com/k37y/gvs
 COPY . .
 USER root
@@ -30,7 +30,6 @@ EXPOSE 8082
 
 COPY --from=builder /usr/bin/gvs /go/src/github.com/k37y/gvs/bin/gvs
 COPY --from=builder /usr/bin/cg /go/src/github.com/k37y/gvs/bin/cg
-COPY --from=builder /go/src/github.com/k37y/gvs/hack/callgraph.sh /go/src/github.com/k37y/gvs/hack/callgraph.sh
 COPY --from=builder /go/src/github.com/k37y/gvs/site/index.html /go/src/github.com/k37y/gvs/site/index.html
 COPY --from=builder /go/src/github.com/k37y/gvs/site/styles.css /go/src/github.com/k37y/gvs/site/styles.css
 COPY --from=builder /go/src/github.com/k37y/gvs/site/script.js /go/src/github.com/k37y/gvs/site/script.js
