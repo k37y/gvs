@@ -257,3 +257,71 @@ make image-run
 $ go install github.com/k37y/gvs/cmd/gvs@main
 $ go install github.com/k37y/gvs/cmd/cg@main
 ```
+### ReflectionRisks
+1. Type (string)
+All 14 possible values:
+```
+"value_of" - reflect.ValueOf() usage
+"method_by_name" - obj.MethodByName() calls
+"type_method_by_name" - Type.MethodByName() calls
+"call_slice" - Variadic function calls via reflection
+"method_by_index" - Method(i) calls by index
+"field_by_name" - FieldByName() calls
+"indirect" - reflect.Indirect() calls
+"new_at" - reflect.NewAt() calls (unsafe)
+"convert" - Type conversion via reflection
+"interface" - Interface() conversion calls
+"function_registry" - Function maps/registries
+"string_literal" - String literals with vulnerable symbols
+"reflection_assignment" - Assignments involving reflection
+"selector_access" - Direct field/method access
+```
+2. Confidence (string)
+3 possible values:
+```
+"high" - Used for: value_of, method_by_name, call_slice, new_at
+"medium" - Used for: type_method_by_name, method_by_index, field_by_name, indirect, interface, function_registry, reflection_assignment
+"low" - Used for: convert, string_literal, selector_access
+```
+3. Location (string)
+```
+Format: "filepath:line:column"
+Example: "/path/to/file.go:123:45"
+```
+4. Evidence ([]string)
+Possible values (examples from code):
+```
+["reflect.ValueOf(symbolName)"]
+["MethodByName(\"methodName\")"]
+["Type.MethodByName(\"methodName\")"]
+["CallSlice with symbolName"]
+["Method call by index - potential vulnerable symbol"]
+["FieldByName(\"fieldName\")"]
+["reflect.Indirect - potential vulnerable symbol access"]
+["reflect.NewAt - unsafe pointer creation"]
+["Type conversion - potential symbol access"]
+["Interface() conversion - potential symbol access"]
+["Function registry with vulnerable symbols"]
+["String literal: \"literalValue\""]
+["Assignment involving reflection - potential symbol storage"]
+["Direct access to symbolName"]
+```
+5. Symbol (string)
+Possible values:
+```
+Actual vulnerable symbols: Any symbol from the CVE (e.g., "Do", "Client.Do", "RoundTrip")
+Generic identifiers:
+"reflection_assignment"
+"method_by_index"
+"indirect_access"
+"unsafe_new_at"
+"type_convert"
+"interface_convert"
+"function_registry"
+```
+6. Package (string)
+Values: The package being analyzed (passed as parameter)
+```
+Examples: "net/http", "golang.org/x/net/http2", "main", etc.
+The values are determined by the specific vulnerability symbols being searched for and the package context where the reflection usage is detected.
+```
