@@ -72,7 +72,35 @@ func InitResult(cve, dir string, fix bool) *Result {
 		r.FixSuccess = &fixSuccess
 	}
 
-	fetchGoVulnID(r)
+	// Check if input is already a GOCVE ID or needs conversion from CVE ID
+	if common.IsGOCVEID(cve) {
+		// Input is already a GOCVE ID, use it directly
+		r.GoCVE = cve
+	} else if common.IsCVEID(cve) {
+		// Input is a CVE ID, convert to GOCVE ID
+		fetchGoVulnID(r)
+	} else {
+		// Invalid input format
+		r = &Result{
+			GoCVE:        "Invalid input format",
+			IsVulnerable: "unknown",
+			CVE:          r.CVE,
+			Directory:    r.Directory,
+			Branch:       r.Branch,
+			Repository:   r.Repository,
+			Unsafe:       r.Unsafe,
+			Reflect:      r.Reflect,
+			Errors:       []string{"Invalid input format. Please provide either a CVE ID (CVE-YYYY-NNNN) or GOCVE ID (GO-YYYY-NNNN)"},
+		}
+		jsonOutput, err := json.MarshalIndent(r, "", "  ")
+		if err != nil {
+			errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
+			r.Errors = append(r.Errors, errMsg)
+		}
+		fmt.Println(string(jsonOutput))
+		os.Exit(0)
+	}
+
 	fetchAffectedSymbols(r)
 	findMainGoFiles(r)
 	getGitBranch(r)
