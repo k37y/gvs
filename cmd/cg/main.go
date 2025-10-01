@@ -354,9 +354,37 @@ func initResultWithProgress(cve, dir string, fix bool) *cg.Result {
 		r.FixSuccess = &fixSuccess
 	}
 
-	// Phase 1: Fetch Go vulnerability ID
-	fmt.Fprintf(os.Stderr, "Phase 1/6: Fetching Go vulnerability ID...\n")
-	fetchGoVulnIDWithProgress(r)
+	// Phase 1: Determine vulnerability ID type and fetch if needed
+	fmt.Fprintf(os.Stderr, "Phase 1/6: Processing vulnerability identifier...\n")
+	if common.IsGOCVEID(cve) {
+		// Input is already a GOCVE ID, use it directly
+		r.GoCVE = cve
+		fmt.Fprintf(os.Stderr, "  ✓ Using provided GOCVE ID: %s\n", cve)
+	} else if common.IsCVEID(cve) {
+		// Input is a CVE ID, convert to GOCVE ID
+		fmt.Fprintf(os.Stderr, "  Converting CVE ID to GOCVE ID...\n")
+		fetchGoVulnIDWithProgress(r)
+	} else {
+		// Invalid input format
+		r = &cg.Result{
+			GoCVE:        "Invalid input format",
+			IsVulnerable: "unknown",
+			CVE:          r.CVE,
+			Directory:    r.Directory,
+			Branch:       r.Branch,
+			Repository:   r.Repository,
+			Unsafe:       r.Unsafe,
+			Reflect:      r.Reflect,
+			Errors:       []string{"Invalid input format. Please provide either a CVE ID (CVE-YYYY-NNNN) or GOCVE ID (GO-YYYY-NNNN)"},
+		}
+		jsonOutput, err := json.MarshalIndent(r, "", "  ")
+		if err != nil {
+			errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
+			r.Errors = append(r.Errors, errMsg)
+		}
+		fmt.Println(string(jsonOutput))
+		os.Exit(0)
+	}
 
 	// Phase 2: Fetch affected symbols
 	fmt.Fprintf(os.Stderr, "Phase 2/6: Fetching affected symbols...\n")

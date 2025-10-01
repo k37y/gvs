@@ -190,3 +190,17 @@ func RunGovulncheck(directory, target string) (string, int, error) {
 
 	return out.String(), exitCode, nil
 }
+
+// IsGOCVEID checks if the input string is a GOCVE ID (format: GO-YYYY-NNNN)
+func IsGOCVEID(input string) bool {
+	// GOCVE ID format: GO-YYYY-NNNN (e.g., GO-2024-3333)
+	matched, _ := regexp.MatchString(`^GO-\d{4}-\d{4,}$`, input)
+	return matched
+}
+
+// IsCVEID checks if the input string is a CVE ID (format: CVE-YYYY-NNNN)
+func IsCVEID(input string) bool {
+	// CVE ID format: CVE-YYYY-NNNN (e.g., CVE-2024-45338)
+	matched, _ := regexp.MatchString(`^CVE-\d{4}-\d{4,}$`, input)
+	return matched
+}

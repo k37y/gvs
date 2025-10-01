@@ -154,11 +154,34 @@ document.addEventListener('DOMContentLoaded', function() {
 		}
 	}
 	
+	window.validateCVEInput = function() {
+		const value = cveInput.value.trim();
+		if (value === '') {
+			cveInput.setCustomValidity('');
+			return true;
+		}
+		
+		// Check if input matches CVE ID format (CVE-YYYY-NNNN) or GOCVE ID format (GO-YYYY-NNNN)
+		const cvePattern = /^CVE-\d{4}-\d{4,}$/;
+		const gocvePattern = /^GO-\d{4}-\d{4,}$/;
+		
+		if (cvePattern.test(value) || gocvePattern.test(value)) {
+			cveInput.setCustomValidity('');
+			return true;
+		} else {
+			cveInput.setCustomValidity('Please enter a valid CVE ID (CVE-YYYY-NNNN) or GOCVE ID (GO-YYYY-NNNN)');
+			return false;
+		}
+	}
+	
 	// Initialize Run Fix state on page load
 	updateRunFixState();
 	
 	// Update Run Fix state whenever CVE input changes
-	cveInput.addEventListener('input', updateRunFixState);
+	cveInput.addEventListener('input', function() {
+		updateRunFixState();
+		window.validateCVEInput();
+	});
 });
 
 const sustainingQuestions = [
@@ -212,6 +235,14 @@ function syntaxHighlight(json) {
 
 function runScan() {
 	if (scanInProgress) return;
+	
+	// Validate CVE input before proceeding
+	const cveInput = document.getElementById("cve");
+	if (!window.validateCVEInput()) {
+		cveInput.reportValidity();
+		return;
+	}
+	
 	scanInProgress = true;
 
 	const repo = document.getElementById("repo").value.trim();
