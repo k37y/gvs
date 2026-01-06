@@ -53,7 +53,7 @@ import (
 	"github.com/k37y/gvs/internal/common"
 )
 
-func InitResult(cve, dir string, fix bool) *Result {
+func InitResult(cve, dir string, fix bool, library, symbols, fixversion string) *Result {
 	r := &Result{
 		CVE:          cve,
 		Directory:    dir,
@@ -72,36 +72,80 @@ func InitResult(cve, dir string, fix bool) *Result {
 		r.FixSuccess = &fixSuccess
 	}
 
-	// Check if input is already a GOCVE ID or needs conversion from CVE ID
-	if common.IsGOCVEID(cve) {
-		// Input is already a GOCVE ID, use it directly
-		r.GoCVE = cve
-	} else if common.IsCVEID(cve) {
-		// Input is a CVE ID, convert to GOCVE ID
-		fetchGoVulnID(r)
-	} else {
-		// Invalid input format
-		r = &Result{
-			GoCVE:        "Invalid input format",
-			IsVulnerable: "unknown",
-			CVE:          r.CVE,
-			Directory:    r.Directory,
-			Branch:       r.Branch,
-			Repository:   r.Repository,
-			Unsafe:       r.Unsafe,
-			Reflect:      r.Reflect,
-			Errors:       []string{"Invalid input format. Please provide either a CVE ID (CVE-YYYY-NNNN) or GOCVE ID (GO-YYYY-NNNN)"},
+	// Check if library and symbols are provided for direct scanning (takes precedence)
+	if library != "" && symbols != "" {
+		// Set a placeholder GoCVE if no CVE provided, or fetch it if provided
+		if cve != "" {
+			if common.IsGOCVEID(cve) {
+				r.GoCVE = cve
+			} else if common.IsCVEID(cve) {
+				fetchGoVulnID(r)
+			}
+		} else {
+			r.GoCVE = "MANUAL-SCAN"
 		}
-		jsonOutput, err := json.MarshalIndent(r, "", "  ")
-		if err != nil {
-			errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
-			r.Errors = append(r.Errors, errMsg)
-		}
-		fmt.Println(string(jsonOutput))
-		os.Exit(0)
-	}
 
-	fetchAffectedSymbols(r)
+		// Use provided library and symbols instead of fetching from vulnerability database
+		symbolList := strings.Split(symbols, ",")
+		for i := range symbolList {
+			symbolList[i] = strings.TrimSpace(symbolList[i])
+		}
+
+		details := AffectedImportsDetails{
+			Symbols: symbolList,
+			Type:    "non-stdlib",
+		}
+
+		// Add fixed version if provided
+		if fixversion != "" {
+			details.FixedVersion = []string{fixversion}
+		}
+
+		r.AffectedImports = map[string]AffectedImportsDetails{
+			library: details,
+		}
+
+		// Check if it's a stdlib package
+		if strings.HasPrefix(library, "crypto/") || strings.HasPrefix(library, "net/") ||
+		   strings.HasPrefix(library, "encoding/") || strings.HasPrefix(library, "os/") ||
+		   !strings.Contains(library, ".") {
+			entry := r.AffectedImports[library]
+			entry.Type = "stdlib"
+			r.AffectedImports[library] = entry
+		}
+	} else {
+		// Check if input is already a GOCVE ID or needs conversion from CVE ID
+		if common.IsGOCVEID(cve) {
+			// Input is already a GOCVE ID, use it directly
+			r.GoCVE = cve
+		} else if common.IsCVEID(cve) {
+			// Input is a CVE ID, convert to GOCVE ID
+			fetchGoVulnID(r)
+		} else {
+			// Invalid input format
+			r = &Result{
+				GoCVE:        "Invalid input format",
+				IsVulnerable: "unknown",
+				CVE:          r.CVE,
+				Directory:    r.Directory,
+				Branch:       r.Branch,
+				Repository:   r.Repository,
+				Unsafe:       r.Unsafe,
+				Reflect:      r.Reflect,
+				Errors:       []string{"Invalid input format. Please provide either a CVE ID (CVE-YYYY-NNNN) or GOCVE ID (GO-YYYY-NNNN)"},
+			}
+			jsonOutput, err := json.MarshalIndent(r, "", "  ")
+			if err != nil {
+				errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
+				r.Errors = append(r.Errors, errMsg)
+			}
+			fmt.Println(string(jsonOutput))
+			os.Exit(0)
+		}
+
+		fetchAffectedSymbols(r)
+	}
+	
 	findMainGoFiles(r)
 	getGitBranch(r)
 	getGitURL(r)
@@ -141,8 +185,18 @@ func (j Job) isVulnerable(result *Result) *Result {
 	curVer := getCurrentVersion(j.Package, filepath.Join(result.Directory, j.Dir), result)
 	modPath := getModPath(j.Package, filepath.Join(result.Directory, j.Dir), result)
 	repVer := getReplaceVersion(modPath, filepath.Join(result.Directory, j.Dir), result)
-	fixVer := getFixedVersion(result.GoCVE, modPath, result)
-	fixVer = common.ExtractFormattedFixedVersions(fixVer)
+
+	// Check if fixed version is already set (from manual scan), otherwise fetch it
+	var fixVer []string
+	result.Mu.Lock()
+	if existing, ok := result.AffectedImports[j.Package]; ok && len(existing.FixedVersion) > 0 {
+		fixVer = existing.FixedVersion
+	} else {
+		fixVer = getFixedVersion(result.GoCVE, modPath, result)
+		fixVer = common.ExtractFormattedFixedVersions(fixVer)
+	}
+	result.Mu.Unlock()
+
 	fv := common.SemVersion(strings.Join(fixVer, " "))
 
 	used := false
@@ -161,10 +215,13 @@ func (j Job) isVulnerable(result *Result) *Result {
 		result.AffectedImports = make(map[string]AffectedImportsDetails)
 	}
 	aentry := result.AffectedImports[j.Package]
-	if result.AffectedImports[j.Package].Type != "stdlib" {
-		aentry.FixedVersion = strings.Split(common.SemVersion(fv), ",")
-	} else {
-		aentry.FixedVersion = fixVer
+	// Only update FixedVersion if it wasn't manually specified
+	if len(aentry.FixedVersion) == 0 {
+		if result.AffectedImports[j.Package].Type != "stdlib" {
+			aentry.FixedVersion = strings.Split(common.SemVersion(fv), ",")
+		} else {
+			aentry.FixedVersion = fixVer
+		}
 	}
 	result.AffectedImports[j.Package] = aentry
 	result.Mu.Unlock()
@@ -413,9 +470,23 @@ func (r *Result) isSymbolUsed(pkg, dir string, symbols, files []string) string {
 
 	// Prepare symbol variations for direct call detection
 	for _, symbol := range originalSymbols {
-		symbols = append(symbols, fmt.Sprintf("%s.%s", pkg, symbol))
-		symbols = append(symbols, fmt.Sprintf("(%s).%s", pkg, symbol))
-		symbols = append(symbols, fmt.Sprintf("(*%s).%s", pkg, symbol))
+		// Check if symbol contains a dot (e.g., "Entry.Writer" or "Type.Method")
+		if strings.Contains(symbol, ".") {
+			// Symbol is Type.Method format - generate proper receiver patterns
+			parts := strings.SplitN(symbol, ".", 2)
+			if len(parts) == 2 {
+				typeName := parts[0]
+				methodName := parts[1]
+				// Generate: (pkg.Type).Method and (*pkg.Type).Method
+				symbols = append(symbols, fmt.Sprintf("(%s.%s).%s", pkg, typeName, methodName))
+				symbols = append(symbols, fmt.Sprintf("(*%s.%s).%s", pkg, typeName, methodName))
+			}
+		} else {
+			// Symbol is a simple function or type - use original pattern
+			symbols = append(symbols, fmt.Sprintf("%s.%s", pkg, symbol))
+			symbols = append(symbols, fmt.Sprintf("(%s).%s", pkg, symbol))
+			symbols = append(symbols, fmt.Sprintf("(*%s).%s", pkg, symbol))
+		}
 	}
 
 	// Check for direct usage via call graph analysis
@@ -593,7 +664,11 @@ func (r *Result) generateCallGraphWithLib(dir string, files []string) (string, e
 }
 
 func matchSymbol(out []byte, symbol string) bool {
-	pattern := regexp.MustCompile(`\s` + regexp.QuoteMeta(symbol) + `$`)
+	// Match symbol as either caller (at start or after space) or callee (before space or at end)
+	// Call graph format: "Caller Callee"
+	quotedSymbol := regexp.QuoteMeta(symbol)
+	// Pattern matches: (start or space) + symbol + (space or end)
+	pattern := regexp.MustCompile(`(^|\s)` + quotedSymbol + `(\s|$)`)
 	scanner := bufio.NewScanner(bytes.NewReader(out))
 	for scanner.Scan() {
 		if pattern.MatchString(scanner.Text()) {

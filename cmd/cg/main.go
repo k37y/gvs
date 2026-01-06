@@ -35,6 +35,9 @@ func main() {
 	var fix = flag.Bool("fix", false, "run fix commands after analysis")
 	var algo = flag.String("algo", "vta", "call graph algorithm: vta (default), cha, rta, static")
 	var progress = flag.Bool("progress", false, "show progress of completed and pending jobs")
+	var library = flag.String("library", "", "override library path to scan (e.g., golang.org/x/net/html)")
+	var symbols = flag.String("symbols", "", "override symbol(s) to scan for (comma-separated, e.g., Parse,Render)")
+	var fixversion = flag.String("fixversion", "", "fixed version for manual scans (e.g., v1.9.4)")
 
 	// Custom usage function
 	flag.Usage = func() {
@@ -42,6 +45,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "\nOptions:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nSupported algorithms: vta (default), cha, rta, static\n")
+		fmt.Fprintf(os.Stderr, "\nLibrary/Symbol Override:\n")
+		fmt.Fprintf(os.Stderr, "  When -library and -symbols are provided, they take precedence over CVE-based symbol lookup.\n")
+		fmt.Fprintf(os.Stderr, "  Optionally use -fixversion to specify the fixed version for version comparison.\n")
+		fmt.Fprintf(os.Stderr, "  This allows scanning for specific library/symbol combinations directly.\n")
 	}
 
 	// Parse flags
@@ -56,6 +63,23 @@ func main() {
 
 	cveID := args[0]
 	directory := args[1]
+
+	// Validate that library, symbols, and fixversion are all provided together
+	libraryProvided := *library != ""
+	symbolsProvided := *symbols != ""
+	fixversionProvided := *fixversion != ""
+	anyManualScanFieldProvided := libraryProvided || symbolsProvided || fixversionProvided
+
+	if anyManualScanFieldProvided {
+		if !libraryProvided || !symbolsProvided || !fixversionProvided {
+			fmt.Fprintf(os.Stderr, "Error: When using manual scan mode, all three fields are mandatory:\n")
+			fmt.Fprintf(os.Stderr, "  -library    : %v\n", libraryProvided)
+			fmt.Fprintf(os.Stderr, "  -symbols    : %v\n", symbolsProvided)
+			fmt.Fprintf(os.Stderr, "  -fixversion : %v\n", fixversionProvided)
+			fmt.Fprintf(os.Stderr, "\nPlease provide all three fields or none.\n")
+			os.Exit(1)
+		}
+	}
 
 	if info, err := os.Stat(directory); err != nil || !info.IsDir() {
 		fmt.Printf("Invalid directory: %s\n", directory)
@@ -95,9 +119,9 @@ func main() {
 	var result *cg.Result
 	if *progress {
 		fmt.Fprintf(os.Stderr, "Initializing vulnerability scan...\n")
-		result = initResultWithProgress(cveID, directory, *fix)
+		result = initResultWithProgress(cveID, directory, *fix, *library, *symbols, *fixversion)
 	} else {
-		result = cg.InitResult(cveID, directory, *fix)
+		result = cg.InitResult(cveID, directory, *fix, *library, *symbols, *fixversion)
 	}
 
 	jobs := make(chan cg.Job)
@@ -337,7 +361,7 @@ func main() {
 }
 
 // initResultWithProgress initializes the result with progress tracking for each phase
-func initResultWithProgress(cve, dir string, fix bool) *cg.Result {
+func initResultWithProgress(cve, dir string, fix bool, library, symbols, fixversion string) *cg.Result {
 	r := &cg.Result{
 		CVE:          cve,
 		Directory:    dir,
@@ -354,41 +378,91 @@ func initResultWithProgress(cve, dir string, fix bool) *cg.Result {
 		r.FixSuccess = &fixSuccess
 	}
 
-	// Phase 1: Determine vulnerability ID type and fetch if needed
-	fmt.Fprintf(os.Stderr, "Phase 1/6: Processing vulnerability identifier...\n")
-	if common.IsGOCVEID(cve) {
-		// Input is already a GOCVE ID, use it directly
-		r.GoCVE = cve
-		fmt.Fprintf(os.Stderr, "  ✓ Using provided GOCVE ID: %s\n", cve)
-	} else if common.IsCVEID(cve) {
-		// Input is a CVE ID, convert to GOCVE ID
-		fmt.Fprintf(os.Stderr, "  Converting CVE ID to GOCVE ID...\n")
-		fetchGoVulnIDWithProgress(r)
-	} else {
-		// Invalid input format
-		r = &cg.Result{
-			GoCVE:        "Invalid input format",
-			IsVulnerable: "unknown",
-			CVE:          r.CVE,
-			Directory:    r.Directory,
-			Branch:       r.Branch,
-			Repository:   r.Repository,
-			Unsafe:       r.Unsafe,
-			Reflect:      r.Reflect,
-			Errors:       []string{"Invalid input format. Please provide either a CVE ID (CVE-YYYY-NNNN) or GOCVE ID (GO-YYYY-NNNN)"},
-		}
-		jsonOutput, err := json.MarshalIndent(r, "", "  ")
-		if err != nil {
-			errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
-			r.Errors = append(r.Errors, errMsg)
-		}
-		fmt.Println(string(jsonOutput))
-		os.Exit(0)
-	}
+	// Check if library and symbols are provided for direct scanning (takes precedence)
+	if library != "" && symbols != "" {
+		fmt.Fprintf(os.Stderr, "Phase 1/6: Using provided library and symbol override...\n")
+		fmt.Fprintf(os.Stderr, "  Library: %s\n", library)
+		fmt.Fprintf(os.Stderr, "  Symbol(s): %s\n", symbols)
 
-	// Phase 2: Fetch affected symbols
-	fmt.Fprintf(os.Stderr, "Phase 2/6: Fetching affected symbols...\n")
-	fetchAffectedSymbolsWithProgress(r)
+		// Set a placeholder GoCVE to indicate manual scanning
+		if cve != "" {
+			if common.IsGOCVEID(cve) {
+				r.GoCVE = cve
+			} else if common.IsCVEID(cve) {
+				fetchGoVulnIDWithProgress(r)
+			}
+		} else {
+			r.GoCVE = "MANUAL-SCAN"
+		}
+
+		// Phase 2: Use provided library and symbols instead of fetching
+		fmt.Fprintf(os.Stderr, "Phase 2/6: Using provided library and symbols...\n")
+		symbolList := strings.Split(symbols, ",")
+		for i := range symbolList {
+			symbolList[i] = strings.TrimSpace(symbolList[i])
+		}
+
+		details := cg.AffectedImportsDetails{
+			Symbols: symbolList,
+			Type:    "non-stdlib",
+		}
+
+		// Add fixed version if provided
+		if fixversion != "" {
+			details.FixedVersion = []string{fixversion}
+			fmt.Fprintf(os.Stderr, "  Using fixed version: %s\n", fixversion)
+		}
+
+		r.AffectedImports = map[string]cg.AffectedImportsDetails{
+			library: details,
+		}
+
+		// Check if it's a stdlib package
+		if strings.HasPrefix(library, "crypto/") || strings.HasPrefix(library, "net/") ||
+		   strings.HasPrefix(library, "encoding/") || strings.HasPrefix(library, "os/") ||
+		   !strings.Contains(library, ".") {
+			entry := r.AffectedImports[library]
+			entry.Type = "stdlib"
+			r.AffectedImports[library] = entry
+		}
+		fmt.Fprintf(os.Stderr, "  ✓ Using %d symbol(s) for library %s\n", len(symbolList), library)
+	} else {
+		// Phase 1: Determine vulnerability ID type and fetch if needed
+		fmt.Fprintf(os.Stderr, "Phase 1/6: Processing vulnerability identifier...\n")
+		if common.IsGOCVEID(cve) {
+			// Input is already a GOCVE ID, use it directly
+			r.GoCVE = cve
+			fmt.Fprintf(os.Stderr, "  ✓ Using provided GOCVE ID: %s\n", cve)
+		} else if common.IsCVEID(cve) {
+			// Input is a CVE ID, convert to GOCVE ID
+			fmt.Fprintf(os.Stderr, "  Converting CVE ID to GOCVE ID...\n")
+			fetchGoVulnIDWithProgress(r)
+		} else {
+			// Invalid input format
+			r = &cg.Result{
+				GoCVE:        "Invalid input format",
+				IsVulnerable: "unknown",
+				CVE:          r.CVE,
+				Directory:    r.Directory,
+				Branch:       r.Branch,
+				Repository:   r.Repository,
+				Unsafe:       r.Unsafe,
+				Reflect:      r.Reflect,
+				Errors:       []string{"Invalid input format. Please provide either a CVE ID (CVE-YYYY-NNNN) or GOCVE ID (GO-YYYY-NNNN)"},
+			}
+			jsonOutput, err := json.MarshalIndent(r, "", "  ")
+			if err != nil {
+				errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
+				r.Errors = append(r.Errors, errMsg)
+			}
+			fmt.Println(string(jsonOutput))
+			os.Exit(0)
+		}
+
+		// Phase 2: Fetch affected symbols
+		fmt.Fprintf(os.Stderr, "Phase 2/6: Fetching affected symbols...\n")
+		fetchAffectedSymbolsWithProgress(r)
+	}
 
 	// Phase 3: Find main Go files and directories
 	fmt.Fprintf(os.Stderr, "Phase 3/6: Discovering Go modules and main files...\n")
