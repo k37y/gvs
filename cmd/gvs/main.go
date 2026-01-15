@@ -33,11 +33,11 @@ func main() {
 
 	http.Handle("/cg/", gvs.LogFileAccess(http.StripPrefix("/cg/", http.FileServer(http.Dir("/tmp/gvs-cache/img")))))
 	http.Handle("/", http.FileServer(http.Dir("./site")))
-	http.HandleFunc("/scan", api.ScanHandler)
-	http.HandleFunc("/healthz", api.HealthHandler)
-	http.HandleFunc("/callgraph", api.CallgraphHandler)
-	http.HandleFunc("/status", api.StatusHandler)
-	http.HandleFunc("/progress/", api.ProgressHandler)
+	http.HandleFunc("/scan", api.CORSMiddleware(api.ScanHandler))
+	http.HandleFunc("/healthz", api.CORSMiddleware(api.HealthHandler))
+	http.HandleFunc("/callgraph", api.CORSMiddleware(api.CallgraphHandler))
+	http.HandleFunc("/status", api.CORSMiddleware(api.StatusHandler))
+	http.HandleFunc("/progress/", api.CORSMiddleware(api.ProgressHandler))
 
 	srv := &http.Server{Addr: ":" + port}
 

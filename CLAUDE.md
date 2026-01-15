@@ -104,7 +104,29 @@ internal/         # Private application code
   common/         # Shared utilities (utils.go)
 
 site/             # Frontend assets (HTML, CSS, JS)
+  config.js         # API backend URL configuration
+  script.js         # Main frontend logic
+  index.html        # Web UI
+  styles.css        # Styling
 ```
+
+### Frontend Configuration
+
+The frontend can be configured to connect to a remote backend by editing `site/config.js`:
+
+```javascript
+window.GVS_CONFIG = {
+  API_BASE_URL: 'http://192.168.1.100:8082'  // Remote backend URL
+  // Or leave empty for same-host: API_BASE_URL: ''
+};
+```
+
+**Use Cases:**
+- **Same-host deployment**: Leave `API_BASE_URL` empty (default)
+- **Remote backend**: Set full URL with protocol and port
+- **CORS requirement**: When using remote backend, set `CORS_ALLOWED_ORIGINS` environment variable
+
+Implementation: All fetch calls in `script.js` use `${API_BASE_URL}/endpoint` pattern
 
 ### Call Graph Analysis Flow
 
@@ -173,6 +195,14 @@ Each detection includes location, evidence, and confidence score in `ReflectionR
 2. `POST /status {"taskId": "..."}` → returns status and output when complete
 3. Optional: `GET /progress/{taskId}` → SSE stream of progress messages
 
+**CORS Configuration:**
+- All API endpoints support CORS via middleware (`internal/api/cors.go`)
+- Controlled by `CORS_ALLOWED_ORIGINS` environment variable
+- Default: Not set (same-origin only, no CORS headers - most secure)
+- Set to `"*"` to allow all origins (development/testing)
+- Set to comma-separated list for specific origins (e.g., `"http://localhost:3000,http://app.example.com"`)
+- Handles preflight OPTIONS requests automatically when CORS is enabled
+
 ### Version Handling
 
 **Non-stdlib packages:**
@@ -207,6 +237,12 @@ Implementation: `CloneRepo` in `internal/common/utils.go`
 - `WORKER_COUNT`: Worker pool size (default: CPU/2)
 - `ALGO`: Call graph algorithm (default: vta)
 - `GOCACHE`: Go build cache location (set to `/tmp/go-build` by gvs server)
+- `CORS_ALLOWED_ORIGINS`: Comma-separated list of allowed CORS origins (default: not set)
+  - Examples:
+    - Not set - Same-origin only, no CORS headers (default, most secure)
+    - `CORS_ALLOWED_ORIGINS="*"` - Allow all origins (use for development/testing)
+    - `CORS_ALLOWED_ORIGINS="http://localhost:3000,http://192.168.1.100:8080"` - Allow specific origins
+    - Required when frontend is hosted separately from backend
 
 ### Tool Dependencies
 Required CLI tools (validated on startup):
