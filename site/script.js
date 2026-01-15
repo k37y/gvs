@@ -1,5 +1,8 @@
 let scanInProgress = false;
 
+// API Configuration
+const API_BASE_URL = (window.GVS_CONFIG && window.GVS_CONFIG.API_BASE_URL) || '';
+
 // Form Field History Manager
 class FormHistoryManager {
 	constructor() {
@@ -347,7 +350,7 @@ function runScan() {
 		outputDiv.classList.add("alert-warning");
 		outputDiv.style.display = "block";
 
-		fetch("/callgraph", {
+		fetch(`${API_BASE_URL}/callgraph`, {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json"
@@ -390,7 +393,7 @@ function runScan() {
 		outputDiv.classList.add("alert-warning");
 		outputDiv.style.display = "block";
 
-		fetch("/scan", {
+		fetch(`${API_BASE_URL}/scan`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ repo, branchOrCommit, showProgress: true }),
@@ -439,7 +442,7 @@ function runScan() {
 		startProgressStream(taskId);
 		
 		const intervalId = setInterval(() => {
-			fetch("/status", {
+			fetch(`${API_BASE_URL}/status`, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json"
@@ -522,9 +525,9 @@ function runScan() {
 
 function startProgressStream(taskId) {
 	const progressContent = document.getElementById("progressContent");
-	
+
 	// Use Server-Sent Events for real-time progress updates
-	const eventSource = new EventSource(`/progress/${taskId}`);
+	const eventSource = new EventSource(`${API_BASE_URL}/progress/${taskId}`);
 	
 	eventSource.onmessage = function(event) {
 		const data = event.data;
