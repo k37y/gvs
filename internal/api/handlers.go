@@ -242,6 +242,9 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 		Repo           string `json:"repo"`
 		BranchOrCommit string `json:"branchOrCommit"`
 		CVE            string `json:"cve"`
+		Library        string `json:"library"`
+		Symbol         string `json:"symbol"`
+		FixVersion     string `json:"fixversion"`
 		Fix            bool   `json:"fix"`
 		ShowProgress   bool   `json:"showProgress"`
 	}
@@ -249,6 +252,21 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "Invalid request payload")
 		return
+	}
+
+	// Validate that library, symbol, and fixversion are all provided together
+	libraryProvided := req.Library != ""
+	symbolProvided := req.Symbol != ""
+	fixversionProvided := req.FixVersion != ""
+	anyManualScanFieldProvided := libraryProvided || symbolProvided || fixversionProvided
+
+	if anyManualScanFieldProvided {
+		if !libraryProvided || !symbolProvided || !fixversionProvided {
+			errorMsg := fmt.Sprintf("When using manual scan mode, all three fields are mandatory: library (%v), symbol (%v), fixversion (%v). Please provide all three fields or none.",
+				libraryProvided, symbolProvided, fixversionProvided)
+			writeJSONError(w, http.StatusBadRequest, errorMsg)
+			return
+		}
 	}
 
 	requestMutex.Lock()
@@ -271,7 +289,7 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 	progressStreams[taskId] = make(chan string, 100)
 	progressMutex.Unlock()
 
-	go func(taskId, repo, branchOrCommit, cve string, fix bool) {
+	go func(taskId, repo, branchOrCommit, cve, library, symbol, fixversion string, fix bool) {
 		defer func() {
 			requestMutex.Lock()
 			inProgress = false
@@ -306,7 +324,8 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 
 		updateStatus(StatusRunning, "", "")
 
-		cacheKey := fmt.Sprintf("%s@%s:%s:fix=%t", repo, branchOrCommit, cve, fix)
+		// Include library, symbol, and fixversion in cache key if provided
+		cacheKey := fmt.Sprintf("%s@%s:%s:lib=%s:sym=%s:fixver=%s:fix=%t", repo, branchOrCommit, cve, library, symbol, fixversion, fix)
 		if cachedData, err := RetrieveCacheFromDisk(cacheKey); err == nil {
 			updateStatus(StatusCompleted, string(cachedData), "")
 			log.Printf("[Task %s] Retrieved callgraph from cache", taskId)
@@ -316,7 +335,7 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 		// If fix=true and no direct cache, check for fix=false cache
 		// We can reuse the cached directory and execute fix commands from the cached data
 		if fix {
-			fallbackCacheKey := fmt.Sprintf("%s@%s:%s:fix=false", repo, branchOrCommit, cve)
+			fallbackCacheKey := fmt.Sprintf("%s@%s:%s:lib=%s:sym=%s:fixver=%s:fix=false", repo, branchOrCommit, cve, library, symbol, fixversion)
 			if fallbackCachedData, err := RetrieveCacheFromDisk(fallbackCacheKey); err == nil {
 				// Parse the cached data, execute fix commands, and create fix=true response
 				start := time.Now()
@@ -355,11 +374,19 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 		sendProgress("Running vulnerability analysis...")
 		start = time.Now()
 		var cmd *exec.Cmd
+		// Build command arguments based on whether library/symbols are provided
+		args := []string{"-progress"}
 		if fix {
-			cmd = exec.Command("bin/cg", "-fix", "-progress", cve, cloneDir)
-		} else {
-			cmd = exec.Command("bin/cg", "-progress", cve, cloneDir)
+			args = append(args, "-fix")
 		}
+		if library != "" && symbol != "" {
+			args = append(args, "-library", library, "-symbols", symbol)
+		}
+		if fixversion != "" {
+			args = append(args, "-fixversion", fixversion)
+		}
+		args = append(args, cve, cloneDir)
+		cmd = exec.Command("bin/cg", args...)
 
 		output, err := runCgWithProgressCapture(cmd, sendProgress)
 
@@ -375,7 +402,7 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 		if err := SaveCacheToDisk(cacheKey, output); err != nil {
 			log.Printf("[Task %s] Failed to save cache: %v", taskId, err)
 		}
-	}(taskId, req.Repo, req.BranchOrCommit, req.CVE, req.Fix)
+	}(taskId, req.Repo, req.BranchOrCommit, req.CVE, req.Library, req.Symbol, req.FixVersion, req.Fix)
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]string{"taskId": taskId}); err != nil {

@@ -5,7 +5,7 @@ class FormHistoryManager {
 	constructor() {
 		this.maxHistoryItems = 10;
 		this.storagePrefix = 'gvs-history-';
-		this.fields = ['repo', 'branchOrCommit', 'cve'];
+		this.fields = ['repo', 'branchOrCommit', 'cve', 'library', 'symbol', 'fixversion'];
 		this.init();
 	}
 	
@@ -141,16 +141,21 @@ document.addEventListener('DOMContentLoaded', function() {
 	// Initialize form history manager
 	window.formHistory = new FormHistoryManager();
 	
-	// Add event listener to CVE ID field to automatically set Run Fix to "No" and disable when empty
+	// Add event listener to CVE ID, Library, and Symbol fields to automatically set Run Fix state
 	const cveInput = document.getElementById('cve');
+	const libraryInput = document.getElementById('library');
+	const symbolInput = document.getElementById('symbol');
 	const fixSelect = document.getElementById('fix');
 	
 	function updateRunFixState() {
-		if (cveInput.value.trim() === '') {
+		const hasCve = cveInput.value.trim() !== '';
+		const hasLibraryAndSymbol = libraryInput.value.trim() !== '' && symbolInput.value.trim() !== '';
+		
+		if (hasCve || hasLibraryAndSymbol) {
+			fixSelect.disabled = false;
+		} else {
 			fixSelect.value = 'false';
 			fixSelect.disabled = true;
-		} else {
-			fixSelect.disabled = false;
 		}
 	}
 	
@@ -177,11 +182,14 @@ document.addEventListener('DOMContentLoaded', function() {
 	// Initialize Run Fix state on page load
 	updateRunFixState();
 	
-	// Update Run Fix state whenever CVE input changes
+	// Update Run Fix state whenever CVE, Library, or Symbol inputs change
 	cveInput.addEventListener('input', function() {
 		updateRunFixState();
 		window.validateCVEInput();
 	});
+	
+	libraryInput.addEventListener('input', updateRunFixState);
+	symbolInput.addEventListener('input', updateRunFixState);
 });
 
 const sustainingQuestions = [
@@ -235,21 +243,60 @@ function syntaxHighlight(json) {
 
 function runScan() {
 	if (scanInProgress) return;
-	
+
 	// Validate CVE input before proceeding
 	const cveInput = document.getElementById("cve");
 	if (!window.validateCVEInput()) {
 		cveInput.reportValidity();
 		return;
 	}
-	
+
+	// Get form values early to validate manual scan fields
+	const libraryInput = document.getElementById("library");
+	const symbolInput = document.getElementById("symbol");
+	const fixversionInput = document.getElementById("fixversion");
+
+	const library = libraryInput.value.trim();
+	const symbol = symbolInput.value.trim();
+	const fixversion = fixversionInput.value.trim();
+
+	// Validate that library, symbol, and fixversion are all provided together
+	const libraryProvided = library !== "";
+	const symbolProvided = symbol !== "";
+	const fixversionProvided = fixversion !== "";
+	const anyManualScanFieldProvided = libraryProvided || symbolProvided || fixversionProvided;
+
+	// Reset validation styling
+	libraryInput.style.border = "";
+	symbolInput.style.border = "";
+	fixversionInput.style.border = "";
+
+	if (anyManualScanFieldProvided) {
+		if (!libraryProvided || !symbolProvided || !fixversionProvided) {
+			// Highlight missing fields in red
+			if (!libraryProvided) libraryInput.style.border = "2px solid red";
+			if (!symbolProvided) symbolInput.style.border = "2px solid red";
+			if (!fixversionProvided) fixversionInput.style.border = "2px solid red";
+
+			// Focus on the first missing field
+			if (!libraryProvided) {
+				libraryInput.focus();
+			} else if (!symbolProvided) {
+				symbolInput.focus();
+			} else if (!fixversionProvided) {
+				fixversionInput.focus();
+			}
+			return;
+		}
+	}
+
 	scanInProgress = true;
 
 	const repo = document.getElementById("repo").value.trim();
 	const branchOrCommit = document.getElementById("branchOrCommit").value.trim();
 	const cve = document.getElementById("cve").value.trim();
-	// Automatically set fix to false if CVE ID is empty
-	const fix = cve ? document.getElementById("fix").value === "true" : false;
+	// Automatically set fix to false if CVE ID is empty and no library/symbol override
+	const fix = (cve || (library && symbol)) ? document.getElementById("fix").value === "true" : false;
 	const outputDiv = document.getElementById("output");
 	const progressContent = document.getElementById("progressContent");
 	const scanButton = document.getElementById("scanButton");
@@ -280,8 +327,21 @@ function runScan() {
 		window.formHistory?.saveToHistory('cve', cve);
 		window.formHistory?.updateDatalist('cve');
 	}
+	if (library) {
+		window.formHistory?.saveToHistory('library', library);
+		window.formHistory?.updateDatalist('library');
+	}
+	if (symbol) {
+		window.formHistory?.saveToHistory('symbol', symbol);
+		window.formHistory?.updateDatalist('symbol');
+	}
+	if (fixversion) {
+		window.formHistory?.saveToHistory('fixversion', fixversion);
+		window.formHistory?.updateDatalist('fixversion');
+	}
 
-	if (repo && branchOrCommit && cve) {
+	// Use callgraph endpoint if CVE is provided, or if library and symbol are provided for direct scanning
+	if (repo && branchOrCommit && (cve || (library && symbol))) {
 		const hostUrl = `${location.protocol}//${location.host}`;
 		outputDiv.innerHTML = getRandomSustainingQuestion();
 		outputDiv.classList.add("alert-warning");
@@ -292,7 +352,7 @@ function runScan() {
 			headers: {
 				"Content-Type": "application/json"
 			},
-			body: JSON.stringify({ repo, branchOrCommit, cve, fix: fix, showProgress: true })
+			body: JSON.stringify({ repo, branchOrCommit, cve, library, symbol, fixversion, fix: fix, showProgress: true })
 		})
 			.then(response => response.json())
 			.then(data => {

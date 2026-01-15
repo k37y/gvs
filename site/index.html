@@ -49,32 +49,64 @@
 						</label>
 						<input type="text" id="branchOrCommit" class="form-control" placeholder="Branch or commit id" value="release-4.18">
 					</div>
-					<div class="col-md-2">
-						<label for="cve" class="form-label">
-							CVE ID (optional)
-							<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted" 
-								  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
-								  data-bs-toggle="tooltip" data-bs-placement="top" 
-								  title="Enter either a CVE ID (e.g., CVE-2024-45338) or GOCVE ID (e.g., GO-2024-3333). If left empty, scans for all known Go vulnerabilities in the repository.">?</span>
-						</label>
-						<input type="text" id="cve" class="form-control" placeholder="Enter CVE ID or GOCVE ID" value="CVE-2024-45339">
-					</div>
-					<div class="col-md-1">
-						<label for="fix" class="form-label">
-							Run Fix
-							<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted" 
-								  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
-								  data-bs-toggle="tooltip" data-bs-placement="top" 
-								  title="Select 'Yes' to execute fix commands automatically and get CursorCommand, FixError, and FixSuccess in the results. Select 'No' for vulnerability scanning only.">?</span>
-						</label>
-						<select id="fix" class="form-select">
-							<option value="false">No</option>
-							<option value="true">Yes</option>
-						</select>
-					</div>
-					<div class="col-md-2 text-end">
-						<button id="scanButton" class="btn btn-primary w-100" onclick="runScan()">Run Scan</button>
-					</div>
+				<div class="col-md-2">
+					<label for="cve" class="form-label">
+						CVE ID (optional)
+						<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted" 
+							  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
+							  data-bs-toggle="tooltip" data-bs-placement="top" 
+							  title="Enter either a CVE ID (e.g., CVE-2024-45338) or GOCVE ID (e.g., GO-2024-3333). If left empty, scans for all known Go vulnerabilities in the repository.">?</span>
+					</label>
+					<input type="text" id="cve" class="form-control" placeholder="Enter CVE ID or GOCVE ID" value="CVE-2024-45339">
+				</div>
+				<div class="col-md-1">
+					<label for="fix" class="form-label">
+						Run Fix
+						<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted" 
+							  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
+							  data-bs-toggle="tooltip" data-bs-placement="top" 
+							  title="Select 'Yes' to execute fix commands automatically and get CursorCommand, FixError, and FixSuccess in the results. Select 'No' for vulnerability scanning only.">?</span>
+					</label>
+					<select id="fix" class="form-select">
+						<option value="false">No</option>
+						<option value="true">Yes</option>
+					</select>
+				</div>
+				<div class="col-md-2 text-end">
+					<button id="scanButton" class="btn btn-primary w-100" onclick="runScan()">Run Scan</button>
+				</div>
+			</div>
+			<div class="row mb-3 align-items-end">
+				<div class="col-md-4">
+					<label for="library" class="form-label">
+						Library (optional)
+						<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted"
+							  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
+							  data-bs-toggle="tooltip" data-bs-placement="top"
+							  title="Specify a library path to scan (e.g., golang.org/x/net/html). When provided with Symbol, this takes precedence over CVE-based scanning.">?</span>
+					</label>
+					<input type="text" id="library" class="form-control" placeholder="e.g., golang.org/x/net/html">
+				</div>
+				<div class="col-md-4">
+					<label for="symbol" class="form-label">
+						Symbol (optional)
+						<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted"
+							  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
+							  data-bs-toggle="tooltip" data-bs-placement="top"
+							  title="Specify a symbol name to scan for (e.g., Parse, Render). Multiple symbols can be comma-separated. Used with Library field.">?</span>
+					</label>
+					<input type="text" id="symbol" class="form-control" placeholder="e.g., Parse, Render">
+				</div>
+				<div class="col-md-4">
+					<label for="fixversion" class="form-label">
+						Fixed Version (optional)
+						<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted"
+							  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
+							  data-bs-toggle="tooltip" data-bs-placement="top"
+							  title="Specify the fixed version for manual scans (e.g., v1.9.4). Used with Library and Symbol fields for version comparison.">?</span>
+					</label>
+					<input type="text" id="fixversion" class="form-control" placeholder="e.g., v1.9.4">
+				</div>
 				</div>
 			</div>
 			
