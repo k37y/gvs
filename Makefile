@@ -58,6 +58,18 @@ image:
 	else \
 		echo "No WORKER_COUNT provided, building with default (#cpu/2)"; \
 	fi; \
+	if [ -n "$(CORS_ALLOWED_ORIGINS)" ]; then \
+		echo "Using CORS_ALLOWED_ORIGINS=$(CORS_ALLOWED_ORIGINS)"; \
+		BUILD_ARGS="$$BUILD_ARGS --build-arg CORS_ALLOWED_ORIGINS=$(CORS_ALLOWED_ORIGINS)"; \
+	else \
+		echo "No CORS_ALLOWED_ORIGINS provided, using default (same-origin only)"; \
+	fi; \
+	if [ -n "$(GVS_COUNTER_URL)" ]; then \
+		echo "Using GVS_COUNTER_URL=$(GVS_COUNTER_URL)"; \
+		BUILD_ARGS="$$BUILD_ARGS --build-arg GVS_COUNTER_URL=$(GVS_COUNTER_URL)"; \
+	else \
+		echo "No GVS_COUNTER_URL provided, using default"; \
+	fi; \
 	podman build $$BUILD_ARGS --no-cache --file Dockerfile --tag ${IMAGE}
 
 .PHONY: image-run
@@ -88,6 +100,18 @@ image-push:
 	else \
 		echo "No WORKER_COUNT provided, building with default (#cpu/2)"; \
 	fi; \
+	if [ -n "$(CORS_ALLOWED_ORIGINS)" ]; then \
+		echo "Using CORS_ALLOWED_ORIGINS=$(CORS_ALLOWED_ORIGINS)"; \
+		BUILD_ARGS="$$BUILD_ARGS --build-arg CORS_ALLOWED_ORIGINS=$(CORS_ALLOWED_ORIGINS)"; \
+	else \
+		echo "No CORS_ALLOWED_ORIGINS provided, using default (same-origin only)"; \
+	fi; \
+	if [ -n "$(GVS_COUNTER_URL)" ]; then \
+		echo "Using GVS_COUNTER_URL=$(GVS_COUNTER_URL)"; \
+		BUILD_ARGS="$$BUILD_ARGS --build-arg GVS_COUNTER_URL=$(GVS_COUNTER_URL)"; \
+	else \
+		echo "No GVS_COUNTER_URL provided, using default"; \
+	fi; \
 	podman build $$BUILD_ARGS --no-cache --file Dockerfile --tag ${IMAGE}
 	podman push --authfile ${REGISTREY_AUTH_FILE} ${IMAGE}
 
@@ -96,11 +120,7 @@ image-push:
 set-image-ocp:
 	oc set image deployment/gvs gvs=$$(echo ${IMAGE}@$$(/usr/bin/skopeo inspect docker://${IMAGE} | jq -r .Digest))
 
-install: cg gvs useradd gvs.service image
-	@echo "Installing binaries to $(BINDIR)..."
-	for bin in $(BINS); do \
-		$(SUDO) install -Dm755 bin/$$bin $(DESTDIR)$(BINDIR)/$$bin; \
-	done
+install: useradd gvs.service image
 	@echo "Installing systemd service to $(UNITDIR)..."
 	$(SUDO) install -Dm644 $(SERVICE) $(DESTDIR)$(UNITDIR)/$(SERVICE)
 	@echo "Creating latest tag and loading image for root user..."

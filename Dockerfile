@@ -11,9 +11,13 @@ FROM quay.io/fedora/fedora:latest
 
 ARG WORKER_COUNT
 ARG ALGO
+ARG CORS_ALLOWED_ORIGINS
+ARG GVS_COUNTER_URL
 
 ENV WORKER_COUNT=${WORKER_COUNT}
 ENV ALGO=${ALGO}
+ENV CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}
+ENV GVS_COUNTER_URL=${GVS_COUNTER_URL}
 ENV GOPATH=/go
 ENV PATH=${PATH}:${GOPATH}/bin
 ENV PATH=${PATH}:/go/src/github.com/k37y/gvs/bin
@@ -33,5 +37,6 @@ COPY --from=builder /go/src/github.com/k37y/gvs/bin/cg /go/src/github.com/k37y/g
 COPY --from=builder /go/src/github.com/k37y/gvs/site/index.html /go/src/github.com/k37y/gvs/site/index.html
 COPY --from=builder /go/src/github.com/k37y/gvs/site/styles.css /go/src/github.com/k37y/gvs/site/styles.css
 COPY --from=builder /go/src/github.com/k37y/gvs/site/script.js /go/src/github.com/k37y/gvs/site/script.js
+COPY --from=builder /go/src/github.com/k37y/gvs/site/config.js /go/src/github.com/k37y/gvs/site/config.js
 
 ENTRYPOINT ["gvs"]
