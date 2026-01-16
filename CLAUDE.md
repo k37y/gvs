@@ -38,6 +38,15 @@ make image
 # Build with custom settings
 make image WORKER_COUNT=5 ALGO=rta PORT=8082
 
+# Build with CORS enabled for all origins
+make image CORS_ALLOWED_ORIGINS="*"
+
+# Build with CORS for specific origins
+make image CORS_ALLOWED_ORIGINS="http://localhost:3000,http://192.168.1.100:8080"
+
+# Build with GVS_COUNTER_URL to track API call counts
+make image GVS_COUNTER_URL="https://foo.com/bar"
+
 # Build and run container
 make image-run
 
