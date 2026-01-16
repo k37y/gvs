@@ -25,7 +25,18 @@ var (
 	taskMutex       sync.Mutex
 	progressStreams = make(map[string]chan string)
 	progressMutex   sync.Mutex
+	counterURL      = os.Getenv("GVS_COUNTER_URL")
 )
+
+func trackAPICall() {
+	if counterURL != "" {
+		go func() {
+			if resp, err := http.Get(counterURL); err == nil {
+				resp.Body.Close()
+			}
+		}()
+	}
+}
 
 type TaskStatus string
 
@@ -43,6 +54,7 @@ type TaskResult struct {
 }
 
 func ScanHandler(w http.ResponseWriter, r *http.Request) {
+	trackAPICall()
 	var req struct {
 		Repo           string `json:"repo"`
 		BranchOrCommit string `json:"branchOrCommit"`
@@ -238,6 +250,7 @@ func writeJSONError(w http.ResponseWriter, statusCode int, msg string) {
 }
 
 func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
+	trackAPICall()
 	var req struct {
 		Repo           string `json:"repo"`
 		BranchOrCommit string `json:"branchOrCommit"`

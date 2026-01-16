@@ -1,3 +1,8 @@
+[![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![License](https://img.shields.io/github/license/k37y/gvs)](https://github.com/k37y/gvs/blob/main/LICENSE)
+[![Go Report Card](https://goreportcard.com/badge/github.com/k37y/gvs)](https://goreportcard.com/report/github.com/k37y/gvs)
+![API Hits](https://img.shields.io/endpoint?url=https://gvs-counter.kevy.workers.dev/badge&label=API%20Hits)
+
 ![gvs](https://github.com/user-attachments/assets/e726bf74-5bc4-48de-8b89-bc57ee6d53e4)
 
 Find vulnerability status from **Git repository URL**, **Git branch/commit**, and **CVE ID**
