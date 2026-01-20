@@ -19,6 +19,17 @@ func RunCommand(dir string, command string, args ...string) ([]byte, error) {
 	return out, err
 }
 
+// RunCommandStdout executes a command and returns only stdout (ignoring stderr)
+// This is useful for queries where stderr contains informational messages
+// that should not be included in the result (e.g., "go: finding module" messages)
+func RunCommandStdout(dir string, command string, args ...string) ([]byte, error) {
+	cmd := exec.Command(command, args...)
+	cmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	return out, err
+}
+
 // Result represents the result structure for CLI command operations
 type Result struct {
 	IsVulnerable    string                 `json:"IsVulnerable"`
