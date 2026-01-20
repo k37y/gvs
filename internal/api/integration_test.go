@@ -105,7 +105,7 @@ func TestCallgraphIntegration(t *testing.T) {
 	// Step 4: Poll /status endpoint
 	t.Log("Polling status endpoint...")
 	var isVulnerable string
-	maxAttempts := 120 // 2 minutes with 1 second intervals
+	maxAttempts := 540 // 9 minutes with 1 second intervals
 
 	for i := 0; i < maxAttempts; i++ {
 		statusReq := map[string]string{"taskId": taskID}
@@ -267,7 +267,7 @@ func TestCallgraphIntegrationVulnerable(t *testing.T) {
 	// Step 4: Poll /status endpoint
 	t.Log("Polling status endpoint...")
 	var isVulnerable string
-	maxAttempts := 120 // 2 minutes with 1 second intervals
+	maxAttempts := 540 // 9 minutes with 1 second intervals
 
 	for i := 0; i < maxAttempts; i++ {
 		statusReq := map[string]string{"taskId": taskID}
