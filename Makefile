@@ -37,6 +37,12 @@ endif
 run: gvs cg
 	./bin/gvs
 
+.PHONY: test-integration
+
+test-integration:
+	@echo "Running integration tests..."
+	go test -v -count=1 ./internal/api -run TestCallgraphIntegration -timeout 15m
+
 .PHONY: gvs
 
 gvs: $(GVS_SOURCES)

@@ -1,0 +1,46 @@
+name: Integration Tests
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+jobs:
+  integration-test:
+    name: Run Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git jq
+
+      - name: Install Go tools
+        run: |
+          go install golang.org/x/tools/cmd/digraph@latest
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Build binaries
+        run: make gvs cg
+
+      - name: Run integration tests
+        run: make test-integration
+
+      - name: Cleanup
+        if: always()
+        run: |
+          pkill -f './bin/gvs' || true
+          rm -rf /tmp/gvs-cache /tmp/cg-* /tmp/gvc-*
