@@ -153,7 +153,7 @@ func InitResult(cve, dir string, fix bool, library, symbols, fixversion string) 
 
 	if r.GoCVE == "" {
 		r = &Result{
-			GoCVE:        "No Go CVE ID found",
+			GoCVE:        "",
 			IsVulnerable: "unknown",
 			CVE:          r.CVE,
 			Directory:    r.Directory,
@@ -161,6 +161,7 @@ func InitResult(cve, dir string, fix bool, library, symbols, fixversion string) 
 			Repository:   r.Repository,
 			Unsafe:       r.Unsafe,
 			Reflect:      r.Reflect,
+			Errors:       []string{"No Go CVE ID found"},
 		}
 		jsonOutput, err := json.MarshalIndent(r, "", "  ")
 		if err != nil {
@@ -445,21 +446,46 @@ func fetchAffectedSymbols(result *Result) {
 
 	}
 
+	// Validate that required fields are not empty
+	if len(detail.Affected) == 0 {
+		result.Errors = append(result.Errors, "Affected packages list is empty")
+		return
+	}
+
 	imports := make(map[string]AffectedImportsDetails)
+	hasValidImports := false
 
 	for _, aff := range detail.Affected {
 		typ := "non-stdlib"
 		if aff.Package.Name == "stdlib" {
 			typ = "stdlib"
 		}
+
+		// Check if imports are empty
+		if len(aff.EcosystemSpecific.Imports) == 0 {
+			continue
+		}
+
 		for _, imp := range aff.EcosystemSpecific.Imports {
+			// Skip imports with empty path or symbols
+			if imp.Path == "" || len(imp.Symbols) == 0 {
+				continue
+			}
+
 			entry := imports[imp.Path]
 			entry.Symbols = append(entry.Symbols, imp.Symbols...)
 			entry.Type = typ
 			imports[imp.Path] = entry
+			hasValidImports = true
 		}
 
 		result.AffectedImports = imports
+	}
+
+	// Validate that we found at least one valid import with symbols
+	if !hasValidImports {
+		result.Errors = append(result.Errors, "No imports or symbols found in vulnerability data")
+		return
 	}
 }
 
