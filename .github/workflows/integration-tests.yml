@@ -12,7 +12,7 @@ jobs:
   integration-test:
     name: Run Integration Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Checkout code

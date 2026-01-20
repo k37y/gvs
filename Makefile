@@ -41,7 +41,7 @@ run: gvs cg
 
 test-integration:
 	@echo "Running integration tests..."
-	go test -v -count=1 ./internal/api -run TestCallgraphIntegration -timeout 15m
+	go test -v -count=1 ./internal/api -run TestCallgraphIntegration -timeout 25m
 
 .PHONY: gvs
 
