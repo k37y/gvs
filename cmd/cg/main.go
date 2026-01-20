@@ -379,7 +379,43 @@ func initResultWithProgress(cve, dir string, fix bool, library, symbols, fixvers
 	}
 
 	// Check if library and symbols are provided for direct scanning (takes precedence)
-	if library != "" && symbols != "" {
+	if library != "" || symbols != "" || fixversion != "" {
+		// Validate that all three parameters are provided together
+		if library == "" || symbols == "" || fixversion == "" {
+			r = &cg.Result{
+				GoCVE:        "",
+				IsVulnerable: "unknown",
+				CVE:          r.CVE,
+				Directory:    r.Directory,
+				Errors:       []string{"When using library mode, all three flags are required: -library, -symbols, and -fixversion"},
+			}
+			jsonOutput, err := json.MarshalIndent(r, "", "  ")
+			if err != nil {
+				errMsg := "Failed to marshal results to JSON: " + err.Error()
+				r.Errors = append(r.Errors, errMsg)
+			}
+			fmt.Println(string(jsonOutput))
+			os.Exit(0)
+		}
+
+		// Validate that values are not just whitespace
+		if strings.TrimSpace(library) == "" || strings.TrimSpace(symbols) == "" || strings.TrimSpace(fixversion) == "" {
+			r = &cg.Result{
+				GoCVE:        "",
+				IsVulnerable: "unknown",
+				CVE:          r.CVE,
+				Directory:    r.Directory,
+				Errors:       []string{"Library mode parameters cannot be empty or whitespace only"},
+			}
+			jsonOutput, err := json.MarshalIndent(r, "", "  ")
+			if err != nil {
+				errMsg := "Failed to marshal results to JSON: " + err.Error()
+				r.Errors = append(r.Errors, errMsg)
+			}
+			fmt.Println(string(jsonOutput))
+			os.Exit(0)
+		}
+
 		fmt.Fprintf(os.Stderr, "Phase 1/6: Using provided library and symbol override...\n")
 		fmt.Fprintf(os.Stderr, "  Library: %s\n", library)
 		fmt.Fprintf(os.Stderr, "  Symbol(s): %s\n", symbols)
@@ -402,16 +438,39 @@ func initResultWithProgress(cve, dir string, fix bool, library, symbols, fixvers
 			symbolList[i] = strings.TrimSpace(symbolList[i])
 		}
 
+		// Validate that at least one non-empty symbol exists after trimming
+		hasValidSymbol := false
+		for _, sym := range symbolList {
+			if sym != "" {
+				hasValidSymbol = true
+				break
+			}
+		}
+		if !hasValidSymbol {
+			r = &cg.Result{
+				GoCVE:        "",
+				IsVulnerable: "unknown",
+				CVE:          r.CVE,
+				Directory:    r.Directory,
+				Errors:       []string{"At least one non-empty symbol is required"},
+			}
+			jsonOutput, err := json.MarshalIndent(r, "", "  ")
+			if err != nil {
+				errMsg := "Failed to marshal results to JSON: " + err.Error()
+				r.Errors = append(r.Errors, errMsg)
+			}
+			fmt.Println(string(jsonOutput))
+			os.Exit(0)
+		}
+
 		details := cg.AffectedImportsDetails{
 			Symbols: symbolList,
 			Type:    "non-stdlib",
 		}
 
-		// Add fixed version if provided
-		if fixversion != "" {
-			details.FixedVersion = []string{fixversion}
-			fmt.Fprintf(os.Stderr, "  Using fixed version: %s\n", fixversion)
-		}
+		// Add fixed version (now guaranteed to be non-empty)
+		details.FixedVersion = []string{fixversion}
+		fmt.Fprintf(os.Stderr, "  Using fixed version: %s\n", fixversion)
 
 		r.AffectedImports = map[string]cg.AffectedImportsDetails{
 			library: details,
@@ -462,6 +521,19 @@ func initResultWithProgress(cve, dir string, fix bool, library, symbols, fixvers
 		// Phase 2: Fetch affected symbols
 		fmt.Fprintf(os.Stderr, "Phase 2/6: Fetching affected symbols...\n")
 		fetchAffectedSymbolsWithProgress(r)
+	}
+
+	// Early exit if no vulnerable symbols found
+	if len(r.AffectedImports) == 0 {
+		fmt.Fprintf(os.Stderr, "Scan aborted: No vulnerable symbols to analyze.\n")
+		r.IsVulnerable = "unknown"
+		jsonOutput, err := json.MarshalIndent(r, "", "  ")
+		if err != nil {
+			errMsg := "Failed to marshal results to JSON: " + err.Error()
+			r.Errors = append(r.Errors, errMsg)
+		}
+		fmt.Println(string(jsonOutput))
+		os.Exit(0)
 	}
 
 	// Phase 3: Find main Go files and directories

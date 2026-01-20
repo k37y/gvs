@@ -73,7 +73,43 @@ func InitResult(cve, dir string, fix bool, library, symbols, fixversion string) 
 	}
 
 	// Check if library and symbols are provided for direct scanning (takes precedence)
-	if library != "" && symbols != "" {
+	if library != "" || symbols != "" || fixversion != "" {
+		// Validate that all three parameters are provided together
+		if library == "" || symbols == "" || fixversion == "" {
+			r = &Result{
+				GoCVE:        "",
+				IsVulnerable: "unknown",
+				CVE:          r.CVE,
+				Directory:    r.Directory,
+				Errors:       []string{"When using library mode, all three flags are required: -library, -symbols, and -fixversion"},
+			}
+			jsonOutput, err := json.MarshalIndent(r, "", "  ")
+			if err != nil {
+				errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
+				r.Errors = append(r.Errors, errMsg)
+			}
+			fmt.Println(string(jsonOutput))
+			os.Exit(0)
+		}
+
+		// Validate that values are not just whitespace
+		if strings.TrimSpace(library) == "" || strings.TrimSpace(symbols) == "" || strings.TrimSpace(fixversion) == "" {
+			r = &Result{
+				GoCVE:        "",
+				IsVulnerable: "unknown",
+				CVE:          r.CVE,
+				Directory:    r.Directory,
+				Errors:       []string{"Library mode parameters cannot be empty or whitespace only"},
+			}
+			jsonOutput, err := json.MarshalIndent(r, "", "  ")
+			if err != nil {
+				errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
+				r.Errors = append(r.Errors, errMsg)
+			}
+			fmt.Println(string(jsonOutput))
+			os.Exit(0)
+		}
+
 		// Set a placeholder GoCVE if no CVE provided, or fetch it if provided
 		if cve != "" {
 			if common.IsGOCVEID(cve) {
@@ -91,15 +127,38 @@ func InitResult(cve, dir string, fix bool, library, symbols, fixversion string) 
 			symbolList[i] = strings.TrimSpace(symbolList[i])
 		}
 
+		// Validate that at least one non-empty symbol exists after trimming
+		hasValidSymbol := false
+		for _, sym := range symbolList {
+			if sym != "" {
+				hasValidSymbol = true
+				break
+			}
+		}
+		if !hasValidSymbol {
+			r = &Result{
+				GoCVE:        "",
+				IsVulnerable: "unknown",
+				CVE:          r.CVE,
+				Directory:    r.Directory,
+				Errors:       []string{"At least one non-empty symbol is required"},
+			}
+			jsonOutput, err := json.MarshalIndent(r, "", "  ")
+			if err != nil {
+				errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
+				r.Errors = append(r.Errors, errMsg)
+			}
+			fmt.Println(string(jsonOutput))
+			os.Exit(0)
+		}
+
 		details := AffectedImportsDetails{
 			Symbols: symbolList,
 			Type:    "non-stdlib",
 		}
 
-		// Add fixed version if provided
-		if fixversion != "" {
-			details.FixedVersion = []string{fixversion}
-		}
+		// Add fixed version (now guaranteed to be non-empty)
+		details.FixedVersion = []string{fixversion}
 
 		r.AffectedImports = map[string]AffectedImportsDetails{
 			library: details,
@@ -145,7 +204,19 @@ func InitResult(cve, dir string, fix bool, library, symbols, fixversion string) 
 
 		fetchAffectedSymbols(r)
 	}
-	
+
+	// Early exit if no vulnerable symbols found
+	if len(r.AffectedImports) == 0 {
+		r.IsVulnerable = "unknown"
+		jsonOutput, err := json.MarshalIndent(r, "", "  ")
+		if err != nil {
+			errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
+			r.Errors = append(r.Errors, errMsg)
+		}
+		fmt.Println(string(jsonOutput))
+		os.Exit(0)
+	}
+
 	findMainGoFiles(r)
 	getGitBranch(r)
 	getGitURL(r)
