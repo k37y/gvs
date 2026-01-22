@@ -31,8 +31,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -630,17 +630,24 @@ func (r *Result) checkDirectUsage(pkg, dir string, symbols []string, files []str
 		return "unknown"
 	}
 
-	// Convert to bytes for compatibility with existing matchSymbol function
-	out := []byte(callGraphOutput)
+	// Find entry points (main functions) from the call graph
+	entryPoints := extractEntryPoints(callGraphOutput)
+	if len(entryPoints) == 0 {
+		errMsg := fmt.Sprintf("No entry points (main functions) found in call graph for %s", dir)
+		r.Errors = append(r.Errors, errMsg)
+		return "unknown"
+	}
 
 	var wg sync.WaitGroup
-	found := false
+	var mu sync.Mutex
+	foundAny := false
 
 	for _, symbol := range symbols {
 		wg.Add(1)
 		go func(sym string) {
 			defer wg.Done()
-			if matchSymbol(out, sym) {
+			// Check if symbol is reachable from any entry point using digraph somepath
+			if isSymbolReachableFromAny(callGraphOutput, entryPoints, sym) {
 				r.Mu.Lock()
 				if r.UsedImports == nil {
 					r.UsedImports = make(map[string]UsedImportsDetails)
@@ -649,14 +656,17 @@ func (r *Result) checkDirectUsage(pkg, dir string, symbols []string, files []str
 				entry.Symbols = append(entry.Symbols, sym)
 				r.UsedImports[pkg] = entry
 				r.Mu.Unlock()
-				found = true
+
+				mu.Lock()
+				foundAny = true
+				mu.Unlock()
 			}
 		}(symbol)
 	}
 
 	wg.Wait()
 
-	if found {
+	if foundAny {
 		return "true"
 	}
 	return "false"
@@ -760,19 +770,49 @@ func (r *Result) generateCallGraphWithLib(dir string, files []string) (string, e
 	return output.String(), nil
 }
 
-func matchSymbol(out []byte, symbol string) bool {
-	// Match symbol as either caller (at start or after space) or callee (before space or at end)
-	// Call graph format: "Caller Callee"
-	quotedSymbol := regexp.QuoteMeta(symbol)
-	// Pattern matches: (start or space) + symbol + (space or end)
-	pattern := regexp.MustCompile(`(^|\s)` + quotedSymbol + `(\s|$)`)
-	scanner := bufio.NewScanner(bytes.NewReader(out))
+// extractEntryPoints finds all main functions in the call graph
+func extractEntryPoints(callGraphOutput string) []string {
+	var entryPoints []string
+	seen := make(map[string]bool)
+
+	scanner := bufio.NewScanner(strings.NewReader(callGraphOutput))
 	for scanner.Scan() {
-		if pattern.MatchString(scanner.Text()) {
+		line := scanner.Text()
+		fields := strings.Fields(line)
+		if len(fields) >= 1 {
+			caller := fields[0]
+			// Look for main functions (e.g., "command-line-arguments.main", "package.main")
+			if strings.HasSuffix(caller, ".main") && !seen[caller] {
+				entryPoints = append(entryPoints, caller)
+				seen[caller] = true
+			}
+		}
+	}
+
+	return entryPoints
+}
+
+// isSymbolReachableFromAny checks if a symbol is reachable from any entry point
+func isSymbolReachableFromAny(callGraphOutput string, entryPoints []string, symbol string) bool {
+	for _, entryPoint := range entryPoints {
+		if isSymbolReachable(callGraphOutput, entryPoint, symbol) {
 			return true
 		}
 	}
 	return false
+}
+
+// isSymbolReachable uses digraph somepath to check if there's a path from entry to symbol
+func isSymbolReachable(callGraphOutput, entryPoint, symbol string) bool {
+	cmd := exec.Command("digraph", "somepath", entryPoint, symbol)
+	cmd.Stdin = strings.NewReader(callGraphOutput)
+	output, err := cmd.Output()
+	if err != nil {
+		// No path found or error occurred
+		return false
+	}
+	// If digraph finds a path, it outputs the path; empty means no path
+	return len(bytes.TrimSpace(output)) > 0
 }
 
 // getCallGraphAlgorithm returns the algorithm to use for call graph generation
@@ -1050,8 +1090,9 @@ func extractGoVersion(fixedVersion string) string {
 	fixedVersion = strings.TrimPrefix(fixedVersion, "go")
 
 	// Ensure it's a valid semver format (add "v" prefix if missing)
-	if regexp.MustCompile(`^\d+\.\d+`).MatchString(fixedVersion) {
-		fixedVersion = "v" + strings.TrimPrefix(fixedVersion, "v")
+	// Check if it starts with a digit (e.g., "1.21.4")
+	if len(fixedVersion) > 0 && fixedVersion[0] >= '0' && fixedVersion[0] <= '9' {
+		fixedVersion = "v" + fixedVersion
 	}
 
 	return fixedVersion
