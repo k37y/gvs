@@ -672,6 +672,11 @@ func (r *Result) checkDirectUsage(pkg, dir string, symbols []string, files []str
 	return "false"
 }
 
+// GenerateCallGraphForVisualization is a public wrapper for call graph generation for visualization
+func (r *Result) GenerateCallGraphForVisualization(dir string, files []string) (string, error) {
+	return r.generateCallGraphWithLib(dir, files)
+}
+
 // generateCallGraphWithLib creates a call graph using the callgraph library
 func (r *Result) generateCallGraphWithLib(dir string, files []string) (string, error) {
 	// Determine package patterns to load based on the files

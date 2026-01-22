@@ -3,12 +3,15 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -26,6 +29,7 @@ import (
 )
 
 func main() {
+	// Note: sfdp is checked conditionally when -graph flag is used
 	tools := []string{"go", "digraph", "git"}
 	if !utils.ValidateTools(tools) {
 		os.Exit(1)
@@ -38,6 +42,7 @@ func main() {
 	var library = flag.String("library", "", "override library path to scan (e.g., golang.org/x/net/html)")
 	var symbols = flag.String("symbols", "", "override symbol(s) to scan for (comma-separated, e.g., Parse,Render)")
 	var fixversion = flag.String("fixversion", "", "fixed version for manual scans (e.g., v1.9.4)")
+	var graph = flag.String("graph", "", "generate call graph SVG visualization (default: ./site/callgraph.svg if flag used without value)")
 
 	// Custom usage function
 	flag.Usage = func() {
@@ -49,6 +54,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  When -library and -symbols are provided, they take precedence over CVE-based symbol lookup.\n")
 		fmt.Fprintf(os.Stderr, "  Optionally use -fixversion to specify the fixed version for version comparison.\n")
 		fmt.Fprintf(os.Stderr, "  This allows scanning for specific library/symbol combinations directly.\n")
+		fmt.Fprintf(os.Stderr, "\nCall Graph Visualization:\n")
+		fmt.Fprintf(os.Stderr, "  Use -graph to generate an SVG visualization of the call graph.\n")
+		fmt.Fprintf(os.Stderr, "  -graph          : Saves to ./site/callgraph-<random>.svg (default)\n")
+		fmt.Fprintf(os.Stderr, "  -graph=./path   : Saves to ./path/callgraph-<random>.svg (directory)\n")
+		fmt.Fprintf(os.Stderr, "  -graph=file.svg : Saves to file.svg (specific file)\n")
+		fmt.Fprintf(os.Stderr, "  Requires: graphviz (sfdp tool) to be installed\n")
 	}
 
 	// Parse flags
@@ -349,6 +360,65 @@ func main() {
 		result.Errors = fixResult.Errors
 	}
 
+	// Generate call graph visualization if requested
+	if *graph != "" || isFlagPassed("graph") {
+		// Validate that sfdp is available
+		if !utils.ValidateTools([]string{"sfdp"}) {
+			errMsg := "sfdp tool not found. Please install graphviz (provides sfdp) to generate call graph visualizations"
+			result.Errors = append(result.Errors, errMsg)
+			if *progress {
+				fmt.Fprintf(os.Stderr, "✗ %s\n", errMsg)
+			}
+		} else {
+			if *progress {
+				fmt.Fprintf(os.Stderr, "Generating call graph visualization...\n")
+			}
+
+			outputPath := *graph
+			if outputPath == "" {
+				// Default to ./site/ directory
+				outputPath = "./site"
+			}
+
+			// Check if outputPath is a directory or file
+			if info, err := os.Stat(outputPath); err == nil && info.IsDir() {
+				// It's a directory, generate random filename
+				randomName := generateRandomFilename()
+				outputPath = filepath.Join(outputPath, fmt.Sprintf("callgraph-%s.svg", randomName))
+			} else if err != nil && !os.IsNotExist(err) {
+				// Some other error occurred
+				errMsg := fmt.Sprintf("Failed to check output path: %v", err)
+				result.Errors = append(result.Errors, errMsg)
+			} else if err != nil {
+				// Path doesn't exist, check if parent directory exists
+				parentDir := filepath.Dir(outputPath)
+				if info, err := os.Stat(parentDir); err != nil || !info.IsDir() {
+					// Parent doesn't exist, create it
+					if err := os.MkdirAll(parentDir, 0755); err != nil {
+						errMsg := fmt.Sprintf("Failed to create directory %s: %v", parentDir, err)
+						result.Errors = append(result.Errors, errMsg)
+					}
+				}
+				// Use the provided path as-is (it's a file path)
+			}
+
+			svgPath, err := generateCallGraphSVG(result, directory, outputPath, *progress)
+			if err != nil {
+				errMsg := fmt.Sprintf("Failed to generate call graph SVG: %v", err)
+				result.Errors = append(result.Errors, errMsg)
+				if *progress {
+					fmt.Fprintf(os.Stderr, "✗ Call graph visualization failed: %v\n", err)
+				}
+			} else {
+				if *progress {
+					fmt.Fprintf(os.Stderr, "✓ Call graph visualization saved to: %s\n", svgPath)
+				}
+				// Add the SVG path to the result for reference
+				result.GraphPath = &svgPath
+			}
+		}
+	}
+
 	// Generate summary and output JSON
 	cg.GenerateSummaryWithGemini(result)
 	jsonOutput, err := json.MarshalIndent(result, "", "  ")
@@ -358,6 +428,95 @@ func main() {
 	} else {
 		fmt.Println(string(jsonOutput))
 	}
+}
+
+// isFlagPassed checks if a flag was explicitly set on the command line
+func isFlagPassed(name string) bool {
+	found := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
+}
+
+// generateRandomFilename creates a random 8-character hex string
+func generateRandomFilename() string {
+	bytes := make([]byte, 4)
+	if _, err := rand.Read(bytes); err != nil {
+		// Fallback to timestamp if random fails
+		return fmt.Sprintf("%d", time.Now().Unix())
+	}
+	return hex.EncodeToString(bytes)
+}
+
+// generateCallGraphSVG generates an SVG visualization of the call graph
+func generateCallGraphSVG(result *cg.Result, directory, outputPath string, showProgress bool) (string, error) {
+	// Get the first main file set to generate the call graph
+	var files []string
+	var modDir string
+
+	for dir, sets := range result.Files {
+		if len(sets) > 0 && len(sets[0]) > 0 {
+			files = sets[0]
+			modDir = dir
+			break
+		}
+	}
+
+	if len(files) == 0 {
+		return "", fmt.Errorf("no main files found for call graph generation")
+	}
+
+	fullModDir := filepath.Join(directory, modDir)
+
+	// Generate call graph using the scanner's function
+	// We need to create a temporary result to use the generateCallGraphWithLib method
+	tempResult := &cg.Result{
+		Directory: directory,
+		Errors:    []string{},
+	}
+
+	if showProgress {
+		fmt.Fprintf(os.Stderr, "  Building call graph from %s...\n", fullModDir)
+	}
+
+	callGraphOutput, err := tempResult.GenerateCallGraphForVisualization(fullModDir, files)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate call graph: %v", err)
+	}
+
+	if showProgress {
+		fmt.Fprintf(os.Stderr, "  Converting to DOT format...\n")
+	}
+
+	// Convert call graph to DOT format using digraph
+	dotCmd := exec.Command("digraph", "to", "dot")
+	dotCmd.Stdin = strings.NewReader(callGraphOutput)
+	dotOutput, err := dotCmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to convert to DOT format: %v", err)
+	}
+
+	if showProgress {
+		fmt.Fprintf(os.Stderr, "  Rendering SVG with sfdp layout...\n")
+	}
+
+	// Convert DOT to SVG using sfdp
+	sfdpCmd := exec.Command("sfdp", "-Tsvg", "-Goverlap=scale")
+	sfdpCmd.Stdin = bytes.NewReader(dotOutput)
+	svgOutput, err := sfdpCmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to render SVG: %v", err)
+	}
+
+	// Write SVG to file
+	if err := os.WriteFile(outputPath, svgOutput, 0644); err != nil {
+		return "", fmt.Errorf("failed to write SVG file: %v", err)
+	}
+
+	return outputPath, nil
 }
 
 // initResultWithProgress initializes the result with progress tracking for each phase

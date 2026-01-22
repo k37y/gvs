@@ -53,6 +53,7 @@ type Result struct {
 	Unsafe          bool             `json:"unsafe"`
 	Reflect         bool             `json:"reflect"`
 	ReflectionRisks []ReflectionRisk `json:"reflection_risks,omitempty"` // New field
+	GraphPath       *string          `json:"GraphPath,omitempty"`        // Path to generated SVG graph
 	Mu              sync.Mutex       `json:"-"`
 	Summary         string
 }
