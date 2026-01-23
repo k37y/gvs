@@ -66,7 +66,7 @@ func TestCallgraphIntegration(t *testing.T) {
 		"repo":           "https://github.com/openshift/sriov-network-device-plugin",
 		"branchOrCommit": "95ebce39bc8d15f498abb0db0cb5b464db9a4887",
 		"cve":            "CVE-2024-45339",
-		"runFix":         false,
+		"algo":           "rta",
 	}
 
 	reqJSON, err := json.Marshal(requestBody)
@@ -228,7 +228,7 @@ func TestCallgraphIntegrationVulnerable(t *testing.T) {
 		"repo":           "https://github.com/openshift/sriov-network-device-plugin",
 		"branchOrCommit": "c600016ab638aab33bf02be5414f4174033c744a",
 		"cve":            "CVE-2024-45339",
-		"runFix":         false,
+		"algo":           "rta",
 	}
 
 	reqJSON, err := json.Marshal(requestBody)

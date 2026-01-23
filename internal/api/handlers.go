@@ -258,7 +258,8 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 		Library        string `json:"library"`
 		Symbol         string `json:"symbol"`
 		FixVersion     string `json:"fixversion"`
-		Fix            bool   `json:"fix"`
+		Algo           string `json:"algo"`
+		Graph          bool   `json:"graph"`
 		ShowProgress   bool   `json:"showProgress"`
 	}
 
@@ -302,7 +303,7 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 	progressStreams[taskId] = make(chan string, 100)
 	progressMutex.Unlock()
 
-	go func(taskId, repo, branchOrCommit, cve, library, symbol, fixversion string, fix bool) {
+	go func(taskId, repo, branchOrCommit, cve, library, symbol, fixversion, algo string, graph bool) {
 		defer func() {
 			requestMutex.Lock()
 			inProgress = false
@@ -337,34 +338,12 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 
 		updateStatus(StatusRunning, "", "")
 
-		// Include library, symbol, and fixversion in cache key if provided
-		cacheKey := fmt.Sprintf("%s@%s:%s:lib=%s:sym=%s:fixver=%s:fix=%t", repo, branchOrCommit, cve, library, symbol, fixversion, fix)
+		// Include library, symbol, fixversion, algo, and graph in cache key if provided
+		cacheKey := fmt.Sprintf("%s@%s:%s:lib=%s:sym=%s:fixver=%s:algo=%s:graph=%t", repo, branchOrCommit, cve, library, symbol, fixversion, algo, graph)
 		if cachedData, err := RetrieveCacheFromDisk(cacheKey); err == nil {
 			updateStatus(StatusCompleted, string(cachedData), "")
 			log.Printf("[Task %s] Retrieved callgraph from cache", taskId)
 			return
-		}
-
-		// If fix=true and no direct cache, check for fix=false cache
-		// We can reuse the cached directory and execute fix commands from the cached data
-		if fix {
-			fallbackCacheKey := fmt.Sprintf("%s@%s:%s:lib=%s:sym=%s:fixver=%s:fix=false", repo, branchOrCommit, cve, library, symbol, fixversion)
-			if fallbackCachedData, err := RetrieveCacheFromDisk(fallbackCacheKey); err == nil {
-				// Parse the cached data, execute fix commands, and create fix=true response
-				start := time.Now()
-				log.Printf("[Task %s] Converting fix=false cache to fix=true cache and executing fixes ...", taskId)
-				if optimizedOutput, err := ConvertCacheForRunFix(fallbackCachedData); err == nil {
-					updateStatus(StatusCompleted, string(optimizedOutput), "")
-					log.Printf("[Task %s] Retrieved and executed fixes using fix=false cache - Took %s", taskId, time.Since(start))
-					// Save the converted output to fix=true cache for future use
-					if err := SaveCacheToDisk(cacheKey, optimizedOutput); err != nil {
-						log.Printf("[Task %s] Failed to save converted cache: %v", taskId, err)
-					}
-					return
-				} else {
-					log.Printf("[Task %s] Failed to convert fallback cache: %v", taskId, err)
-				}
-			}
 		}
 
 		cloneDir, err := os.MkdirTemp("", "cg-"+path.Base(repo)+"-*")
@@ -384,13 +363,37 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 		sendProgress(fmt.Sprintf("Clone successful - Took %s", time.Since(start)))
 
 		log.Printf("[Task %s] Running cg ...", taskId)
-		sendProgress("Running vulnerability analysis...")
+		// Display algorithm being used (default to rta if not specified)
+		algoName := algo
+		if algoName == "" {
+			algoName = "rta"
+		}
+		sendProgress(fmt.Sprintf("Running vulnerability analysis (algorithm: %s)...", algoName))
 		start = time.Now()
 		var cmd *exec.Cmd
 		// Build command arguments based on whether library/symbols are provided
 		args := []string{"-progress"}
-		if fix {
-			args = append(args, "-fix")
+		if algo != "" {
+			args = append(args, fmt.Sprintf("-algo=%s", algo))
+		}
+		if graph {
+			// Create subdirectory structure: /graph/CVE-XXXX/repo/branch/algo/
+			// Sanitize repo name (extract just the repo name from URL)
+			repoName := path.Base(repo)
+			repoName = strings.TrimSuffix(repoName, ".git")
+			// Sanitize branch/commit for filesystem
+			sanitizedBranch := strings.ReplaceAll(branchOrCommit, "/", "-")
+			// Sanitize CVE for filesystem
+			sanitizedCVE := strings.ReplaceAll(cve, "/", "-")
+			if sanitizedCVE == "" {
+				sanitizedCVE = "unknown-cve"
+			}
+
+			graphDir := filepath.Join("/tmp/gvs-cache/graph", sanitizedCVE, repoName, sanitizedBranch, algoName)
+			if err := os.MkdirAll(graphDir, 0755); err != nil {
+				log.Printf("[Task %s] Failed to create graph directory: %v", taskId, err)
+			}
+			args = append(args, fmt.Sprintf("-graph=%s", graphDir))
 		}
 		if library != "" && symbol != "" {
 			args = append(args, "-library", library, "-symbols", symbol)
@@ -410,12 +413,18 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		log.Printf("[Task %s] cg execution completed - Took %s", taskId, time.Since(start))
+
+		// If graph generation was requested, convert file paths to web-accessible URLs
+		if graph {
+			output = convertGraphPathsToURLs(output)
+		}
+
 		updateStatus(StatusCompleted, string(output), "")
 
 		if err := SaveCacheToDisk(cacheKey, output); err != nil {
 			log.Printf("[Task %s] Failed to save cache: %v", taskId, err)
 		}
-	}(taskId, req.Repo, req.BranchOrCommit, req.CVE, req.Library, req.Symbol, req.FixVersion, req.Fix)
+	}(taskId, req.Repo, req.BranchOrCommit, req.CVE, req.Library, req.Symbol, req.FixVersion, req.Algo, req.Graph)
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]string{"taskId": taskId}); err != nil {
@@ -573,4 +582,52 @@ func runGovulncheckWithProgress(directory, target string, sendProgress func(stri
 	}
 
 	return output, exitCode, err
+}
+
+// convertGraphPathsToURLs converts file paths in GraphPaths to web-accessible URLs
+// Paths are expected to be like: /tmp/gvs-cache/graph/CVE-XXXX/repo/branch/library-symbol.svg
+// Converts to: /graph/CVE-XXXX/repo/branch/library-symbol.svg
+func convertGraphPathsToURLs(jsonOutput []byte) []byte {
+	var result map[string]interface{}
+	if err := json.Unmarshal(jsonOutput, &result); err != nil {
+		log.Printf("Failed to parse JSON for graph path conversion: %v", err)
+		return jsonOutput
+	}
+
+	// Check if GraphPaths field exists
+	graphPaths, ok := result["GraphPaths"].([]interface{})
+	if !ok || len(graphPaths) == 0 {
+		return jsonOutput
+	}
+
+	// Convert file paths to URLs
+	// Extract the path relative to /tmp/gvs-cache/graph and prefix with /graph/
+	webPaths := make([]string, 0, len(graphPaths))
+	const baseDir = "/tmp/gvs-cache/graph/"
+	for _, p := range graphPaths {
+		if pathStr, ok := p.(string); ok {
+			// Extract the relative path after /tmp/gvs-cache/graph/
+			if strings.HasPrefix(pathStr, baseDir) {
+				relativePath := strings.TrimPrefix(pathStr, baseDir)
+				webURL := "/graph/" + relativePath
+				webPaths = append(webPaths, webURL)
+			} else {
+				// Fallback: just use the filename
+				filename := filepath.Base(pathStr)
+				webURL := "/graph/" + filename
+				webPaths = append(webPaths, webURL)
+			}
+		}
+	}
+
+	result["GraphPaths"] = webPaths
+
+	// Re-encode to JSON
+	modifiedJSON, err := json.Marshal(result)
+	if err != nil {
+		log.Printf("Failed to re-encode JSON after graph path conversion: %v", err)
+		return jsonOutput
+	}
+
+	return modifiedJSON
 }

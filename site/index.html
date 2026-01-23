@@ -60,19 +60,34 @@
 					<input type="text" id="cve" class="form-control" placeholder="Enter CVE ID or GOCVE ID" value="CVE-2024-45339">
 				</div>
 				<div class="col-md-1">
-					<label for="fix" class="form-label">
-						Run Fix
-						<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted" 
+					<label for="algo" class="form-label">
+						Algo
+						<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted"
 							  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
-							  data-bs-toggle="tooltip" data-bs-placement="top" 
-							  title="Select 'Yes' to execute fix commands automatically and get CursorCommand, FixError, and FixSuccess in the results. Select 'No' for vulnerability scanning only.">?</span>
+							  data-bs-toggle="tooltip" data-bs-placement="top"
+							  title="Call graph algorithm: RTA (default, best for reflection), VTA (precise but slower), CHA (fast but less precise), Static (fastest, direct calls only).">?</span>
 					</label>
-					<select id="fix" class="form-select">
+					<select id="algo" class="form-select">
+						<option value="rta" selected>RTA</option>
+						<option value="vta">VTA</option>
+						<option value="cha">CHA</option>
+						<option value="static">Static</option>
+					</select>
+				</div>
+				<div class="col-md-1">
+					<label for="graph" class="form-label">
+						Graph
+						<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted"
+							  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
+							  data-bs-toggle="tooltip" data-bs-placement="top"
+							  title="Generate call graph visualizations (SVG) showing paths from main to vulnerable symbols. One graph per affected symbol. Requires graphviz/sfdp.">?</span>
+					</label>
+					<select id="graph" class="form-select">
 						<option value="false">No</option>
 						<option value="true">Yes</option>
 					</select>
 				</div>
-				<div class="col-md-2 text-end">
+				<div class="col-md-1 text-end">
 					<button id="scanButton" class="btn btn-primary w-100" onclick="runScan()">Run Scan</button>
 				</div>
 			</div>

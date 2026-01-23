@@ -31,7 +31,7 @@ func main() {
 		log.Fatalf("Failed to create directory: %v", err)
 	}
 
-	http.Handle("/cg/", gvs.LogFileAccess(http.StripPrefix("/cg/", http.FileServer(http.Dir("/tmp/gvs-cache/img")))))
+	http.Handle("/graph/", gvs.LogFileAccess(http.StripPrefix("/graph/", http.FileServer(http.Dir("/tmp/gvs-cache/graph")))))
 	http.Handle("/", http.FileServer(http.Dir("./site")))
 	http.HandleFunc("/scan", api.CORSMiddleware(api.ScanHandler))
 	http.HandleFunc("/healthz", api.CORSMiddleware(api.HealthHandler))

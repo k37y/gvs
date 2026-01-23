@@ -3,20 +3,21 @@
 // Call Graph Algorithms:
 // The scanner supports multiple call graph algorithms, configurable via the ALGO environment variable:
 //
-// - vta (default): Variable Type Analysis - Most precise but slower. Recommended for accuracy.
+// - rta (default): Rapid Type Analysis - Good balance of speed and precision. Best for reflection tracking.
 // - cha: Class Hierarchy Analysis - Fast but less precise. Good for large codebases where speed matters.
-// - rta: Rapid Type Analysis - Good balance of speed and precision. Suitable for most use cases.
+// - vta: Variable Type Analysis - Most precise for direct calls but slower. Less effective for reflection.
 // - static: Static analysis - Very fast but least precise (only direct calls). Use for quick scans.
 //
 // Usage:
 //
-//	export ALGO=rta  # Use Rapid Type Analysis
-//	export ALGO=cha  # Use Class Hierarchy Analysis
-//	export ALGO=static  # Use static analysis
-//	# Default (no env var set) uses VTA
+//	export ALGO=vta    # Use Variable Type Analysis
+//	export ALGO=cha    # Use Class Hierarchy Analysis
+//	export ALGO=static # Use static analysis
+//	# Default (no env var set) uses RTA
 //
 // Algorithm Trade-offs:
-// - Precision: static < cha < rta < vta
+// - Precision for direct calls: static < cha < rta < vta
+// - Reflection tracking: vta < static < cha < rta
 // - Speed: vta < rta < cha < static
 package cg
 
@@ -679,32 +680,17 @@ func (r *Result) GenerateCallGraphForVisualization(dir string, files []string) (
 
 // generateCallGraphWithLib creates a call graph using the callgraph library
 func (r *Result) generateCallGraphWithLib(dir string, files []string) (string, error) {
-	// Determine package patterns to load based on the files
-	packagePatterns := make(map[string]bool)
-
-	// Add the current directory and any subdirectories containing the files
-	packagePatterns["."] = true
-	for _, file := range files {
-		packageDir := filepath.Dir(file)
-		if packageDir != "." {
-			packagePatterns["./"+packageDir] = true
-		}
-	}
-
-	var patterns []string
-	for pattern := range packagePatterns {
-		patterns = append(patterns, pattern)
-	}
-
 	// Load packages with comprehensive mode to handle all dependencies
+	// Use "./..." to load all packages in the module - this is required for
+	// RTA to properly track reflection-based calls like reflect.ValueOf(func).Call()
 	cfg := &packages.Config{
 		Mode: packages.LoadAllSyntax, // This loads everything needed for analysis
 		Dir:  dir,
 		Env:  append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off"),
 	}
 
-	// Load packages
-	pkgs, err := packages.Load(cfg, patterns...)
+	// Load all packages in the module (like callgraph binary does by default)
+	pkgs, err := packages.Load(cfg, "./...")
 	if err != nil {
 		return "", fmt.Errorf("failed to load packages: %v", err)
 	}
@@ -723,7 +709,7 @@ func (r *Result) generateCallGraphWithLib(dir string, files []string) (string, e
 
 	// If no valid packages, try loading with less strict requirements
 	if len(validPkgs) == 0 {
-		// Try with just the module root pattern
+		// Try with just the module root pattern with less strict mode
 		cfg = &packages.Config{
 			Mode: packages.LoadSyntax,
 			Dir:  dir,
@@ -822,11 +808,13 @@ func isSymbolReachable(callGraphOutput, entryPoint, symbol string) bool {
 
 // getCallGraphAlgorithm returns the algorithm to use for call graph generation
 // based on the ALGO environment variable.
-// Supported algorithms: vta (default), cha, rta, static
+// Supported algorithms: rta (default), cha, vta, static
+// RTA is the default because it better handles reflection-based calls
+// (e.g., reflect.ValueOf(func).Call()) compared to VTA.
 func getCallGraphAlgorithm() string {
 	algo := os.Getenv("ALGO")
 	if algo == "" {
-		algo = "vta" // default algorithm
+		algo = "rta" // default algorithm - better for reflection tracking
 	}
 	return strings.ToLower(algo)
 }
@@ -841,16 +829,17 @@ func buildCallGraph(prog *ssa.Program, algo string) *callgraph.Graph {
 		return cha.CallGraph(prog)
 	case "rta":
 		// Rapid Type Analysis - good balance of speed and precision
+		// Better at tracking reflection-based calls (e.g., reflect.ValueOf(func).Call())
 		return buildRTACallGraph(prog, allFuncs)
 	case "static":
 		// Static analysis - very fast but least precise (only direct calls)
 		return static.CallGraph(prog)
 	case "vta":
-		// Variable Type Analysis - most precise but slower (default)
+		// Variable Type Analysis - most precise for direct calls but slower
 		return vta.CallGraph(allFuncs, nil)
 	default:
-		// Default to VTA if unknown algorithm specified
-		return vta.CallGraph(allFuncs, nil)
+		// Default to RTA if unknown algorithm specified (best for reflection tracking)
+		return buildRTACallGraph(prog, allFuncs)
 	}
 }
 

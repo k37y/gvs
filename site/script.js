@@ -144,23 +144,10 @@ document.addEventListener('DOMContentLoaded', function() {
 	// Initialize form history manager
 	window.formHistory = new FormHistoryManager();
 	
-	// Add event listener to CVE ID, Library, and Symbol fields to automatically set Run Fix state
+	// Add event listener to CVE ID, Library, and Symbol fields
 	const cveInput = document.getElementById('cve');
 	const libraryInput = document.getElementById('library');
 	const symbolInput = document.getElementById('symbol');
-	const fixSelect = document.getElementById('fix');
-	
-	function updateRunFixState() {
-		const hasCve = cveInput.value.trim() !== '';
-		const hasLibraryAndSymbol = libraryInput.value.trim() !== '' && symbolInput.value.trim() !== '';
-		
-		if (hasCve || hasLibraryAndSymbol) {
-			fixSelect.disabled = false;
-		} else {
-			fixSelect.value = 'false';
-			fixSelect.disabled = true;
-		}
-	}
 	
 	window.validateCVEInput = function() {
 		const value = cveInput.value.trim();
@@ -182,17 +169,10 @@ document.addEventListener('DOMContentLoaded', function() {
 		}
 	}
 	
-	// Initialize Run Fix state on page load
-	updateRunFixState();
-	
-	// Update Run Fix state whenever CVE, Library, or Symbol inputs change
+	// Validate CVE input on change
 	cveInput.addEventListener('input', function() {
-		updateRunFixState();
 		window.validateCVEInput();
 	});
-	
-	libraryInput.addEventListener('input', updateRunFixState);
-	symbolInput.addEventListener('input', updateRunFixState);
 });
 
 const sustainingQuestions = [
@@ -298,8 +278,8 @@ function runScan() {
 	const repo = document.getElementById("repo").value.trim();
 	const branchOrCommit = document.getElementById("branchOrCommit").value.trim();
 	const cve = document.getElementById("cve").value.trim();
-	// Automatically set fix to false if CVE ID is empty and no library/symbol override
-	const fix = (cve || (library && symbol)) ? document.getElementById("fix").value === "true" : false;
+	const algo = document.getElementById("algo").value;
+	const graph = (cve || (library && symbol)) ? document.getElementById("graph").value === "true" : false;
 	const outputDiv = document.getElementById("output");
 	const progressContent = document.getElementById("progressContent");
 	const scanButton = document.getElementById("scanButton");
@@ -355,7 +335,7 @@ function runScan() {
 			headers: {
 				"Content-Type": "application/json"
 			},
-			body: JSON.stringify({ repo, branchOrCommit, cve, library, symbol, fixversion, fix: fix, showProgress: true })
+			body: JSON.stringify({ repo, branchOrCommit, cve, library, symbol, fixversion, algo, graph, showProgress: true })
 		})
 			.then(response => response.json())
 			.then(data => {
