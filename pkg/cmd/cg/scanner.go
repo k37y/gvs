@@ -849,7 +849,7 @@ func getCurrentVersion(pkg string, dir string, result *Result) string {
 
 	cmd := "go"
 	args := []string{"list", "-f", "{{if .Module}}{{.Module.Version}}{{end}}", pkg}
-	out, err := cli.RunCommand(dir, cmd, args...)
+	out, err := cli.RunCommandStdout(dir, cmd, args...)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
 		result.Errors = append(result.Errors, errMsg)
@@ -861,7 +861,7 @@ func getCurrentVersion(pkg string, dir string, result *Result) string {
 func getGoToolchainVersion(dir string, result *Result) string {
 	cmd := "go"
 	args := []string{"mod", "edit", "-json"}
-	out, err := cli.RunCommand(dir, cmd, args...)
+	out, err := cli.RunCommandStdout(dir, cmd, args...)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
 		result.Errors = append(result.Errors, errMsg)
@@ -892,7 +892,7 @@ func getGoToolchainVersion(dir string, result *Result) string {
 func getReplaceVersion(pkg string, dir string, result *Result) string {
 	cmd := "go"
 	args := []string{"mod", "edit", "-json"}
-	out, err := cli.RunCommand(dir, cmd, args...)
+	out, err := cli.RunCommandStdout(dir, cmd, args...)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
 		result.Errors = append(result.Errors, errMsg)
@@ -961,7 +961,7 @@ func getFixedVersion(id, pkg string, result *Result) []string {
 func getModPath(pkg, dir string, result *Result) string {
 	cmd := "go"
 	args := []string{"list", "-f", "{{if .Module}}{{.Module.Path}}{{end}}", pkg}
-	out, err := cli.RunCommand(dir, cmd, args...)
+	out, err := cli.RunCommandStdout(dir, cmd, args...)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
 		result.Errors = append(result.Errors, errMsg)
@@ -973,7 +973,7 @@ func getModPath(pkg, dir string, result *Result) string {
 func getGitBranch(result *Result) {
 	cmd := "git"
 	args := []string{"rev-parse", "--abbrev-ref", "HEAD"}
-	out, err := cli.RunCommand(result.Directory, cmd, args...)
+	out, err := cli.RunCommandStdout(result.Directory, cmd, args...)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), result.Directory, strings.TrimSpace(string(out)))
 		result.Errors = append(result.Errors, errMsg)
@@ -987,7 +987,7 @@ func getGitBranch(result *Result) {
 	if branchName == "HEAD" {
 		commitCmd := "git"
 		commitArgs := []string{"rev-parse", "HEAD"}
-		commitOut, err := cli.RunCommand(result.Directory, commitCmd, commitArgs...)
+		commitOut, err := cli.RunCommandStdout(result.Directory, commitCmd, commitArgs...)
 		if err != nil {
 			errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", commitCmd, strings.Join(commitArgs, " "), result.Directory, strings.TrimSpace(string(commitOut)))
 			result.Errors = append(result.Errors, errMsg)
@@ -1003,7 +1003,7 @@ func getGitBranch(result *Result) {
 func getGitURL(result *Result) {
 	cmd := "git"
 	args := []string{"remote", "get-url", "origin"}
-	out, err := cli.RunCommand(result.Directory, cmd, args...)
+	out, err := cli.RunCommandStdout(result.Directory, cmd, args...)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), result.Directory, strings.TrimSpace(string(out)))
 		result.Errors = append(result.Errors, errMsg)
