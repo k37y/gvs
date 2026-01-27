@@ -216,13 +216,20 @@ function syntaxHighlight(json) {
 
 	json = json.replace(/\\"/g, "&quot;");
 
-		json = json
-		.replace(/("(\w+)":)/g, '<span class="highlight-key">$1</span>')
-		.replace(/(:\s*")([^"]*?)(")/g, ': <span class="highlight-value">"$2"</span>')
-			.replace(/(:\s*(\d+))/g, ': <span class="highlight-value">$2</span>');
+	// Convert graph URLs to clickable links BEFORE other highlighting (to preserve URL structure)
+	// Matches http/https URLs ending with .svg
+	json = json.replace(/"(https?:\/\/[^"]+\.svg)"/g, function(match, url) {
+		return '"<a href="' + url + '" target="_blank" rel="noopener noreferrer" class="graph-link">' + url + '</a>"';
+	});
 
-			return json;
-		}
+	// Apply syntax highlighting, but skip URLs inside <a> tags
+	json = json
+		.replace(/("(\w+)":)/g, '<span class="highlight-key">$1</span>')
+		.replace(/(:\s*")(?![^"]*<a href)([^"]*?)(")/g, ':<span class="highlight-value">"$2"</span>')
+		.replace(/(:\s*(\d+))(?![^<]*<\/a>)/g, ':<span class="highlight-value">$2</span>');
+
+	return json;
+}
 
 function runScan() {
 	if (scanInProgress) return;

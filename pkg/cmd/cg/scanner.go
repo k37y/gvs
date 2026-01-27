@@ -167,8 +167,8 @@ func InitResult(cve, dir string, fix bool, library, symbols, fixversion string) 
 
 		// Check if it's a stdlib package
 		if strings.HasPrefix(library, "crypto/") || strings.HasPrefix(library, "net/") ||
-		   strings.HasPrefix(library, "encoding/") || strings.HasPrefix(library, "os/") ||
-		   !strings.Contains(library, ".") {
+			strings.HasPrefix(library, "encoding/") || strings.HasPrefix(library, "os/") ||
+			!strings.Contains(library, ".") {
 			entry := r.AffectedImports[library]
 			entry.Type = "stdlib"
 			r.AffectedImports[library] = entry
@@ -593,32 +593,17 @@ func (r *Result) isSymbolUsed(pkg, dir string, symbols, files []string) string {
 	// Check for reflection-based usage
 	reflectionRisks := r.detectReflectionVulnerabilities(pkg, dir, originalSymbols, files)
 
-	// Store reflection risks
+	// Store reflection risks for informational purposes only
+	// Note: Reflection risks do NOT affect IsVulnerable status - only call graph findings do
 	if len(reflectionRisks) > 0 {
 		r.Mu.Lock()
 		r.ReflectionRisks = append(r.ReflectionRisks, reflectionRisks...)
 		r.Mu.Unlock()
 	}
 
-	// Update used imports with reflection findings
-	if directUsage == "true" || len(reflectionRisks) > 0 {
-		r.Mu.Lock()
-		if r.UsedImports == nil {
-			r.UsedImports = make(map[string]UsedImportsDetails)
-		}
-		entry := r.UsedImports[pkg]
-
-		// Add reflection-detected symbols
-		for _, risk := range reflectionRisks {
-			entry.Symbols = append(entry.Symbols, risk.Symbol)
-		}
-
-		r.UsedImports[pkg] = entry
-		r.Mu.Unlock()
-		return "true"
-	}
-
-	return "false"
+	// Only return "true" if call graph found direct usage
+	// Reflection risks are informational only and don't determine vulnerability status
+	return directUsage
 }
 
 // checkDirectUsage handles the existing call graph analysis

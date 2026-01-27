@@ -303,7 +303,18 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 	progressStreams[taskId] = make(chan string, 100)
 	progressMutex.Unlock()
 
-	go func(taskId, repo, branchOrCommit, cve, library, symbol, fixversion, algo string, graph bool) {
+	// Get the base URL from the request for graph path conversion
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	// Check for X-Forwarded-Proto header (for reverse proxy setups)
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		scheme = proto
+	}
+	baseURL := fmt.Sprintf("%s://%s", scheme, r.Host)
+
+	go func(taskId, repo, branchOrCommit, cve, library, symbol, fixversion, algo, baseURL string, graph bool) {
 		defer func() {
 			requestMutex.Lock()
 			inProgress = false
@@ -416,7 +427,7 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 
 		// If graph generation was requested, convert file paths to web-accessible URLs
 		if graph {
-			output = convertGraphPathsToURLs(output)
+			output = convertGraphPathsToURLs(output, baseURL)
 		}
 
 		updateStatus(StatusCompleted, string(output), "")
@@ -424,7 +435,7 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 		if err := SaveCacheToDisk(cacheKey, output); err != nil {
 			log.Printf("[Task %s] Failed to save cache: %v", taskId, err)
 		}
-	}(taskId, req.Repo, req.BranchOrCommit, req.CVE, req.Library, req.Symbol, req.FixVersion, req.Algo, req.Graph)
+	}(taskId, req.Repo, req.BranchOrCommit, req.CVE, req.Library, req.Symbol, req.FixVersion, req.Algo, baseURL, req.Graph)
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]string{"taskId": taskId}); err != nil {
@@ -585,9 +596,9 @@ func runGovulncheckWithProgress(directory, target string, sendProgress func(stri
 }
 
 // convertGraphPathsToURLs converts file paths in GraphPaths to web-accessible URLs
-// Paths are expected to be like: /tmp/gvs-cache/graph/CVE-XXXX/repo/branch/library-symbol.svg
-// Converts to: /graph/CVE-XXXX/repo/branch/library-symbol.svg
-func convertGraphPathsToURLs(jsonOutput []byte) []byte {
+// Paths are expected to be like: /tmp/gvs-cache/graph/CVE-XXXX/repo/branch/algo/library-symbol.svg
+// Converts to: http://host:port/graph/CVE-XXXX/repo/branch/algo/library-symbol.svg
+func convertGraphPathsToURLs(jsonOutput []byte, baseURL string) []byte {
 	var result map[string]interface{}
 	if err := json.Unmarshal(jsonOutput, &result); err != nil {
 		log.Printf("Failed to parse JSON for graph path conversion: %v", err)
@@ -600,21 +611,21 @@ func convertGraphPathsToURLs(jsonOutput []byte) []byte {
 		return jsonOutput
 	}
 
-	// Convert file paths to URLs
-	// Extract the path relative to /tmp/gvs-cache/graph and prefix with /graph/
+	// Convert file paths to full URLs
+	// Extract the path relative to /tmp/gvs-cache/graph and prefix with baseURL/graph/
 	webPaths := make([]string, 0, len(graphPaths))
-	const baseDir = "/tmp/gvs-cache/graph/"
+	const cacheDir = "/tmp/gvs-cache/graph/"
 	for _, p := range graphPaths {
 		if pathStr, ok := p.(string); ok {
 			// Extract the relative path after /tmp/gvs-cache/graph/
-			if strings.HasPrefix(pathStr, baseDir) {
-				relativePath := strings.TrimPrefix(pathStr, baseDir)
-				webURL := "/graph/" + relativePath
+			if strings.HasPrefix(pathStr, cacheDir) {
+				relativePath := strings.TrimPrefix(pathStr, cacheDir)
+				webURL := baseURL + "/graph/" + relativePath
 				webPaths = append(webPaths, webURL)
 			} else {
 				// Fallback: just use the filename
 				filename := filepath.Base(pathStr)
-				webURL := "/graph/" + filename
+				webURL := baseURL + "/graph/" + filename
 				webPaths = append(webPaths, webURL)
 			}
 		}
