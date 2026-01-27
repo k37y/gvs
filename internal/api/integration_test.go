@@ -63,8 +63,8 @@ func TestCallgraphIntegration(t *testing.T) {
 	// Step 3: Make POST request to /callgraph with non-vulnerable commit
 	t.Log("Sending callgraph request for non-vulnerable commit...")
 	requestBody := map[string]interface{}{
-		"repo":           "https://github.com/openshift/metallb",
-		"branchOrCommit": "3bc20ed6603faa47e087032bf7a6aef90911d903",
+		"repo":           "https://github.com/openshift/sriov-network-device-plugin",
+		"branchOrCommit": "95ebce39bc8d15f498abb0db0cb5b464db9a4887",
 		"cve":            "CVE-2024-45339",
 		"runFix":         false,
 	}
@@ -225,8 +225,8 @@ func TestCallgraphIntegrationVulnerable(t *testing.T) {
 	// Step 3: Make POST request to /callgraph with vulnerable commit
 	t.Log("Sending callgraph request for vulnerable commit...")
 	requestBody := map[string]interface{}{
-		"repo":           "https://github.com/openshift/metallb",
-		"branchOrCommit": "aee829d4d0938e0e2dc5462f886e448e86544db1",
+		"repo":           "https://github.com/openshift/sriov-network-device-plugin",
+		"branchOrCommit": "c600016ab638aab33bf02be5414f4174033c744a",
 		"cve":            "CVE-2024-45339",
 		"runFix":         false,
 	}
