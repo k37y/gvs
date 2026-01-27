@@ -3,20 +3,21 @@
 // Call Graph Algorithms:
 // The scanner supports multiple call graph algorithms, configurable via the ALGO environment variable:
 //
-// - vta (default): Variable Type Analysis - Most precise but slower. Recommended for accuracy.
+// - rta (default): Rapid Type Analysis - Good balance of speed and precision. Best for reflection tracking.
 // - cha: Class Hierarchy Analysis - Fast but less precise. Good for large codebases where speed matters.
-// - rta: Rapid Type Analysis - Good balance of speed and precision. Suitable for most use cases.
+// - vta: Variable Type Analysis - Most precise for direct calls but slower. Less effective for reflection.
 // - static: Static analysis - Very fast but least precise (only direct calls). Use for quick scans.
 //
 // Usage:
 //
-//	export ALGO=rta  # Use Rapid Type Analysis
-//	export ALGO=cha  # Use Class Hierarchy Analysis
-//	export ALGO=static  # Use static analysis
-//	# Default (no env var set) uses VTA
+//	export ALGO=vta    # Use Variable Type Analysis
+//	export ALGO=cha    # Use Class Hierarchy Analysis
+//	export ALGO=static # Use static analysis
+//	# Default (no env var set) uses RTA
 //
 // Algorithm Trade-offs:
-// - Precision: static < cha < rta < vta
+// - Precision for direct calls: static < cha < rta < vta
+// - Reflection tracking: vta < static < cha < rta
 // - Speed: vta < rta < cha < static
 package cg
 
@@ -31,8 +32,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -166,8 +167,8 @@ func InitResult(cve, dir string, fix bool, library, symbols, fixversion string) 
 
 		// Check if it's a stdlib package
 		if strings.HasPrefix(library, "crypto/") || strings.HasPrefix(library, "net/") ||
-		   strings.HasPrefix(library, "encoding/") || strings.HasPrefix(library, "os/") ||
-		   !strings.Contains(library, ".") {
+			strings.HasPrefix(library, "encoding/") || strings.HasPrefix(library, "os/") ||
+			!strings.Contains(library, ".") {
 			entry := r.AffectedImports[library]
 			entry.Type = "stdlib"
 			r.AffectedImports[library] = entry
@@ -592,32 +593,17 @@ func (r *Result) isSymbolUsed(pkg, dir string, symbols, files []string) string {
 	// Check for reflection-based usage
 	reflectionRisks := r.detectReflectionVulnerabilities(pkg, dir, originalSymbols, files)
 
-	// Store reflection risks
+	// Store reflection risks for informational purposes only
+	// Note: Reflection risks do NOT affect IsVulnerable status - only call graph findings do
 	if len(reflectionRisks) > 0 {
 		r.Mu.Lock()
 		r.ReflectionRisks = append(r.ReflectionRisks, reflectionRisks...)
 		r.Mu.Unlock()
 	}
 
-	// Update used imports with reflection findings
-	if directUsage == "true" || len(reflectionRisks) > 0 {
-		r.Mu.Lock()
-		if r.UsedImports == nil {
-			r.UsedImports = make(map[string]UsedImportsDetails)
-		}
-		entry := r.UsedImports[pkg]
-
-		// Add reflection-detected symbols
-		for _, risk := range reflectionRisks {
-			entry.Symbols = append(entry.Symbols, risk.Symbol)
-		}
-
-		r.UsedImports[pkg] = entry
-		r.Mu.Unlock()
-		return "true"
-	}
-
-	return "false"
+	// Only return "true" if call graph found direct usage
+	// Reflection risks are informational only and don't determine vulnerability status
+	return directUsage
 }
 
 // checkDirectUsage handles the existing call graph analysis
@@ -630,17 +616,24 @@ func (r *Result) checkDirectUsage(pkg, dir string, symbols []string, files []str
 		return "unknown"
 	}
 
-	// Convert to bytes for compatibility with existing matchSymbol function
-	out := []byte(callGraphOutput)
+	// Find entry points (main functions) from the call graph
+	entryPoints := extractEntryPoints(callGraphOutput)
+	if len(entryPoints) == 0 {
+		errMsg := fmt.Sprintf("No entry points (main functions) found in call graph for %s", dir)
+		r.Errors = append(r.Errors, errMsg)
+		return "unknown"
+	}
 
 	var wg sync.WaitGroup
-	found := false
+	var mu sync.Mutex
+	foundAny := false
 
 	for _, symbol := range symbols {
 		wg.Add(1)
 		go func(sym string) {
 			defer wg.Done()
-			if matchSymbol(out, sym) {
+			// Check if symbol is reachable from any entry point using digraph somepath
+			if isSymbolReachableFromAny(callGraphOutput, entryPoints, sym) {
 				r.Mu.Lock()
 				if r.UsedImports == nil {
 					r.UsedImports = make(map[string]UsedImportsDetails)
@@ -649,47 +642,40 @@ func (r *Result) checkDirectUsage(pkg, dir string, symbols []string, files []str
 				entry.Symbols = append(entry.Symbols, sym)
 				r.UsedImports[pkg] = entry
 				r.Mu.Unlock()
-				found = true
+
+				mu.Lock()
+				foundAny = true
+				mu.Unlock()
 			}
 		}(symbol)
 	}
 
 	wg.Wait()
 
-	if found {
+	if foundAny {
 		return "true"
 	}
 	return "false"
 }
 
+// GenerateCallGraphForVisualization is a public wrapper for call graph generation for visualization
+func (r *Result) GenerateCallGraphForVisualization(dir string, files []string) (string, error) {
+	return r.generateCallGraphWithLib(dir, files)
+}
+
 // generateCallGraphWithLib creates a call graph using the callgraph library
 func (r *Result) generateCallGraphWithLib(dir string, files []string) (string, error) {
-	// Determine package patterns to load based on the files
-	packagePatterns := make(map[string]bool)
-
-	// Add the current directory and any subdirectories containing the files
-	packagePatterns["."] = true
-	for _, file := range files {
-		packageDir := filepath.Dir(file)
-		if packageDir != "." {
-			packagePatterns["./"+packageDir] = true
-		}
-	}
-
-	var patterns []string
-	for pattern := range packagePatterns {
-		patterns = append(patterns, pattern)
-	}
-
 	// Load packages with comprehensive mode to handle all dependencies
+	// Use "./..." to load all packages in the module - this is required for
+	// RTA to properly track reflection-based calls like reflect.ValueOf(func).Call()
 	cfg := &packages.Config{
 		Mode: packages.LoadAllSyntax, // This loads everything needed for analysis
 		Dir:  dir,
 		Env:  append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off"),
 	}
 
-	// Load packages
-	pkgs, err := packages.Load(cfg, patterns...)
+	// Load all packages in the module (like callgraph binary does by default)
+	pkgs, err := packages.Load(cfg, "./...")
 	if err != nil {
 		return "", fmt.Errorf("failed to load packages: %v", err)
 	}
@@ -708,7 +694,7 @@ func (r *Result) generateCallGraphWithLib(dir string, files []string) (string, e
 
 	// If no valid packages, try loading with less strict requirements
 	if len(validPkgs) == 0 {
-		// Try with just the module root pattern
+		// Try with just the module root pattern with less strict mode
 		cfg = &packages.Config{
 			Mode: packages.LoadSyntax,
 			Dir:  dir,
@@ -760,28 +746,60 @@ func (r *Result) generateCallGraphWithLib(dir string, files []string) (string, e
 	return output.String(), nil
 }
 
-func matchSymbol(out []byte, symbol string) bool {
-	// Match symbol as either caller (at start or after space) or callee (before space or at end)
-	// Call graph format: "Caller Callee"
-	quotedSymbol := regexp.QuoteMeta(symbol)
-	// Pattern matches: (start or space) + symbol + (space or end)
-	pattern := regexp.MustCompile(`(^|\s)` + quotedSymbol + `(\s|$)`)
-	scanner := bufio.NewScanner(bytes.NewReader(out))
+// extractEntryPoints finds all main functions in the call graph
+func extractEntryPoints(callGraphOutput string) []string {
+	var entryPoints []string
+	seen := make(map[string]bool)
+
+	scanner := bufio.NewScanner(strings.NewReader(callGraphOutput))
 	for scanner.Scan() {
-		if pattern.MatchString(scanner.Text()) {
+		line := scanner.Text()
+		fields := strings.Fields(line)
+		if len(fields) >= 1 {
+			caller := fields[0]
+			// Look for main functions (e.g., "command-line-arguments.main", "package.main")
+			if strings.HasSuffix(caller, ".main") && !seen[caller] {
+				entryPoints = append(entryPoints, caller)
+				seen[caller] = true
+			}
+		}
+	}
+
+	return entryPoints
+}
+
+// isSymbolReachableFromAny checks if a symbol is reachable from any entry point
+func isSymbolReachableFromAny(callGraphOutput string, entryPoints []string, symbol string) bool {
+	for _, entryPoint := range entryPoints {
+		if isSymbolReachable(callGraphOutput, entryPoint, symbol) {
 			return true
 		}
 	}
 	return false
 }
 
+// isSymbolReachable uses digraph somepath to check if there's a path from entry to symbol
+func isSymbolReachable(callGraphOutput, entryPoint, symbol string) bool {
+	cmd := exec.Command("digraph", "somepath", entryPoint, symbol)
+	cmd.Stdin = strings.NewReader(callGraphOutput)
+	output, err := cmd.Output()
+	if err != nil {
+		// No path found or error occurred
+		return false
+	}
+	// If digraph finds a path, it outputs the path; empty means no path
+	return len(bytes.TrimSpace(output)) > 0
+}
+
 // getCallGraphAlgorithm returns the algorithm to use for call graph generation
 // based on the ALGO environment variable.
-// Supported algorithms: vta (default), cha, rta, static
+// Supported algorithms: rta (default), cha, vta, static
+// RTA is the default because it better handles reflection-based calls
+// (e.g., reflect.ValueOf(func).Call()) compared to VTA.
 func getCallGraphAlgorithm() string {
 	algo := os.Getenv("ALGO")
 	if algo == "" {
-		algo = "vta" // default algorithm
+		algo = "rta" // default algorithm - better for reflection tracking
 	}
 	return strings.ToLower(algo)
 }
@@ -796,16 +814,17 @@ func buildCallGraph(prog *ssa.Program, algo string) *callgraph.Graph {
 		return cha.CallGraph(prog)
 	case "rta":
 		// Rapid Type Analysis - good balance of speed and precision
+		// Better at tracking reflection-based calls (e.g., reflect.ValueOf(func).Call())
 		return buildRTACallGraph(prog, allFuncs)
 	case "static":
 		// Static analysis - very fast but least precise (only direct calls)
 		return static.CallGraph(prog)
 	case "vta":
-		// Variable Type Analysis - most precise but slower (default)
+		// Variable Type Analysis - most precise for direct calls but slower
 		return vta.CallGraph(allFuncs, nil)
 	default:
-		// Default to VTA if unknown algorithm specified
-		return vta.CallGraph(allFuncs, nil)
+		// Default to RTA if unknown algorithm specified (best for reflection tracking)
+		return buildRTACallGraph(prog, allFuncs)
 	}
 }
 
@@ -1050,8 +1069,9 @@ func extractGoVersion(fixedVersion string) string {
 	fixedVersion = strings.TrimPrefix(fixedVersion, "go")
 
 	// Ensure it's a valid semver format (add "v" prefix if missing)
-	if regexp.MustCompile(`^\d+\.\d+`).MatchString(fixedVersion) {
-		fixedVersion = "v" + strings.TrimPrefix(fixedVersion, "v")
+	// Check if it starts with a digit (e.g., "1.21.4")
+	if len(fixedVersion) > 0 && fixedVersion[0] >= '0' && fixedVersion[0] <= '9' {
+		fixedVersion = "v" + fixedVersion
 	}
 
 	return fixedVersion
