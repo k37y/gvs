@@ -1,6 +1,10 @@
 package cg
 
-import "sync"
+import (
+	"sync"
+
+	"golang.org/x/tools/go/callgraph"
+)
 
 const (
 	VulnsURL = "https://vuln.go.dev"
@@ -20,10 +24,11 @@ type AffectedImportsDetails struct {
 }
 
 type UsedImportsDetails struct {
-	Symbols        []string `json:"Symbols,omitempty"`
-	CurrentVersion string   `json:"CurrentVersion,omitempty"`
-	ReplaceVersion string   `json:"ReplaceVersion,omitempty"`
-	FixCommands    []string `json:"FixCommands,omitempty"`
+	Symbols        []string            `json:"Symbols,omitempty"`
+	CurrentVersion string              `json:"CurrentVersion,omitempty"`
+	ReplaceVersion string              `json:"ReplaceVersion,omitempty"`
+	FixCommands    []string            `json:"FixCommands,omitempty"`
+	Paths          [][]*callgraph.Node `json:"-"` // For visualization, not serialized
 }
 
 // ReflectionRisk represents a potential vulnerability through reflection usage
@@ -55,6 +60,7 @@ type Result struct {
 	ReflectionRisks []ReflectionRisk `json:"reflection_risks,omitempty"` // New field
 	GraphPaths      []string         `json:"GraphPaths,omitempty"`       // Paths to generated SVG graphs (one per symbol)
 	Mu              sync.Mutex       `json:"-"`
+	Progress        bool             `json:"-"`                          // Progress output flag, not serialized
 	Summary         string
 }
 
