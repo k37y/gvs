@@ -22,6 +22,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/tools/go/callgraph"
+
 	"github.com/k37y/gvs/internal/cli"
 	"github.com/k37y/gvs/internal/common"
 	"github.com/k37y/gvs/pkg/cmd/cg"
@@ -30,7 +32,8 @@ import (
 
 func main() {
 	// Note: sfdp is checked conditionally when -graph flag is used
-	tools := []string{"go", "digraph", "git"}
+	// digraph is no longer required - we use the callgraph.Graph directly with BFS
+	tools := []string{"go", "git"}
 	if !utils.ValidateTools(tools) {
 		os.Exit(1)
 	}
@@ -135,6 +138,9 @@ func main() {
 		result = cg.InitResult(cveID, directory, *fix, *library, *symbols, *fixversion)
 	}
 
+	// Set progress flag on result for scanner to use
+	result.Progress = *progress
+
 	jobs := make(chan cg.Job)
 	results := make(chan *cg.Result)
 
@@ -227,32 +233,33 @@ func main() {
 			hasUnknown = true
 		}
 
-		// Only merge imports for vulnerable packages
-		if res.IsVulnerable == "true" {
-			for pkg, symbols := range res.UsedImports {
-				for _, sym := range symbols.Symbols {
-					if strings.HasPrefix(sym, pkg+".") {
-						sym = strings.TrimPrefix(sym, pkg+".")
-					}
+		// Merge imports for all packages where symbols were found (informational)
+		for pkg, symbols := range res.UsedImports {
+			entry := mergedImports[pkg]
 
-					entry := mergedImports[pkg]
-					entry.Symbols = append(entry.Symbols, sym)
+			// Merge paths (once per package, before symbol loop)
+			entry.Paths = append(entry.Paths, symbols.Paths...)
 
-					if entry.CurrentVersion == "" {
-						entry.CurrentVersion = symbols.CurrentVersion
-					}
-					if entry.ReplaceVersion == "" {
-						entry.ReplaceVersion = symbols.ReplaceVersion
-					}
-					if entry.FixCommands == nil {
-						entry.FixCommands = symbols.FixCommands
-					}
-
-					result.Mu.Lock()
-					mergedImports[pkg] = entry
-					result.Mu.Unlock()
+			for _, sym := range symbols.Symbols {
+				if strings.HasPrefix(sym, pkg+".") {
+					sym = strings.TrimPrefix(sym, pkg+".")
 				}
+				entry.Symbols = append(entry.Symbols, sym)
 			}
+
+			if entry.CurrentVersion == "" {
+				entry.CurrentVersion = symbols.CurrentVersion
+			}
+			if entry.ReplaceVersion == "" {
+				entry.ReplaceVersion = symbols.ReplaceVersion
+			}
+			if entry.FixCommands == nil {
+				entry.FixCommands = symbols.FixCommands
+			}
+
+			result.Mu.Lock()
+			mergedImports[pkg] = entry
+			result.Mu.Unlock()
 		}
 	}
 
@@ -288,17 +295,23 @@ func main() {
 	// Properly determine final vulnerability status
 	if hasVulnerable {
 		result.IsVulnerable = "true"
-		result.UsedImports = mergedImports
 	} else if hasUnknown {
 		result.IsVulnerable = "unknown"
-		result.UsedImports = nil
 	} else if hasProcessedAny {
 		result.IsVulnerable = "false"
-		result.UsedImports = nil
 	} else {
 		// No packages were processed (shouldn't happen, but safe fallback)
 		result.IsVulnerable = "unknown"
-		result.UsedImports = nil
+	}
+	// Always set UsedImports from merged data (informational)
+	result.UsedImports = mergedImports
+
+	// Remove UsedImports entries that have no symbols (only version info)
+	// These are libraries that were checked but no vulnerable symbols were found
+	for pkg, details := range result.UsedImports {
+		if len(details.Symbols) == 0 {
+			delete(result.UsedImports, pkg)
+		}
 	}
 
 	// Run fix commands BEFORE generating output (only if fix is true)
@@ -369,8 +382,8 @@ func main() {
 			if *progress {
 				fmt.Fprintf(os.Stderr, "✗ %s\n", errMsg)
 			}
-		} else if result.IsVulnerable == "true" && len(result.UsedImports) > 0 {
-			// Only generate graphs if vulnerable
+	} else if len(result.UsedImports) > 0 {
+		// Generate graphs for any found symbols (informational)
 			if *progress {
 				fmt.Fprintf(os.Stderr, "Generating call graph visualizations for affected symbols...\n")
 			}
@@ -407,10 +420,11 @@ func main() {
 					// Create filename: library-symbol.svg
 					// Sanitize names for filesystem (CVE is in the directory structure when using -graph with server)
 					sanitizedLib := strings.ReplaceAll(pkg, "/", "-")
-					sanitizedSymbol := strings.ReplaceAll(symbol, ".", "-")
-					sanitizedSymbol = strings.ReplaceAll(sanitizedSymbol, "*", "ptr")
-					sanitizedSymbol = strings.ReplaceAll(sanitizedSymbol, "(", "")
-					sanitizedSymbol = strings.ReplaceAll(sanitizedSymbol, ")", "")
+				sanitizedSymbol := strings.ReplaceAll(symbol, "/", "-")
+				sanitizedSymbol = strings.ReplaceAll(sanitizedSymbol, ".", "-")
+				sanitizedSymbol = strings.ReplaceAll(sanitizedSymbol, "*", "ptr")
+				sanitizedSymbol = strings.ReplaceAll(sanitizedSymbol, "(", "")
+				sanitizedSymbol = strings.ReplaceAll(sanitizedSymbol, ")", "")
 
 					filename := fmt.Sprintf("%s-%s.svg", sanitizedLib, sanitizedSymbol)
 					outputPath := filepath.Join(outputDir, filename)
@@ -439,7 +453,7 @@ func main() {
 				fmt.Fprintf(os.Stderr, "✓ Generated %d call graph visualization(s)\n", len(result.GraphPaths))
 			}
 		} else if *progress {
-			fmt.Fprintf(os.Stderr, "Skipping graph generation: No vulnerabilities found\n")
+			fmt.Fprintf(os.Stderr, "Skipping graph generation: No symbol usage found\n")
 		}
 	}
 
@@ -467,16 +481,69 @@ func isFlagPassed(name string) bool {
 
 // generateRandomFilename creates a random 8-character hex string
 func generateRandomFilename() string {
-	bytes := make([]byte, 4)
-	if _, err := rand.Read(bytes); err != nil {
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
 		// Fallback to timestamp if random fails
 		return fmt.Sprintf("%d", time.Now().Unix())
 	}
-	return hex.EncodeToString(bytes)
+	return hex.EncodeToString(b)
+}
+
+// pathToDOT converts a call path to DOT format for visualization
+func pathToDOT(path []*callgraph.Node) string {
+	var b strings.Builder
+	b.WriteString("digraph callgraph {\n")
+	b.WriteString("  rankdir=LR;\n")
+	b.WriteString("  node [shape=box];\n")
+
+	for i := 0; i < len(path)-1; i++ {
+		callerName := "unknown"
+		calleeName := "unknown"
+
+		if path[i].Func != nil {
+			callerName = path[i].Func.String()
+		}
+		if path[i+1].Func != nil {
+			calleeName = path[i+1].Func.String()
+		}
+
+		b.WriteString(fmt.Sprintf("  %q -> %q\n", callerName, calleeName))
+	}
+
+	b.WriteString("}\n")
+	return b.String()
 }
 
 // generateCallGraphSVGForSymbol generates an SVG visualization of the call graph for a specific symbol
 func generateCallGraphSVGForSymbol(result *cg.Result, directory, pkg, symbol, outputPath string, showProgress bool) (string, error) {
+	// Try to use the stored path from the result first (most efficient)
+	if details, ok := result.UsedImports[pkg]; ok && len(details.Paths) > 0 {
+		// Find the path that corresponds to this symbol
+		for i, sym := range details.Symbols {
+			if sym == symbol && i < len(details.Paths) {
+				path := details.Paths[i]
+				if len(path) > 0 {
+					if showProgress {
+						fmt.Fprintf(os.Stderr, "    Using stored path (%d nodes)...\n", len(path))
+					}
+					return generateSVGFromPath(path, outputPath, showProgress)
+				}
+			}
+		}
+		// If no matching path, use the first available path
+		if len(details.Paths[0]) > 0 {
+			if showProgress {
+				fmt.Fprintf(os.Stderr, "    Using first available path (%d nodes)...\n", len(details.Paths[0]))
+			}
+			return generateSVGFromPath(details.Paths[0], outputPath, showProgress)
+		}
+	}
+
+	// Fallback: generate a new path using BFS
+	if showProgress {
+		fmt.Fprintf(os.Stderr, "    No stored path found, generating new path...\n")
+	}
+
 	// Get the first main file set to generate the call graph
 	var files []string
 	var modDir string
@@ -505,36 +572,55 @@ func generateCallGraphSVGForSymbol(result *cg.Result, directory, pkg, symbol, ou
 		fmt.Fprintf(os.Stderr, "    Building call graph from %s...\n", fullModDir)
 	}
 
-	callGraphOutput, err := tempResult.GenerateCallGraphForVisualization(fullModDir, files)
+	cgGraph, err := tempResult.GenerateCallGraphObject(fullModDir, files)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate call graph: %v", err)
 	}
 
-	// Filter the call graph to only include paths to the target symbol
+	// Find entry points and search for the symbol
 	if showProgress {
-		fmt.Fprintf(os.Stderr, "    Filtering graph for symbol %s...\n", symbol)
+		fmt.Fprintf(os.Stderr, "    Finding path to symbol %s...\n", symbol)
 	}
 
-	filteredGraph, err := filterCallGraphForSymbol(callGraphOutput, pkg, symbol)
-	if err != nil {
-		return "", fmt.Errorf("failed to filter call graph: %v", err)
+	// Get all entry points (main functions for simplicity in fallback)
+	var entryPoints []*callgraph.Node
+	for _, node := range cgGraph.Nodes {
+		if node.Func != nil && node.Func.Name() == "main" {
+			entryPoints = append(entryPoints, node)
+		}
 	}
 
-	if filteredGraph == "" {
-		return "", fmt.Errorf("no paths found to symbol %s.%s", pkg, symbol)
+	if len(entryPoints) == 0 {
+		return "", fmt.Errorf("no entry points found for call graph")
 	}
 
+	// Search for the symbol using BFS
+	var foundPath []*callgraph.Node
+	fullSymbol := fmt.Sprintf("%s.%s", pkg, symbol)
+
+	for _, entry := range entryPoints {
+		path, found := cg.FindPathToSymbolExported(entry, pkg, fullSymbol, showProgress)
+		if found {
+			foundPath = path
+			break
+		}
+	}
+
+	if len(foundPath) == 0 {
+		return "", fmt.Errorf("no path found to symbol %s.%s", pkg, symbol)
+	}
+
+	return generateSVGFromPath(foundPath, outputPath, showProgress)
+}
+
+// generateSVGFromPath converts a callgraph path to SVG using DOT and sfdp
+func generateSVGFromPath(path []*callgraph.Node, outputPath string, showProgress bool) (string, error) {
 	if showProgress {
 		fmt.Fprintf(os.Stderr, "    Converting to DOT format...\n")
 	}
 
-	// Convert call graph to DOT format using digraph
-	dotCmd := exec.Command("digraph", "to", "dot")
-	dotCmd.Stdin = strings.NewReader(filteredGraph)
-	dotOutput, err := dotCmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to convert to DOT format: %v", err)
-	}
+	// Convert path to DOT format directly (no digraph needed)
+	dotOutput := pathToDOT(path)
 
 	if showProgress {
 		fmt.Fprintf(os.Stderr, "    Rendering SVG with sfdp layout...\n")
@@ -542,7 +628,7 @@ func generateCallGraphSVGForSymbol(result *cg.Result, directory, pkg, symbol, ou
 
 	// Convert DOT to SVG using sfdp
 	sfdpCmd := exec.Command("sfdp", "-Tsvg", "-Goverlap=scale")
-	sfdpCmd.Stdin = bytes.NewReader(dotOutput)
+	sfdpCmd.Stdin = strings.NewReader(dotOutput)
 	svgOutput, err := sfdpCmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("failed to render SVG: %v", err)
@@ -554,86 +640,6 @@ func generateCallGraphSVGForSymbol(result *cg.Result, directory, pkg, symbol, ou
 	}
 
 	return outputPath, nil
-}
-
-// filterCallGraphForSymbol filters the call graph to only include nodes relevant to reaching the target symbol
-func filterCallGraphForSymbol(callGraphOutput, pkg, symbol string) (string, error) {
-	// Build a set of all nodes that can reach the target symbol
-	// Use digraph to find all paths from main to the symbol
-	scanner := bufio.NewScanner(strings.NewReader(callGraphOutput))
-	var entryPoints []string
-	seen := make(map[string]bool)
-
-	// Find all entry points (main functions)
-	for scanner.Scan() {
-		line := scanner.Text()
-		fields := strings.Fields(line)
-		if len(fields) >= 1 {
-			caller := fields[0]
-			if strings.HasSuffix(caller, ".main") && !seen[caller] {
-				entryPoints = append(entryPoints, caller)
-				seen[caller] = true
-			}
-		}
-	}
-
-	if len(entryPoints) == 0 {
-		return "", fmt.Errorf("no entry points found")
-	}
-
-	// Find all paths from entry points to the target symbol
-	reachableNodes := make(map[string]bool)
-
-	// Try different symbol patterns
-	symbolPatterns := []string{
-		fmt.Sprintf("%s.%s", pkg, symbol),
-		fmt.Sprintf("(%s.%s)", pkg, symbol),
-		fmt.Sprintf("(*%s.%s)", pkg, symbol),
-	}
-
-	for _, entryPoint := range entryPoints {
-		for _, symPattern := range symbolPatterns {
-			// Use digraph allpaths to find all paths from entry point to symbol
-			cmd := exec.Command("digraph", "allpaths", entryPoint, symPattern)
-			cmd.Stdin = strings.NewReader(callGraphOutput)
-			output, err := cmd.Output()
-
-			if err == nil && len(bytes.TrimSpace(output)) > 0 {
-				// Parse the paths and add all nodes to reachableNodes
-				pathScanner := bufio.NewScanner(bytes.NewReader(output))
-				for pathScanner.Scan() {
-					line := pathScanner.Text()
-					fields := strings.Fields(line)
-					if len(fields) >= 2 {
-						reachableNodes[fields[0]] = true
-						reachableNodes[fields[1]] = true
-					}
-				}
-			}
-		}
-	}
-
-	if len(reachableNodes) == 0 {
-		return "", fmt.Errorf("no paths found to symbol")
-	}
-
-	// Build filtered graph with only reachable nodes
-	var filteredLines []string
-	scanner = bufio.NewScanner(strings.NewReader(callGraphOutput))
-	for scanner.Scan() {
-		line := scanner.Text()
-		fields := strings.Fields(line)
-		if len(fields) >= 2 {
-			caller := fields[0]
-			callee := fields[1]
-			// Include edge if both nodes are reachable
-			if reachableNodes[caller] && reachableNodes[callee] {
-				filteredLines = append(filteredLines, line)
-			}
-		}
-	}
-
-	return strings.Join(filteredLines, "\n"), nil
 }
 
 // initResultWithProgress initializes the result with progress tracking for each phase

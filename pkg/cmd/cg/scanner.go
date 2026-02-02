@@ -29,10 +29,10 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -606,20 +606,38 @@ func (r *Result) isSymbolUsed(pkg, dir string, symbols, files []string) string {
 	return directUsage
 }
 
-// checkDirectUsage handles the existing call graph analysis
+// checkDirectUsage handles the call graph analysis using BFS on the callgraph.Graph directly
 func (r *Result) checkDirectUsage(pkg, dir string, symbols []string, files []string) string {
-	// Use callgraph library to list all the Callers and Callees (algorithm configurable via ALGO env var)
-	callGraphOutput, err := r.generateCallGraphWithLib(dir, files)
+	progress := r.Progress
+
+	// Compute relative directory for progress messages
+	relDir := dir
+	if r.Directory != "" && strings.HasPrefix(dir, r.Directory) {
+		relDir = strings.TrimPrefix(dir, r.Directory)
+		relDir = strings.TrimPrefix(relDir, "/")
+		if relDir == "" {
+			relDir = "."
+		}
+	}
+
+	// Use callgraph library to build the graph directly
+	_, cg, err := r.generateCallGraphWithLibInternal(dir, files)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to generate call graph in %s: %v", dir, err)
 		r.Errors = append(r.Errors, errMsg)
+		if progress {
+			fmt.Fprintf(os.Stderr, "[%s] ✗ Failed: %v\n", relDir, err)
+		}
 		return "unknown"
 	}
 
-	// Find entry points (main functions) from the call graph
-	entryPoints := extractEntryPoints(callGraphOutput)
+	// Get the module path for filtering entry points to repo code only
+	repoModulePath := getRepoModulePath(dir, r)
+
+	// Find entry points from the call graph (main, init, HTTP handlers, exported functions)
+	entryPoints := extractEntryPointNodes(cg, repoModulePath, false) // Don't show entry point stats
 	if len(entryPoints) == 0 {
-		errMsg := fmt.Sprintf("No entry points (main functions) found in call graph for %s", dir)
+		errMsg := fmt.Sprintf("No entry points found in call graph for %s", dir)
 		r.Errors = append(r.Errors, errMsg)
 		return "unknown"
 	}
@@ -627,24 +645,30 @@ func (r *Result) checkDirectUsage(pkg, dir string, symbols []string, files []str
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	foundAny := false
+	var allPaths [][]*callgraph.Node
 
 	for _, symbol := range symbols {
 		wg.Add(1)
 		go func(sym string) {
 			defer wg.Done()
-			// Check if symbol is reachable from any entry point using digraph somepath
-			if isSymbolReachableFromAny(callGraphOutput, entryPoints, sym) {
+		if progress {
+			fmt.Fprintf(os.Stderr, "[%s] Scanning %s.%s...\n", relDir, pkg, sym)
+		}
+			// Use BFS to find path to symbol from any entry point
+			if path, found := findPathToSymbolFromAny(entryPoints, pkg, sym, progress); found {
 				r.Mu.Lock()
 				if r.UsedImports == nil {
 					r.UsedImports = make(map[string]UsedImportsDetails)
 				}
 				entry := r.UsedImports[pkg]
 				entry.Symbols = append(entry.Symbols, sym)
+				entry.Paths = append(entry.Paths, path)
 				r.UsedImports[pkg] = entry
 				r.Mu.Unlock()
 
 				mu.Lock()
 				foundAny = true
+				allPaths = append(allPaths, path)
 				mu.Unlock()
 			}
 		}(symbol)
@@ -658,13 +682,49 @@ func (r *Result) checkDirectUsage(pkg, dir string, symbols []string, files []str
 	return "false"
 }
 
-// GenerateCallGraphForVisualization is a public wrapper for call graph generation for visualization
-func (r *Result) GenerateCallGraphForVisualization(dir string, files []string) (string, error) {
-	return r.generateCallGraphWithLib(dir, files)
+// getRepoModulePath extracts the module path from go.mod in the given directory
+func getRepoModulePath(dir string, result *Result) string {
+	cmd := "go"
+	args := []string{"mod", "edit", "-json"}
+	out, err := cli.RunCommandStdout(dir, cmd, args...)
+	if err != nil {
+		return "" // Return empty string to skip filtering
+	}
+
+	// GoModEdit doesn't have Module field, so we need to parse manually
+	type modInfo struct {
+		Module struct {
+			Path string `json:"Path"`
+		} `json:"Module"`
+	}
+	var info modInfo
+	if err := json.Unmarshal(out, &info); err != nil {
+		return ""
+	}
+
+	return info.Module.Path
 }
 
-// generateCallGraphWithLib creates a call graph using the callgraph library
+// GenerateCallGraphForVisualization is a public wrapper for call graph generation for visualization
+func (r *Result) GenerateCallGraphForVisualization(dir string, files []string) (string, error) {
+	output, _, err := r.generateCallGraphWithLibInternal(dir, files)
+	return output, err
+}
+
+// GenerateCallGraphObject returns the callgraph.Graph object for direct manipulation
+func (r *Result) GenerateCallGraphObject(dir string, files []string) (*callgraph.Graph, error) {
+	_, cg, err := r.generateCallGraphWithLibInternal(dir, files)
+	return cg, err
+}
+
+// generateCallGraphWithLib creates a call graph using the callgraph library (backward compat wrapper)
 func (r *Result) generateCallGraphWithLib(dir string, files []string) (string, error) {
+	output, _, err := r.generateCallGraphWithLibInternal(dir, files)
+	return output, err
+}
+
+// generateCallGraphWithLibInternal creates a call graph and returns both string output and the graph object
+func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (string, *callgraph.Graph, error) {
 	// Load packages with comprehensive mode to handle all dependencies
 	// Use "./..." to load all packages in the module - this is required for
 	// RTA to properly track reflection-based calls like reflect.ValueOf(func).Call()
@@ -677,11 +737,11 @@ func (r *Result) generateCallGraphWithLib(dir string, files []string) (string, e
 	// Load all packages in the module (like callgraph binary does by default)
 	pkgs, err := packages.Load(cfg, "./...")
 	if err != nil {
-		return "", fmt.Errorf("failed to load packages: %v", err)
+		return "", nil, fmt.Errorf("failed to load packages: %v", err)
 	}
 
 	if len(pkgs) == 0 {
-		return "", fmt.Errorf("no packages loaded")
+		return "", nil, fmt.Errorf("no packages loaded")
 	}
 
 	// Check for package errors and try to filter out packages with issues
@@ -703,7 +763,7 @@ func (r *Result) generateCallGraphWithLib(dir string, files []string) (string, e
 
 		pkgs, err = packages.Load(cfg, "./...")
 		if err != nil {
-			return "", fmt.Errorf("failed to load packages with fallback: %v", err)
+			return "", nil, fmt.Errorf("failed to load packages with fallback: %v", err)
 		}
 
 		for _, pkg := range pkgs {
@@ -714,7 +774,7 @@ func (r *Result) generateCallGraphWithLib(dir string, files []string) (string, e
 	}
 
 	if len(validPkgs) == 0 {
-		return "", fmt.Errorf("no valid packages found after loading")
+		return "", nil, fmt.Errorf("no valid packages found after loading")
 	}
 
 	// Create SSA program with InstantiateGenerics for call graph analysis
@@ -743,10 +803,10 @@ func (r *Result) generateCallGraphWithLib(dir string, files []string) (string, e
 		}
 	}
 
-	return output.String(), nil
+	return output.String(), cg, nil
 }
 
-// extractEntryPoints finds all main functions in the call graph
+// extractEntryPoints finds all main functions in the call graph (string-based, for backward compat)
 func extractEntryPoints(callGraphOutput string) []string {
 	var entryPoints []string
 	seen := make(map[string]bool)
@@ -768,28 +828,180 @@ func extractEntryPoints(callGraphOutput string) []string {
 	return entryPoints
 }
 
-// isSymbolReachableFromAny checks if a symbol is reachable from any entry point
-func isSymbolReachableFromAny(callGraphOutput string, entryPoints []string, symbol string) bool {
-	for _, entryPoint := range entryPoints {
-		if isSymbolReachable(callGraphOutput, entryPoint, symbol) {
-			return true
+// extractEntryPointNodes finds all entry point nodes in the call graph
+// Entry points include: main functions, init functions, HTTP handlers, and exported functions in main package
+// Only considers entry points from repo code (not vendor/external packages)
+func extractEntryPointNodes(graph *callgraph.Graph, repoModulePath string, progress bool) []*callgraph.Node {
+	var entries []*callgraph.Node
+	skippedCount := 0
+
+	for _, node := range graph.Nodes {
+		if node.Func == nil || node.Func.Pkg == nil {
+			continue
+		}
+
+		// Skip vendor and external packages
+		pkgPath := node.Func.Pkg.Pkg.Path()
+		if strings.Contains(pkgPath, "/vendor/") {
+			skippedCount++
+			continue
+		}
+		if !isRepoPackage(pkgPath, repoModulePath) {
+			skippedCount++
+			continue
+		}
+
+		name := node.Func.Name()
+
+		// main and init functions
+		if name == "main" || name == "init" {
+			entries = append(entries, node)
+			continue
+		}
+
+		// HTTP handler signature: func(http.ResponseWriter, *http.Request)
+		if isHTTPHandler(node.Func.Signature) {
+			entries = append(entries, node)
+			continue
+		}
+
+		// Exported functions in main package (potential entry points)
+		if node.Func.Pkg.Pkg.Name() == "main" && ast.IsExported(name) {
+			entries = append(entries, node)
 		}
 	}
+
+	if progress {
+		fmt.Fprintf(os.Stderr, "  Found %d entry points in repo code\n", len(entries))
+		fmt.Fprintf(os.Stderr, "  Skipped %d nodes from vendor/external packages\n", skippedCount)
+	}
+
+	return entries
+}
+
+// isRepoPackage checks if the package path belongs to the repository
+func isRepoPackage(pkgPath, repoModulePath string) bool {
+	return strings.HasPrefix(pkgPath, repoModulePath) ||
+		pkgPath == "command-line-arguments"
+}
+
+// isHTTPHandler checks if the function signature matches http.Handler pattern
+// func(http.ResponseWriter, *http.Request)
+func isHTTPHandler(sig *types.Signature) bool {
+	params := sig.Params()
+	if params.Len() != 2 {
+		return false
+	}
+
+	// Check first param is http.ResponseWriter
+	p0 := params.At(0).Type().String()
+	if !strings.Contains(p0, "http.ResponseWriter") {
+		return false
+	}
+
+	// Check second param is *http.Request
+	p1 := params.At(1).Type().String()
+	return strings.Contains(p1, "http.Request")
+}
+
+// findPathToSymbol performs BFS from entry point to find a path to the target symbol
+// Returns the path and whether the symbol was found
+func findPathToSymbol(entry *callgraph.Node, pkg, symbol string, progress bool) ([]*callgraph.Node, bool) {
+	queue := []*callgraph.Node{entry}
+	parent := map[*callgraph.Node]*callgraph.Node{entry: nil}
+	visited := 0
+
+	for len(queue) > 0 {
+		node := queue[0]
+		queue = queue[1:]
+		visited++
+
+		if matchesSymbol(node, pkg, symbol) {
+			path := reconstructPath(node, parent)
+			if progress {
+				fmt.Fprintf(os.Stderr, "    ✓ Found path to %s (%d hops, %d nodes)\n", symbol, len(path), visited)
+			}
+			return path, true
+		}
+
+		for _, edge := range node.Out {
+			if _, seen := parent[edge.Callee]; !seen {
+				parent[edge.Callee] = node
+				queue = append(queue, edge.Callee)
+			}
+		}
+	}
+
+	return nil, false
+}
+
+// findPathToSymbolFromAny searches from multiple entry points to find the first path to the symbol
+func findPathToSymbolFromAny(entries []*callgraph.Node, pkg, symbol string, progress bool) ([]*callgraph.Node, bool) {
+	for _, entry := range entries {
+		if path, found := findPathToSymbol(entry, pkg, symbol, progress); found {
+			return path, true
+		}
+	}
+	return nil, false
+}
+
+// reconstructPath walks parent pointers backward to build the path from entry to target
+func reconstructPath(target *callgraph.Node, parent map[*callgraph.Node]*callgraph.Node) []*callgraph.Node {
+	var path []*callgraph.Node
+	for node := target; node != nil; node = parent[node] {
+		path = append([]*callgraph.Node{node}, path...)
+	}
+	return path
+}
+
+// FindPathToSymbolExported is an exported wrapper for findPathToSymbol
+func FindPathToSymbolExported(entry *callgraph.Node, pkg, symbol string, progress bool) ([]*callgraph.Node, bool) {
+	return findPathToSymbol(entry, pkg, symbol, progress)
+}
+
+// matchesSymbol checks if the node's function matches the target symbol from the specified package
+func matchesSymbol(node *callgraph.Node, pkg, symbol string) bool {
+	if node.Func == nil {
+		return false
+	}
+
+	funcStr := node.Func.String()
+
+	// FIRST: Verify the function belongs to the target package
+	// This prevents matching (*log.Logger).Writer when searching for logrus
+	if pkg != "" && !strings.Contains(funcStr, pkg) {
+		return false
+	}
+
+	// Direct match
+	if funcStr == symbol {
+		return true
+	}
+
+	// Check if the function string contains the symbol
+	// This handles cases like "(pkg.Type).Method" matching "pkg.Type.Method"
+	if strings.Contains(funcStr, symbol) {
+		return true
+	}
+
+	// Handle receiver variations: (Type).Method, (*Type).Method
+	// The symbol might be "pkg.Method" but the function is "(pkg.Type).Method"
+	if strings.Contains(symbol, ".") {
+		parts := strings.Split(symbol, ".")
+		if len(parts) >= 2 {
+			methodName := parts[len(parts)-1]
+			pkgPrefix := strings.Join(parts[:len(parts)-1], ".")
+
+			// Check if function ends with the method name and contains the package
+			if strings.HasSuffix(funcStr, "."+methodName) && strings.Contains(funcStr, pkgPrefix) {
+				return true
+			}
+		}
+	}
+
 	return false
 }
 
-// isSymbolReachable uses digraph somepath to check if there's a path from entry to symbol
-func isSymbolReachable(callGraphOutput, entryPoint, symbol string) bool {
-	cmd := exec.Command("digraph", "somepath", entryPoint, symbol)
-	cmd.Stdin = strings.NewReader(callGraphOutput)
-	output, err := cmd.Output()
-	if err != nil {
-		// No path found or error occurred
-		return false
-	}
-	// If digraph finds a path, it outputs the path; empty means no path
-	return len(bytes.TrimSpace(output)) > 0
-}
 
 // getCallGraphAlgorithm returns the algorithm to use for call graph generation
 // based on the ALGO environment variable.
