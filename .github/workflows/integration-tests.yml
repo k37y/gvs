@@ -37,7 +37,9 @@ jobs:
         run: make gvs cg
 
       - name: Run integration tests
-        run: make test-integration
+        run: |
+          export PATH="$PWD/bin:$PATH"
+          make test-integration
 
       - name: Cleanup
         if: always()

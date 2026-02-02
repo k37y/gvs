@@ -162,3 +162,76 @@ userdel:
 		echo "Removing system user: $(USERNAME)"; \
 		$(SUDO) userdel -r $(USERNAME) || true; \
 	fi
+
+# User-level installation (no sudo required)
+USER_BINDIR = $(HOME)/.local/bin
+USER_DATADIR = $(HOME)/.local/share/gvs
+USER_UNITDIR = $(HOME)/.config/systemd/user
+USER_CONFDIR = $(HOME)/.config/gvs
+USER_SERVICE = gvs-user.service
+
+.PHONY: install-user
+
+install-user: gvs cg
+	@echo "Installing binaries to $(USER_BINDIR)..."
+	install -d $(USER_BINDIR)
+	install -m755 ./bin/gvs $(USER_BINDIR)/gvs
+	install -m755 ./bin/cg $(USER_BINDIR)/cg
+	@echo "Installing site files to $(USER_DATADIR)/site..."
+	install -d $(USER_DATADIR)/site
+	install -m644 ./site/index.html $(USER_DATADIR)/site/
+	install -m644 ./site/styles.css $(USER_DATADIR)/site/
+	install -m644 ./site/script.js $(USER_DATADIR)/site/
+	install -m644 ./site/config.js $(USER_DATADIR)/site/
+	@echo "Installing systemd user service to $(USER_UNITDIR)..."
+	install -d $(USER_UNITDIR)
+	install -m644 $(USER_SERVICE) $(USER_UNITDIR)/gvs.service
+	@echo "Creating config directory $(USER_CONFDIR)..."
+	install -d $(USER_CONFDIR)
+	@if [ ! -f $(USER_CONFDIR)/gvs.env ]; then \
+		echo "# GVS configuration" > $(USER_CONFDIR)/gvs.env; \
+		echo "# GVS_PORT=8082" >> $(USER_CONFDIR)/gvs.env; \
+		echo "# WORKER_COUNT=4" >> $(USER_CONFDIR)/gvs.env; \
+		echo "# ALGO=vta" >> $(USER_CONFDIR)/gvs.env; \
+		echo "# CORS_ALLOWED_ORIGINS=" >> $(USER_CONFDIR)/gvs.env; \
+		echo "# GVS_COUNTER_URL=" >> $(USER_CONFDIR)/gvs.env; \
+	fi
+	@echo "Reloading systemd user daemon..."
+	systemctl --user daemon-reload
+	@echo ""
+	@echo "Installation complete!"
+	@echo "To enable and start the service:"
+	@echo "  systemctl --user enable --now gvs"
+	@echo ""
+	@echo "To enable service at boot (without login):"
+	@echo "  make enable-linger"
+
+.PHONY: uninstall-user
+
+uninstall-user:
+	@echo "Stopping and disabling user service..."
+	-systemctl --user disable --now gvs || true
+	@echo "Removing binaries..."
+	rm -f $(USER_BINDIR)/gvs $(USER_BINDIR)/cg
+	@echo "Removing data directory..."
+	rm -rf $(USER_DATADIR)
+	@echo "Removing systemd user service..."
+	rm -f $(USER_UNITDIR)/gvs.service
+	@echo "Reloading systemd user daemon..."
+	systemctl --user daemon-reload
+	@echo "Uninstall complete."
+	@echo "Note: Config directory $(USER_CONFDIR) was preserved."
+
+.PHONY: enable-linger
+
+enable-linger:
+	@echo "Enabling linger for user $(shell whoami)..."
+	loginctl enable-linger $(shell whoami)
+	@echo "Linger enabled. Service will start at boot without login."
+
+.PHONY: disable-linger
+
+disable-linger:
+	@echo "Disabling linger for user $(shell whoami)..."
+	loginctl disable-linger $(shell whoami)
+	@echo "Linger disabled."
