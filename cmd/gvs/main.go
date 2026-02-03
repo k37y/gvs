@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -18,6 +19,17 @@ var (
 	version string
 )
 
+// getCacheDir returns the cache directory, respecting XDG_CACHE_HOME
+func getCacheDir() string {
+	if xdgCache := os.Getenv("XDG_CACHE_HOME"); xdgCache != "" {
+		return xdgCache
+	}
+	if home := os.Getenv("HOME"); home != "" {
+		return filepath.Join(home, ".cache")
+	}
+	return "/tmp"
+}
+
 func main() {
 	// Check for GVS_PORT environment variable
 	if envPort := os.Getenv("GVS_PORT"); envPort != "" {
@@ -25,13 +37,33 @@ func main() {
 		port = envPort
 	}
 
-	os.Setenv("GOCACHE", "/tmp/go-build")
-	err := os.MkdirAll("/tmp/go-build", os.ModePerm)
+	// Set up cache directories using XDG-compliant paths
+	cacheDir := getCacheDir()
+	goCacheDir := filepath.Join(cacheDir, "go-build")
+	graphCacheDir := filepath.Join(cacheDir, "gvs", "graph")
+
+	// Only set GOCACHE if not already set
+	if os.Getenv("GOCACHE") == "" {
+		os.Setenv("GOCACHE", goCacheDir)
+	}
+	err := os.MkdirAll(goCacheDir, os.ModePerm)
 	if err != nil {
-		log.Fatalf("Failed to create directory: %v", err)
+		log.Fatalf("Failed to create go cache directory: %v", err)
 	}
 
-	http.Handle("/graph/", gvs.LogFileAccess(http.StripPrefix("/graph/", http.FileServer(http.Dir("/tmp/gvs-cache/graph")))))
+	// Create graph cache directory
+	err = os.MkdirAll(graphCacheDir, os.ModePerm)
+	if err != nil {
+		log.Fatalf("Failed to create graph cache directory: %v", err)
+	}
+
+	// Export graph cache dir for handlers to use
+	os.Setenv("GVS_GRAPH_CACHE", graphCacheDir)
+
+	log.Printf("Using cache directory: %s", cacheDir)
+	log.Printf("Graph cache: %s", graphCacheDir)
+
+	http.Handle("/graph/", gvs.LogFileAccess(http.StripPrefix("/graph/", http.FileServer(http.Dir(graphCacheDir)))))
 	http.Handle("/", http.FileServer(http.Dir("./site")))
 	http.HandleFunc("/scan", api.CORSMiddleware(api.ScanHandler))
 	http.HandleFunc("/healthz", api.CORSMiddleware(api.HealthHandler))

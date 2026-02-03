@@ -1,0 +1,33 @@
+[Unit]
+Description=GVS Vulnerability Scanner Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/gvs
+ExecStart=%h/.local/bin/gvs
+Environment=PATH=%h/.local/bin:%h/.local/go/bin:%h/go/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin
+Environment=GOCACHE=%h/.cache/go-build
+Environment=GOPATH=%h/go
+Environment=HOME=%h
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=30
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+# Optional environment file for custom configuration
+# Create ~/.config/gvs/gvs.env with variables like:
+#   GVS_PORT=8082
+#   WORKER_COUNT=4
+#   ALGO=vta
+#   CORS_ALLOWED_ORIGINS=*
+#   GVS_COUNTER_URL=
+EnvironmentFile=-%h/.config/gvs/gvs.env
+
+[Install]
+WantedBy=default.target

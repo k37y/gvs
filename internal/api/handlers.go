@@ -28,6 +28,15 @@ var (
 	counterURL      = os.Getenv("GVS_COUNTER_URL")
 )
 
+// getGraphCacheDir returns the graph cache directory from environment or default
+func getGraphCacheDir() string {
+	if dir := os.Getenv("GVS_GRAPH_CACHE"); dir != "" {
+		return dir
+	}
+	// Fallback for container/legacy deployments
+	return "/tmp/gvs-cache/graph"
+}
+
 func trackAPICall() {
 	if counterURL != "" {
 		go func() {
@@ -400,7 +409,7 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 				sanitizedCVE = "unknown-cve"
 			}
 
-			graphDir := filepath.Join("/tmp/gvs-cache/graph", sanitizedCVE, repoName, sanitizedBranch, algoName)
+			graphDir := filepath.Join(getGraphCacheDir(), sanitizedCVE, repoName, sanitizedBranch, algoName)
 			if err := os.MkdirAll(graphDir, 0755); err != nil {
 				log.Printf("[Task %s] Failed to create graph directory: %v", taskId, err)
 			}
@@ -413,7 +422,7 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 			args = append(args, "-fixversion", fixversion)
 		}
 		args = append(args, cve, cloneDir)
-		cmd = exec.Command("bin/cg", args...)
+		cmd = exec.Command("cg", args...)
 
 		output, err := runCgWithProgressCapture(cmd, sendProgress)
 
@@ -596,7 +605,7 @@ func runGovulncheckWithProgress(directory, target string, sendProgress func(stri
 }
 
 // convertGraphPathsToURLs converts file paths in GraphPaths to web-accessible URLs
-// Paths are expected to be like: /tmp/gvs-cache/graph/CVE-XXXX/repo/branch/algo/library-symbol.svg
+// Paths are expected to be like: {graphCacheDir}/CVE-XXXX/repo/branch/algo/library-symbol.svg
 // Converts to: http://host:port/graph/CVE-XXXX/repo/branch/algo/library-symbol.svg
 func convertGraphPathsToURLs(jsonOutput []byte, baseURL string) []byte {
 	var result map[string]interface{}
@@ -612,12 +621,12 @@ func convertGraphPathsToURLs(jsonOutput []byte, baseURL string) []byte {
 	}
 
 	// Convert file paths to full URLs
-	// Extract the path relative to /tmp/gvs-cache/graph and prefix with baseURL/graph/
+	// Extract the path relative to graph cache dir and prefix with baseURL/graph/
 	webPaths := make([]string, 0, len(graphPaths))
-	const cacheDir = "/tmp/gvs-cache/graph/"
+	cacheDir := getGraphCacheDir() + "/"
 	for _, p := range graphPaths {
 		if pathStr, ok := p.(string); ok {
-			// Extract the relative path after /tmp/gvs-cache/graph/
+			// Extract the relative path after graph cache directory
 			if strings.HasPrefix(pathStr, cacheDir) {
 				relativePath := strings.TrimPrefix(pathStr, cacheDir)
 				webURL := baseURL + "/graph/" + relativePath
