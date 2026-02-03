@@ -172,6 +172,62 @@ No errors or issues were encountered during the scanning process.
   }
 }
 ```
+
+## MCP Server (AI Integration)
+
+GVS includes an MCP (Model Context Protocol) server that enables AI assistants like Claude to directly check repositories for vulnerabilities.
+
+### Installation
+
+```bash
+# Build from source
+make gvs-mcp
+
+# Or install globally
+go install github.com/k37y/gvs/cmd/gvs-mcp@latest
+```
+
+### Running the Server
+
+```bash
+# Start on default port 8083
+./bin/gvs-mcp
+
+# Custom port
+GVS_MCP_PORT=9000 ./bin/gvs-mcp
+
+# With API key authentication
+GVS_MCP_API_KEY=your-secret ./bin/gvs-mcp
+```
+
+### Configuration for Claude Desktop
+
+1. Go to **Settings** > **Connectors**
+2. Click **Add Connector**
+3. Enter URL: `http://your-server:8083/`
+4. Configure Bearer token auth if using API key
+
+### Available Tools
+
+| Tool | Description |
+|------|-------------|
+| `scan_vulnerability` | Deep CVE analysis with optional call graph visualization |
+| `lookup_cve` | Look up CVE details from Go vulnerability database |
+| `check_package_version` | Check if a package version has known vulnerabilities |
+| `get_call_graph` | Generate SVG visualization of call path to vulnerable symbol |
+| `scan_all_vulnerabilities` | Scan for ALL vulnerabilities using govulncheck |
+| `analyze_reflection_risks` | Analyze reflection patterns that could invoke vulnerable code |
+
+### Example Usage
+
+In Claude, simply ask:
+
+> "Is https://github.com/example/app vulnerable to CVE-2024-45338?"
+
+Claude will run the analysis and provide actionable results with fix commands.
+
+For more details, see [cmd/gvs-mcp/README.md](cmd/gvs-mcp/README.md).
+
 ## Branch and Commit Support
 
 The scanner supports both **branch names** and **commit hashes** for repository analysis:

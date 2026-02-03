@@ -1,5 +1,6 @@
 GVS_SOURCES = $(wildcard *.go cmd/gvs/*.go)
 CG_SOURCES = $(wildcard cmd/cg/*.go)
+MCP_SOURCES = $(wildcard cmd/gvs-mcp/*.go)
 NAME = gvs
 RUNNING_CONTAINER = $(shell podman ps --format json | jq -r '.[] | select(.Names[] | contains("$(NAME)")) | .Names[]')
 VERSION = $(shell git describe --tags --long --dirty 2>/dev/null)
@@ -11,7 +12,7 @@ PREFIX ?= /usr
 BINDIR ?= $(PREFIX)/bin
 UNITDIR ?= /etc/systemd/system
 SERVICE = gvs.service
-BINS = gvs cg
+BINS = gvs cg gvs-mcp
 USERNAME ?= gvs
 GROUPNAME ?= $(USERNAME)
 
@@ -52,6 +53,11 @@ gvs: $(GVS_SOURCES)
 
 cg: $(CG_SOURCES)
 	go build -buildvcs=false -ldflags "-X main.version=${VERSION}" -o ./bin/$@ ./cmd/cg
+
+.PHONY: gvs-mcp
+
+gvs-mcp: $(MCP_SOURCES)
+	go build -buildvcs=false -ldflags "-X main.version=${VERSION}" -o ./bin/$@ ./cmd/gvs-mcp
 
 .PHONY: image
 
