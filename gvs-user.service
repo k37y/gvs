@@ -11,10 +11,11 @@ Environment=PATH=%h/.local/bin:%h/.local/go/bin:%h/go/bin:/usr/local/go/bin:/usr
 Environment=GOCACHE=%h/.cache/go-build
 Environment=GOPATH=%h/go
 Environment=HOME=%h
-Restart=on-failure
+Restart=always
 RestartSec=5
 TimeoutStartSec=30
 TimeoutStopSec=30
+OOMPolicy=continue
 
 # Logging
 StandardOutput=journal
