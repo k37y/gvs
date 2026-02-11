@@ -295,6 +295,9 @@ function runScan() {
 	outputDiv.className = "result-card";
 	outputDiv.innerHTML = "";
 	
+	// Hide report button when starting a new scan
+	document.getElementById("reportContainer").style.display = "none";
+	
 	// Clear previous progress output and initialize new scan
 	const timestamp = new Date().toLocaleTimeString();
 	progressContent.innerHTML = `Scan Started at ${timestamp}\nInitializing scan...\n`;
@@ -461,6 +464,9 @@ function runScan() {
 						outputDiv.classList.add("alert-success");
 						clearInterval(intervalId);
 						
+						// Show report inaccuracy button
+						document.getElementById("reportContainer").style.display = "block";
+						
 						// Add completion message to progress output
 						const progressContent = document.getElementById("progressContent");
 						const timestamp = new Date().toLocaleTimeString();
@@ -572,4 +578,35 @@ function resetProgressCard() {
 	// Reset to collapsed state with placeholder (only used on page load)
 	collapseProgressCard();
 	progressContent.innerHTML = '<div class="progress-placeholder">Server progress will appear here during scans. Progress from previous scans is preserved until the next scan starts.</div>';
+}
+
+function reportInaccuracy() {
+	const repo = document.getElementById("repo").value.trim();
+	const branchOrCommit = document.getElementById("branchOrCommit").value.trim();
+	const cve = document.getElementById("cve").value.trim();
+	const library = document.getElementById("library").value.trim();
+	const symbol = document.getElementById("symbol").value.trim();
+	const fixversion = document.getElementById("fixversion").value.trim();
+	
+	const title = cve 
+		? `Inaccuracy Report: ${cve}`
+		: `Inaccuracy Report: ${library}`;
+	
+	const body = `## Scan Details
+- **Repository**: ${repo}
+- **Branch/Commit**: ${branchOrCommit}
+- **CVE ID**: ${cve || 'N/A'}
+- **Library**: ${library || 'N/A'}
+- **Symbol**: ${symbol || 'N/A'}
+- **Fixed Version**: ${fixversion || 'N/A'}
+
+## Issue Description
+<!-- Please describe what was inaccurate about the scan results -->
+
+## Expected Result
+<!-- What should the correct result be? -->
+`;
+
+	const url = `https://github.com/k37y/gvs/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}&labels=inaccuracy`;
+	window.open(url, '_blank');
 }

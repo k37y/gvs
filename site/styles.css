@@ -403,3 +403,21 @@ code {
 	outline: 2px solid var(--btn-primary-bg);
 	outline-offset: 2px;
 }
+
+/* Report Inaccuracy Button */
+.report-container {
+	margin-top: 10px;
+	text-align: right;
+}
+
+.btn-outline-secondary {
+	color: var(--muted-color);
+	border-color: var(--muted-color);
+	background-color: transparent;
+}
+
+.btn-outline-secondary:hover {
+	background-color: var(--muted-color);
+	color: var(--bg-color);
+	border-color: var(--muted-color);
+}
