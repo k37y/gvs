@@ -606,6 +606,17 @@ func (r *Result) isSymbolUsed(pkg, dir string, symbols, files []string) string {
 	return directUsage
 }
 
+// isPkgInGoMod reports whether the given package path (or its module root) appears
+// in the go.mod of dir. Used to short-circuit "unknown" results when the call graph
+// cannot be built for a sub-module that doesn't even depend on the vulnerable package.
+func isPkgInGoMod(pkg, dir string) bool {
+	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return true // can't tell — be conservative, keep "unknown"
+	}
+	return strings.Contains(string(data), pkg)
+}
+
 // checkDirectUsage handles the call graph analysis using BFS on the callgraph.Graph directly
 func (r *Result) checkDirectUsage(pkg, dir string, symbols []string, files []string) string {
 	progress := r.Progress
@@ -623,6 +634,14 @@ func (r *Result) checkDirectUsage(pkg, dir string, symbols []string, files []str
 	// Use callgraph library to build the graph directly
 	_, cg, err := r.generateCallGraphWithLibInternal(dir, files)
 	if err != nil {
+		// Before marking as unknown, check whether the vulnerable package is even
+		// listed in this directory's go.mod. If it isn't, the module cannot import
+		// the vulnerable symbols regardless of whether the call graph built or not.
+		// In that case we return "false" without logging: the call graph failure is
+		// irrelevant and reporting it would be misleading noise.
+		if !isPkgInGoMod(pkg, dir) {
+			return "false"
+		}
 		errMsg := fmt.Sprintf("Failed to generate call graph in %s: %v", dir, err)
 		r.Errors = append(r.Errors, errMsg)
 		if progress {
