@@ -254,10 +254,72 @@ func Worker(jobs <-chan Job, results chan<- *Result, wg *sync.WaitGroup, result 
 	}
 }
 
+type VulnerabilityResult struct {
+	DirVulnerable   bool
+	Status          string // "true", "false", or "unknown"
+	NeedsReplaceFix bool
+}
+
+// checkDirVulnerability determines whether a directory is vulnerable based on
+// version comparisons. It returns the vulnerability status and whether a
+// replace-directive fix is needed.
+func checkDirVulnerability(curVer, repVer, fv string, used, unknown, isStdlib bool, goToolchainVersion string, fixVer []string) VulnerabilityResult {
+	vr := VulnerabilityResult{Status: "false"}
+
+	if used {
+		compareVer := curVer
+		if repVer != "" {
+			compareVer = repVer
+		}
+
+		if !isStdlib {
+			if semver.Compare(compareVer, fv) < 0 {
+				vr.Status = "true"
+				vr.DirVulnerable = true
+			}
+		} else {
+			if len(fixVer) > 0 {
+				isVuln := false
+				if goToolchainVersion != "" {
+					appropriateFixVersion := findAppropriateFixVersion(goToolchainVersion, fixVer)
+					if appropriateFixVersion != "" {
+						if semver.Compare(goToolchainVersion, appropriateFixVersion) < 0 {
+							isVuln = true
+						}
+					} else {
+						isVuln = true
+					}
+				}
+
+				if goToolchainVersion == "" {
+					vr.Status = "unknown"
+					vr.DirVulnerable = true
+				} else if isVuln {
+					vr.Status = "true"
+					vr.DirVulnerable = true
+				}
+			} else {
+				vr.Status = "unknown"
+				vr.DirVulnerable = true
+			}
+		}
+	} else if unknown {
+		vr.Status = "unknown"
+		vr.DirVulnerable = true
+	}
+
+	if repVer != "" && semver.Compare(curVer, repVer) <= 0 && semver.Compare(repVer, fv) < 0 {
+		vr.DirVulnerable = true
+		vr.NeedsReplaceFix = true
+	}
+
+	return vr
+}
+
 func (j Job) isVulnerable(result *Result) *Result {
 	curVer := getCurrentVersion(j.Package, filepath.Join(result.Directory, j.Dir), result)
 	modPath := getModPath(j.Package, filepath.Join(result.Directory, j.Dir), result)
-	repVer := getReplaceVersion(modPath, filepath.Join(result.Directory, j.Dir), result)
+	repPath, repVer := getReplaceVersion(modPath, filepath.Join(result.Directory, j.Dir), result)
 
 	// Check if fixed version is already set (from manual scan), otherwise fetch it
 	var fixVer []string
@@ -305,67 +367,30 @@ func (j Job) isVulnerable(result *Result) *Result {
 	}
 	uentry := result.UsedImports[j.Package]
 	uentry.CurrentVersion = curVer
-	uentry.ReplaceVersion = repVer
-	if used {
-		// Determine the version to compare against (prefer replace version if available)
-		compareVer := curVer
-		if repVer != "" {
-			compareVer = repVer
-		}
-
-		if result.AffectedImports[j.Package].Type != "stdlib" {
-			// For non-stdlib packages: vulnerable if current/replace version is less than fixed version
-			if semver.Compare(compareVer, fv) < 0 {
-				result.IsVulnerable = "true"
-			} else {
-				result.IsVulnerable = "false"
-			}
-		} else {
-			// For stdlib packages: compare against the Go version fix
-			if len(fixVer) > 0 {
-				// Get the actual Go toolchain version
-				goToolchainVersion := getGoToolchainVersion(filepath.Join(result.Directory, j.Dir), result)
-
-				// Find the appropriate fixed version for the current Go major.minor version
-				isVulnerable := false
-				if goToolchainVersion != "" {
-					appropriateFixVersion := findAppropriateFixVersion(goToolchainVersion, fixVer)
-					if appropriateFixVersion != "" {
-						if semver.Compare(goToolchainVersion, appropriateFixVersion) < 0 {
-							isVulnerable = true
-						}
-					} else {
-						// No appropriate fix version found, assume vulnerable
-						isVulnerable = true
-					}
-				}
-
-				if goToolchainVersion == "" {
-					result.IsVulnerable = "unknown"
-				} else if isVulnerable {
-					result.IsVulnerable = "true"
-				} else {
-					result.IsVulnerable = "false"
-				}
-			} else {
-				result.IsVulnerable = "unknown"
-			}
-		}
-	} else if unknown {
-		result.IsVulnerable = "unknown"
-	} else {
-		result.IsVulnerable = "false"
+	if repVer != "" {
+		uentry.ReplaceModule = repPath
+		uentry.ReplaceVersion = repVer
 	}
-	if repVer != "" && semver.Compare(curVer, repVer) <= 0 {
+	goToolchainVersion := ""
+	if result.AffectedImports[j.Package].Type == "stdlib" {
+		goToolchainVersion = getGoToolchainVersion(filepath.Join(result.Directory, j.Dir), result)
+	}
+
+	vr := checkDirVulnerability(curVer, repVer, fv, used, unknown,
+		result.AffectedImports[j.Package].Type == "stdlib", goToolchainVersion, fixVer)
+
+	result.IsVulnerable = vr.Status
+	if vr.DirVulnerable {
+		uentry.Dir = append(uentry.Dir, j.Dir)
+	}
+	if vr.NeedsReplaceFix {
 		uentry.FixCommands = []string{
 			fmt.Sprintf("go mod edit -replace=%s=%s@%s", modPath, modPath, fv),
 			"go mod tidy",
 			"go mod vendor",
 		}
-	} else if result.IsVulnerable == "true" {
+	} else if vr.Status == "true" {
 		if result.AffectedImports[j.Package].Type == "stdlib" {
-			// For stdlib packages, select the appropriate Go version to upgrade to
-			goToolchainVersion := getGoToolchainVersion(filepath.Join(result.Directory, j.Dir), result)
 			selectedFixVersion := selectFixVersionForCurrentGoVersion(goToolchainVersion, fixVer)
 			uentry.FixCommands = []string{
 				fmt.Sprintf("go mod edit -go=%s", selectedFixVersion),
@@ -1120,31 +1145,31 @@ func getGoToolchainVersion(dir string, result *Result) string {
 	return ""
 }
 
-func getReplaceVersion(pkg string, dir string, result *Result) string {
+func getReplaceVersion(pkg string, dir string, result *Result) (string, string) {
 	cmd := "go"
 	args := []string{"mod", "edit", "-json"}
 	out, err := cli.RunCommandStdout(dir, cmd, args...)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
 		result.Errors = append(result.Errors, errMsg)
-		return ""
+		return "", ""
 	}
 
 	var goModEdit GoModEdit
 	err = json.Unmarshal(out, &goModEdit)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 
 	for _, r := range goModEdit.Replace {
 		if r.Old.Path == pkg {
 			if r.New.Version != "" {
-				return r.New.Version
+				return r.New.Path, r.New.Version
 			}
 		}
 	}
 
-	return ""
+	return "", ""
 }
 
 func getFixedVersion(id, pkg string, result *Result) []string {
@@ -2111,8 +2136,10 @@ func ConvertUsedImports(input map[string]UsedImportsDetails) map[string]interfac
 		result[key] = map[string]interface{}{
 			"Symbols":        details.Symbols,
 			"CurrentVersion": details.CurrentVersion,
+			"ReplaceModule":  details.ReplaceModule,
 			"ReplaceVersion": details.ReplaceVersion,
 			"FixCommands":    details.FixCommands,
+			"Dir":            details.Dir,
 		}
 	}
 	return result

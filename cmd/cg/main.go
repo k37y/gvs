@@ -250,12 +250,16 @@ func main() {
 			if entry.CurrentVersion == "" {
 				entry.CurrentVersion = symbols.CurrentVersion
 			}
+			if entry.ReplaceModule == "" {
+				entry.ReplaceModule = symbols.ReplaceModule
+			}
 			if entry.ReplaceVersion == "" {
 				entry.ReplaceVersion = symbols.ReplaceVersion
 			}
 			if entry.FixCommands == nil {
 				entry.FixCommands = symbols.FixCommands
 			}
+			entry.Dir = append(entry.Dir, symbols.Dir...)
 
 			result.Mu.Lock()
 			mergedImports[pkg] = entry
@@ -289,6 +293,8 @@ func main() {
 			sort.Strings(deduped)
 			details.Symbols = deduped
 		}
+		details.Dir = common.UniqueStrings(details.Dir)
+		sort.Strings(details.Dir)
 		mergedImports[pkg] = details
 	}
 
