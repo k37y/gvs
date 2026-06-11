@@ -26,8 +26,10 @@ type AffectedImportsDetails struct {
 type UsedImportsDetails struct {
 	Symbols        []string            `json:"Symbols,omitempty"`
 	CurrentVersion string              `json:"CurrentVersion,omitempty"`
+	ReplaceModule  string              `json:"ReplaceModule,omitempty"`
 	ReplaceVersion string              `json:"ReplaceVersion,omitempty"`
 	FixCommands    []string            `json:"FixCommands,omitempty"`
+	Dir            []string            `json:"Dir,omitempty"`
 	Paths          [][]*callgraph.Node `json:"-"` // For visualization, not serialized
 }
 
