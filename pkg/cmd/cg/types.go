@@ -43,27 +43,33 @@ type ReflectionRisk struct {
 	Package    string   `json:"package"`    // The package containing the symbol
 }
 
+// ClaudeVerification holds the independent AI audit of the scan result
+type ClaudeVerification struct {
+	AgreesWithScanner bool     `json:"agrees_with_scanner"`
+	ClaudeAssessment  string   `json:"claude_assessment"`
+	Confidence        string   `json:"confidence"`
+	Reasoning         string   `json:"reasoning"`
+	Evidence          []string `json:"evidence"`
+}
+
 type Result struct {
-	IsVulnerable    string
-	UsedImports     map[string]UsedImportsDetails
-	Files           map[string][][]string
-	AffectedImports map[string]AffectedImportsDetails
-	GoCVE           string
-	CVE             string
-	Repository      string
-	Branch          string
-	Directory       string
-	CursorCommand   *string          `json:"CursorCommand,omitempty"`
-	Errors          []string         `json:"Errors"`
-	FixErrors       *[]string        `json:"FixErrors,omitempty"`
-	FixSuccess      *[]string        `json:"FixSuccess,omitempty"`
-	Unsafe          bool             `json:"unsafe"`
-	Reflect         bool             `json:"reflect"`
-	ReflectionRisks []ReflectionRisk `json:"reflection_risks,omitempty"` // New field
-	GraphPaths      []string         `json:"GraphPaths,omitempty"`       // Paths to generated SVG graphs (one per symbol)
-	Mu              sync.Mutex       `json:"-"`
-	Progress        bool             `json:"-"`                          // Progress output flag, not serialized
-	Summary         string
+	IsVulnerable       string
+	UsedImports        map[string]UsedImportsDetails
+	Files              map[string][][]string
+	AffectedImports    map[string]AffectedImportsDetails
+	GoCVE              string
+	CVE                string
+	Repository         string
+	Branch             string
+	Directory          string
+	Errors             []string            `json:"Errors"`
+	Unsafe             bool                `json:"unsafe"`
+	Reflect            bool                `json:"reflect"`
+	ReflectionRisks    []ReflectionRisk    `json:"reflection_risks,omitempty"`
+	GraphPaths         []string            `json:"GraphPaths,omitempty"`
+	ClaudeVerification *ClaudeVerification `json:"ClaudeVerification,omitempty"`
+	Mu                 sync.Mutex          `json:"-"`
+	Progress           bool                `json:"-"`
 }
 
 type VulnReport struct {

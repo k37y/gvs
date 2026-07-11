@@ -268,7 +268,6 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 		Symbol         string `json:"symbol"`
 		FixVersion     string `json:"fixversion"`
 		Algo           string `json:"algo"`
-		Graph          bool   `json:"graph"`
 		ShowProgress   bool   `json:"showProgress"`
 	}
 
@@ -323,7 +322,7 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	baseURL := fmt.Sprintf("%s://%s", scheme, r.Host)
 
-	go func(taskId, repo, branchOrCommit, cve, library, symbol, fixversion, algo, baseURL string, graph bool) {
+	go func(taskId, repo, branchOrCommit, cve, library, symbol, fixversion, algo, baseURL string) {
 		defer func() {
 			requestMutex.Lock()
 			inProgress = false
@@ -358,8 +357,7 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 
 		updateStatus(StatusRunning, "", "")
 
-		// Include library, symbol, fixversion, algo, and graph in cache key if provided
-		cacheKey := fmt.Sprintf("%s@%s:%s:lib=%s:sym=%s:fixver=%s:algo=%s:graph=%t", repo, branchOrCommit, cve, library, symbol, fixversion, algo, graph)
+		cacheKey := fmt.Sprintf("%s@%s:%s:lib=%s:sym=%s:fixver=%s:algo=%s", repo, branchOrCommit, cve, library, symbol, fixversion, algo)
 		if cachedData, err := RetrieveCacheFromDisk(cacheKey); err == nil {
 			updateStatus(StatusCompleted, string(cachedData), "")
 			log.Printf("[Task %s] Retrieved callgraph from cache", taskId)
@@ -396,14 +394,10 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 		if algo != "" {
 			args = append(args, fmt.Sprintf("-algo=%s", algo))
 		}
-		if graph {
-			// Create subdirectory structure: /graph/CVE-XXXX/repo/branch/algo/
-			// Sanitize repo name (extract just the repo name from URL)
+		{
 			repoName := path.Base(repo)
 			repoName = strings.TrimSuffix(repoName, ".git")
-			// Sanitize branch/commit for filesystem
 			sanitizedBranch := strings.ReplaceAll(branchOrCommit, "/", "-")
-			// Sanitize CVE for filesystem
 			sanitizedCVE := strings.ReplaceAll(cve, "/", "-")
 			if sanitizedCVE == "" {
 				sanitizedCVE = "unknown-cve"
@@ -434,17 +428,14 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 
 		log.Printf("[Task %s] cg execution completed - Took %s", taskId, time.Since(start))
 
-		// If graph generation was requested, convert file paths to web-accessible URLs
-		if graph {
-			output = convertGraphPathsToURLs(output, baseURL)
-		}
+		output = convertGraphPathsToURLs(output, baseURL)
 
 		updateStatus(StatusCompleted, string(output), "")
 
 		if err := SaveCacheToDisk(cacheKey, output); err != nil {
 			log.Printf("[Task %s] Failed to save cache: %v", taskId, err)
 		}
-	}(taskId, req.Repo, req.BranchOrCommit, req.CVE, req.Library, req.Symbol, req.FixVersion, req.Algo, baseURL, req.Graph)
+	}(taskId, req.Repo, req.BranchOrCommit, req.CVE, req.Library, req.Symbol, req.FixVersion, req.Algo, baseURL)
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]string{"taskId": taskId}); err != nil {

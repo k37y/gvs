@@ -6,7 +6,8 @@ VERSION = $(shell git describe --tags --long --dirty 2>/dev/null)
 IMAGE = quay.io/k37y/${NAME}:${VERSION}
 PORT ?= 8082
 ALGO ?= vta
-GEMINI_CONF = $(HOME)/.gemini.conf
+CLAUDE_CONF = $(HOME)/.claude.conf
+ADC_CREDS = $(HOME)/.config/gcloud/application_default_credentials.json
 PREFIX ?= /usr
 BINDIR ?= $(PREFIX)/bin
 UNITDIR ?= /etc/systemd/system
@@ -23,7 +24,7 @@ RUN_OPTS := --security-opt label=disable \
             --publish $(PORT):8082
 
 ifdef VOLUME_EXISTS
-    VOLUME_OPT := --volume $(GEMINI_CONF):/root/.gemini.conf
+    VOLUME_OPT := --volume $(CLAUDE_CONF):/root/.claude.conf
 endif
 
 ifeq ($(shell id -u),0)
@@ -82,12 +83,18 @@ image:
 
 image-run: image
 	-podman kill ${RUNNING_CONTAINER} && podman wait ${RUNNING_CONTAINER}
-	@if [ -f "$(GEMINI_CONF)" ]; then \
-		echo "Gemini config found. Mounting volume ..."; \
-		VOLUME_OPT="--volume $(GEMINI_CONF):/root/.gemini.conf"; \
+	@VOLUME_OPT=""; \
+	if [ -f "$(CLAUDE_CONF)" ]; then \
+		echo "Claude config found. Mounting volume ..."; \
+		VOLUME_OPT="$$VOLUME_OPT --volume $(CLAUDE_CONF):/root/.claude.conf"; \
 	else \
-		echo "Gemini config not found. Skipping volume mount ..."; \
-		VOLUME_OPT=""; \
+		echo "Claude config not found. Skipping ..."; \
+	fi; \
+	if [ -f "$(ADC_CREDS)" ]; then \
+		echo "ADC credentials found. Mounting volume ..."; \
+		VOLUME_OPT="$$VOLUME_OPT --volume $(ADC_CREDS):/root/.config/gcloud/application_default_credentials.json"; \
+	else \
+		echo "ADC credentials not found. Skipping ..."; \
 	fi; \
 	podman run $(RUN_OPTS) $$VOLUME_OPT $(IMAGE)
 
@@ -183,6 +190,9 @@ install-user: gvs cg
 	install -m644 ./site/styles.css $(USER_DATADIR)/site/
 	install -m644 ./site/script.js $(USER_DATADIR)/site/
 	install -m644 ./site/config.js $(USER_DATADIR)/site/
+	@echo "Installing skills to $(USER_DATADIR)/skills..."
+	install -d $(USER_DATADIR)/skills
+	install -m644 ./skills/verify-scan.md $(USER_DATADIR)/skills/
 	@echo "Installing systemd user service to $(USER_UNITDIR)..."
 	install -d $(USER_UNITDIR)
 	install -m644 $(USER_SERVICE) $(USER_UNITDIR)/gvs.service

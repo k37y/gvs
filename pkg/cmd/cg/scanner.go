@@ -54,23 +54,11 @@ import (
 	"github.com/k37y/gvs/internal/common"
 )
 
-func InitResult(cve, dir string, fix bool, library, symbols, fixversion string) *Result {
+func InitResult(cve, dir string, library, symbols, fixversion string) *Result {
 	r := &Result{
 		CVE:          cve,
 		Directory:    dir,
 		IsVulnerable: "unknown",
-	}
-
-	// Only initialize fix-related fields if fix is true
-	// When fix is false, these fields remain as nil pointers
-	// and will be omitted from JSON due to the omitempty tags
-	if fix {
-		cursorCmd := fmt.Sprintf("cursor --remote ssh-remote+gvs-host %s", dir)
-		r.CursorCommand = &cursorCmd
-		fixErrors := []string{}
-		fixSuccess := []string{}
-		r.FixErrors = &fixErrors
-		r.FixSuccess = &fixSuccess
 	}
 
 	// Check if library and symbols are provided for direct scanning (takes precedence)
@@ -2125,39 +2113,3 @@ func (r *Result) isReflectTypeOf(call *ast.CallExpr, importedPackages map[string
 	return false
 }
 
-// ConvertUsedImports converts from cmd/cg UsedImportsDetails to common interface format
-func ConvertUsedImports(input map[string]UsedImportsDetails) map[string]interface{} {
-	if input == nil {
-		return nil
-	}
-
-	result := make(map[string]interface{})
-	for key, details := range input {
-		result[key] = map[string]interface{}{
-			"Symbols":        details.Symbols,
-			"CurrentVersion": details.CurrentVersion,
-			"ReplaceModule":  details.ReplaceModule,
-			"ReplaceVersion": details.ReplaceVersion,
-			"FixCommands":    details.FixCommands,
-			"Dir":            details.Dir,
-		}
-	}
-	return result
-}
-
-// ConvertAffectedImports converts from AffectedImportsDetails to interface format
-func ConvertAffectedImports(input map[string]AffectedImportsDetails) map[string]interface{} {
-	if input == nil {
-		return nil
-	}
-
-	result := make(map[string]interface{})
-	for key, details := range input {
-		result[key] = map[string]interface{}{
-			"Symbols":      details.Symbols,
-			"Type":         details.Type,
-			"FixedVersion": details.FixedVersion,
-		}
-	}
-	return result
-}

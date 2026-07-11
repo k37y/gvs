@@ -38,5 +38,6 @@ COPY --from=builder /go/src/github.com/k37y/gvs/site/index.html /go/src/github.c
 COPY --from=builder /go/src/github.com/k37y/gvs/site/styles.css /go/src/github.com/k37y/gvs/site/styles.css
 COPY --from=builder /go/src/github.com/k37y/gvs/site/script.js /go/src/github.com/k37y/gvs/site/script.js
 COPY --from=builder /go/src/github.com/k37y/gvs/site/config.js /go/src/github.com/k37y/gvs/site/config.js
+COPY --from=builder /go/src/github.com/k37y/gvs/skills /go/src/github.com/k37y/gvs/skills
 
 ENTRYPOINT ["gvs"]
