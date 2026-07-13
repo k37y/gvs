@@ -106,41 +106,74 @@ class FormHistoryManager {
 	}
 }
 
-// Dark Mode Toggle Functionality
-class ThemeManager {
-	constructor() {
-		this.themeToggle = document.getElementById('themeToggle');
-		this.themeIcon = document.getElementById('themeIcon');
-		this.currentTheme = localStorage.getItem('theme') || 'light';
-		
-		this.init();
+// View switching
+function showView(name, event) {
+	if (event) event.preventDefault();
+	['scanner', 'result', 'history'].forEach(v => {
+		document.getElementById(v + '-view').style.display = v === name ? '' : 'none';
+	});
+	document.querySelectorAll('.gvs-nav-link').forEach(l => {
+		l.classList.toggle('gvs-nav-active', l.dataset.view === name);
+	});
+	if (name === 'history') renderScanHistory();
+}
+
+function showScannerView(event) { showView('scanner', event); }
+function showHistoryView(event) { showView('history', event); }
+function showResultView(event) { showView('result', event); }
+
+// Scan history management
+function saveScanToHistory(scanData) {
+	let history = JSON.parse(localStorage.getItem('gvs-scan-history') || '[]');
+	history.unshift({ ...scanData, timestamp: new Date().toISOString() });
+	if (history.length > 50) history = history.slice(0, 50);
+	localStorage.setItem('gvs-scan-history', JSON.stringify(history));
+}
+
+function clearScanHistory() {
+	localStorage.removeItem('gvs-scan-history');
+	renderScanHistory();
+}
+
+function renderScanHistory() {
+	const body = document.getElementById('historyCardBody');
+	const history = JSON.parse(localStorage.getItem('gvs-scan-history') || '[]');
+	if (!history.length) {
+		body.innerHTML = '<div class="pf-v6-c-empty-state"><div class="pf-v6-c-empty-state__content"><div class="pf-v6-c-empty-state__body">No scan history yet. Run a scan to see results here.</div></div></div>';
+		return;
 	}
-	
-	init() {
-		this.applyTheme(this.currentTheme);
-		this.themeToggle.addEventListener('click', () => this.toggleTheme());
+	let html = '<table class="gvs-history-table"><thead><tr><th>Date</th><th>Repository</th><th>Branch</th><th>CVE</th><th>Status</th><th>Feedback</th><th></th></tr></thead><tbody>';
+	history.forEach((item, i) => {
+		const date = new Date(item.timestamp).toLocaleDateString();
+		const repo = item.repo || '';
+		const branch = item.branchOrCommit || '-';
+		const vuln = String(item.isVulnerable).toLowerCase();
+		let label = '<span class="gvs-label gvs-label-warning">unknown</span>';
+		if (vuln === 'true') label = '<span class="gvs-label gvs-label-danger">true</span>';
+		else if (vuln === 'false') label = '<span class="gvs-label gvs-label-success">false</span>';
+		const feedback = item.feedback || '-';
+		html += `<tr><td>${date}</td><td>${repo}</td><td>${branch}</td><td>${item.cve || '-'}</td><td>${label}</td><td>${feedback}</td><td><button class="pf-v6-c-button pf-m-link pf-m-small" onclick="loadHistoryScan(${i})">View</button></td></tr>`;
+	});
+	html += '</tbody></table>';
+	body.innerHTML = html;
+}
+
+function loadHistoryScan(index) {
+	const history = JSON.parse(localStorage.getItem('gvs-scan-history') || '[]');
+	const item = history[index];
+	if (!item) return;
+	showResultView();
+	const outputDiv = document.getElementById('output');
+	const progressContent = document.getElementById('resultProgressContent');
+	progressContent.innerHTML = 'Loaded from scan history.\n';
+	if (item.output) {
+		outputDiv.innerHTML = `<pre>${syntaxHighlight(JSON.stringify(item.output, null, 2))}</pre>`;
 	}
-	
-	toggleTheme() {
-		this.currentTheme = this.currentTheme === 'light' ? 'dark' : 'light';
-		this.applyTheme(this.currentTheme);
-		localStorage.setItem('theme', this.currentTheme);
-	}
-	
-	applyTheme(theme) {
-		document.documentElement.setAttribute('data-theme', theme);
-		this.themeIcon.className = theme === 'light' ? 'theme-icon moon' : 'theme-icon sun';
-		this.themeToggle.setAttribute('aria-label', 
-			theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'
-		);
-	}
+	document.getElementById("reportContainer").style.display = "block";
 }
 
 // Initialize all components on DOM content loaded
 document.addEventListener('DOMContentLoaded', function() {
-	// Initialize theme manager
-	new ThemeManager();
-	
 	// Initialize form history manager
 	window.formHistory = new FormHistoryManager();
 	
@@ -288,12 +321,14 @@ function runScan() {
 	const algo = document.getElementById("algo").value;
 	const graph = !!(cve || (library && symbol));
 	const outputDiv = document.getElementById("output");
-	const progressContent = document.getElementById("progressContent");
+	const progressContent = document.getElementById("resultProgressContent");
 	const scanButton = document.getElementById("scanButton");
 
-	outputDiv.style.display = "none";
-	outputDiv.className = "result-card";
-	outputDiv.innerHTML = "";
+	// Switch to Result view
+	showResultView();
+
+	outputDiv.className = "gvs-scan-output";
+	outputDiv.innerHTML = '<div class="gvs-log-placeholder">Waiting for results...</div>';
 	
 	// Hide report button when starting a new scan
 	document.getElementById("reportContainer").style.display = "none";
@@ -301,8 +336,6 @@ function runScan() {
 	// Clear previous progress output and initialize new scan
 	const timestamp = new Date().toLocaleTimeString();
 	progressContent.innerHTML = `Scan Started at ${timestamp}\nInitializing scan...\n`;
-	// Auto-expand progress card when scan starts
-	expandProgressCard();
 	
 	scanButton.disabled = true;
 	scanButton.innerText = "Scanning...";
@@ -335,10 +368,7 @@ function runScan() {
 
 	// Use callgraph endpoint if CVE is provided, or if library and symbol are provided for direct scanning
 	if (repo && branchOrCommit && (cve || (library && symbol))) {
-		const hostUrl = `${location.protocol}//${location.host}`;
 		outputDiv.innerHTML = getRandomSustainingQuestion();
-		outputDiv.classList.add("alert-warning");
-		outputDiv.style.display = "block";
 
 		fetch(`${API_BASE_URL}/callgraph`, {
 			method: "POST",
@@ -379,9 +409,6 @@ function runScan() {
 		const timeoutId = setTimeout(() => controller.abort(), 360000);
 
 		outputDiv.innerHTML = getRandomSustainingQuestion();
-		outputDiv.classList.remove("alert-success", "alert-danger", "alert-warning");
-		outputDiv.classList.add("alert-warning");
-		outputDiv.style.display = "block";
 
 		fetch(`${API_BASE_URL}/scan`, {
 			method: "POST",
@@ -412,8 +439,6 @@ function runScan() {
 					? "Request timed out (360 sec)"
 					: error.message || error;
 				outputDiv.innerHTML = `<strong>Error:</strong> ${errMsg}`;
-				outputDiv.classList.add("alert-danger");
-				outputDiv.style.display = "block";
 				
 				// Add error message to progress output
 				progressContent.innerHTML += `Network Error: ${errMsg}\n`;
@@ -426,7 +451,7 @@ function runScan() {
 
 	function pollStatus(taskId, showProgress) {
 		const pollInterval = 3000;
-		const progressContent = document.getElementById("progressContent");
+		const progressContent = document.getElementById("resultProgressContent");
 		
 		// Always start progress streaming
 		startProgressStream(taskId);
@@ -442,12 +467,10 @@ function runScan() {
 				.then(response => response.json())
 				.then(statusData => {
 					if (statusData.error) {
-						outputDiv.innerHTML = "";
 						outputDiv.innerHTML = `<strong>Error:</strong> ${statusData.error}<br>`;
-						outputDiv.classList.add("alert-danger");
 						
 						// Add error message to progress output
-						const progressContent = document.getElementById("progressContent");
+						const progressContent = document.getElementById("resultProgressContent");
 						const timestamp = new Date().toLocaleTimeString();
 						progressContent.innerHTML += `Scan Failed at ${timestamp}: ${statusData.error}\n`;
 						progressContent.scrollTop = progressContent.scrollHeight;
@@ -458,17 +481,22 @@ function runScan() {
 					}
 
 					if (statusData.status === "completed") {
-						outputDiv.innerHTML = "";
 						outputDiv.innerHTML = `<pre>${syntaxHighlight(JSON.stringify(statusData.output, null, 2))}</pre>`;
-						outputDiv.classList.remove("alert-warning");
-						outputDiv.classList.add("alert-success");
 						clearInterval(intervalId);
 						
 						// Show report inaccuracy button
 						document.getElementById("reportContainer").style.display = "block";
 						
+						saveScanToHistory({
+							repo: document.getElementById("repo").value.trim(),
+							branchOrCommit: document.getElementById("branchOrCommit").value.trim(),
+							cve: document.getElementById("cve").value.trim(),
+							isVulnerable: statusData.output?.IsVulnerable,
+							output: statusData.output
+						});
+						
 						// Add completion message to progress output
-						const progressContent = document.getElementById("progressContent");
+						const progressContent = document.getElementById("resultProgressContent");
 						const timestamp = new Date().toLocaleTimeString();
 						progressContent.innerHTML += `Scan Completed Successfully at ${timestamp}\n`;
 						progressContent.scrollTop = progressContent.scrollHeight;
@@ -485,12 +513,10 @@ function runScan() {
 					outputDiv.scrollTop = outputDiv.scrollHeight;
 				})
 				.catch(err => {
-					outputDiv.innerHTML = "";
-					outputDiv.innerHTML = `<br><strong>Error polling status:</strong> ${err.message}<br>`;
-					outputDiv.classList.add("alert-danger");
+					outputDiv.innerHTML = `<strong>Error polling status:</strong> ${err.message}<br>`;
 					
 					// Add error message to progress output
-					const progressContent = document.getElementById("progressContent");
+					const progressContent = document.getElementById("resultProgressContent");
 					progressContent.innerHTML += `Network Error: ${err.message}\n`;
 					progressContent.scrollTop = progressContent.scrollHeight;
 					
@@ -517,7 +543,7 @@ function runScan() {
 }
 
 function startProgressStream(taskId) {
-	const progressContent = document.getElementById("progressContent");
+	const progressContent = document.getElementById("resultProgressContent");
 
 	// Use Server-Sent Events for real-time progress updates
 	const eventSource = new EventSource(`${API_BASE_URL}/progress/${taskId}`);
@@ -539,45 +565,34 @@ function startProgressStream(taskId) {
 	window.currentProgressStream = eventSource;
 }
 
-function handleCardClick(event) {
-	// Prevent expansion when clicking on form elements
-	const clickableElements = ['INPUT', 'SELECT', 'BUTTON', 'LABEL', 'SPAN'];
-	const isFormElement = clickableElements.includes(event.target.tagName);
-	const isTooltip = event.target.hasAttribute('data-bs-toggle');
-	
-	if (isFormElement || isTooltip) {
-		return;
-	}
-	
-	toggleProgressExpansion();
+function openFeedbackModal() {
+	document.getElementById('feedbackModal').style.display = '';
 }
 
-function toggleProgressExpansion() {
-	const progressContent = document.getElementById("progressContent");
-	
-	if (progressContent.classList.contains("collapsed")) {
-		expandProgressCard();
-	} else {
-		collapseProgressCard();
+function closeFeedbackModal(event) {
+	if (event && event.target === document.getElementById('feedbackModal')) {
+		document.getElementById('feedbackModal').style.display = 'none';
 	}
 }
 
-function expandProgressCard() {
-	const progressContent = document.getElementById("progressContent");
-	progressContent.classList.remove("collapsed");
-}
+function submitFeedback(choice) {
+	document.getElementById('feedbackModal').style.display = 'none';
+	const feedbackLabels = { gvs_only: 'GVS was right', claude_only: 'Claude was right', both: 'Both were right' };
+	const feedbackText = feedbackLabels[choice] || choice;
 
-function collapseProgressCard() {
-	const progressContent = document.getElementById("progressContent");
-	progressContent.classList.add("collapsed");
-}
+	let history = JSON.parse(localStorage.getItem('gvs-scan-history') || '[]');
+	if (history.length > 0) {
+		history[0].feedback = feedbackText;
+		localStorage.setItem('gvs-scan-history', JSON.stringify(history));
+	}
 
-function resetProgressCard() {
-	const progressContent = document.getElementById("progressContent");
-	
-	// Reset to collapsed state with placeholder (only used on page load)
-	collapseProgressCard();
-	progressContent.innerHTML = '<div class="progress-placeholder">Server progress will appear here during scans. Progress from previous scans is preserved until the next scan starts.</div>';
+	const repo = document.getElementById("repo").value.trim();
+	const cve = document.getElementById("cve").value.trim();
+	const labels = { gvs_only: 'gvs-correct', claude_only: 'claude-correct', both: 'both-correct' };
+	const title = `Claude Feedback: ${cve || repo} - ${feedbackText}`;
+	const body = `## Feedback\n- **Choice**: ${feedbackText}\n- **Repository**: ${repo}\n- **CVE**: ${cve || 'N/A'}`;
+	const url = `https://github.com/k37y/gvs/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}&labels=${labels[choice]}`;
+	window.open(url, '_blank');
 }
 
 function reportInaccuracy() {
