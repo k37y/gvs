@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +19,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/vertex"
 	"golang.org/x/tools/go/callgraph"
+	"golang.org/x/tools/go/ssa"
 )
 
 type claudeConfig struct {
@@ -68,6 +71,13 @@ func VerifyAndSummarizeWithClaude(result *Result, repoDir string) {
 		&grepCodeTool{repoDir: repoDir},
 		&readFileTool{repoDir: repoDir},
 		&listFilesTool{repoDir: repoDir},
+	}
+	if result.SsaProg != nil {
+		tools = append(tools, &findImplementationsTool{prog: result.SsaProg})
+	}
+	if result.CgGraph != nil {
+		modPath := readModulePath(repoDir)
+		tools = append(tools, &findCallersTool{graph: result.CgGraph, repoModulePath: modPath})
 	}
 
 	runner := client.Beta.Messages.NewToolRunner(tools, anthropic.BetaToolRunnerParams{
@@ -294,7 +304,13 @@ func FormatCallTraces(result *Result) string {
 func findEdgeDescription(caller, callee *callgraph.Node) string {
 	for _, edge := range caller.Out {
 		if edge.Callee == callee {
-			return edge.Description()
+			desc := edge.Description()
+			if edge.Site != nil && edge.Site.Common().IsInvoke() {
+				ifaceType := edge.Site.Common().Value.Type().String()
+				methodName := edge.Site.Common().Method.Name()
+				return fmt.Sprintf("%s via interface %s.%s", desc, ifaceType, methodName)
+			}
+			return desc
 		}
 	}
 	return "unknown dispatch"
@@ -474,6 +490,294 @@ func (t *listFilesTool) Execute(ctx context.Context, input json.RawMessage) ([]a
 	}
 	fmt.Fprintf(os.Stderr, "[claude] list_files result: %d files\n", len(files))
 	return textResult(result)
+}
+
+// find_implementations tool
+type findImplementationsTool struct {
+	prog *ssa.Program
+}
+
+func (t *findImplementationsTool) Name() string { return "find_implementations" }
+func (t *findImplementationsTool) Description() string {
+	return "Given an interface type name (e.g. \"io.Writer\"), find all concrete types in the program that implement it and report whether each is instantiated (used as an interface value). Helps detect CHA false positives where a type implements an interface but is never allocated."
+}
+func (t *findImplementationsTool) InputSchema() anthropic.BetaToolInputSchemaParam {
+	return anthropic.BetaToolInputSchemaParam{
+		Properties: map[string]any{
+			"interface_type": map[string]any{"type": "string", "description": "Full interface type name, e.g. \"io.Writer\" or \"golang.org/x/net/idna.Transformer\""},
+		},
+		Required: []string{"interface_type"},
+	}
+}
+
+func (t *findImplementationsTool) Execute(ctx context.Context, input json.RawMessage) ([]anthropic.BetaToolResultBlockParamContentUnion, error) {
+	var params struct {
+		InterfaceType string `json:"interface_type"`
+	}
+	if err := json.Unmarshal(input, &params); err != nil {
+		return textResult(fmt.Sprintf("error: %v", err))
+	}
+	if t.prog == nil {
+		return textResult("error: SSA program not available")
+	}
+
+	pkgPath, typeName := splitTypeName(params.InterfaceType)
+	if pkgPath == "" || typeName == "" {
+		return textResult(fmt.Sprintf("error: cannot parse interface type %q (expected \"pkg.TypeName\")", params.InterfaceType))
+	}
+
+	var ifaceType *types.Interface
+	for _, pkg := range t.prog.AllPackages() {
+		if pkg.Pkg.Path() == pkgPath {
+			obj := pkg.Pkg.Scope().Lookup(typeName)
+			if obj == nil {
+				continue
+			}
+			if named, ok := obj.Type().(*types.Named); ok {
+				if iface, ok := named.Underlying().(*types.Interface); ok {
+					ifaceType = iface
+					break
+				}
+			}
+		}
+	}
+	if ifaceType == nil {
+		return textResult(fmt.Sprintf("interface %q not found in loaded packages", params.InterfaceType))
+	}
+
+	runtimeTypes := make(map[string]bool)
+	for _, rt := range t.prog.RuntimeTypes() {
+		runtimeTypes[rt.String()] = true
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Concrete types implementing %s:\n\n", params.InterfaceType))
+	found := 0
+	for _, pkg := range t.prog.AllPackages() {
+		scope := pkg.Pkg.Scope()
+		for _, name := range scope.Names() {
+			obj := scope.Lookup(name)
+			if obj == nil {
+				continue
+			}
+			named, ok := obj.Type().(*types.Named)
+			if !ok {
+				continue
+			}
+			if _, isIface := named.Underlying().(*types.Interface); isIface {
+				continue
+			}
+
+			T := named
+			ptrT := types.NewPointer(T)
+			implements := types.Implements(T, ifaceType) || types.Implements(ptrT, ifaceType)
+			if !implements {
+				continue
+			}
+
+			found++
+			instantiated := runtimeTypes[T.String()] || runtimeTypes[ptrT.String()]
+			status := "instantiated: NO"
+			if instantiated {
+				status = "instantiated: yes"
+			}
+
+			loc := "unknown"
+			if pos := obj.Pos(); pos.IsValid() {
+				position := pkg.Prog.Fset.Position(pos)
+				if position.IsValid() {
+					loc = fmt.Sprintf("%s:%d", position.Filename, position.Line)
+				}
+			}
+			b.WriteString(fmt.Sprintf("  - %s (%s) at %s\n", T.String(), status, loc))
+			if found >= 50 {
+				b.WriteString("  ... (truncated at 50 types)\n")
+				break
+			}
+		}
+		if found >= 50 {
+			break
+		}
+	}
+
+	if found == 0 {
+		b.WriteString("  (no concrete types found implementing this interface)\n")
+	}
+
+	fmt.Fprintf(os.Stderr, "[claude] find_implementations result: %d types for %s\n", found, params.InterfaceType)
+	return textResult(b.String())
+}
+
+// splitTypeName splits "io.Writer" into ("io", "Writer") and
+// "golang.org/x/net/idna.Transformer" into ("golang.org/x/net/idna", "Transformer")
+func splitTypeName(fullName string) (pkgPath, typeName string) {
+	idx := strings.LastIndex(fullName, ".")
+	if idx < 0 {
+		return "", ""
+	}
+	return fullName[:idx], fullName[idx+1:]
+}
+
+// find_callers tool
+type findCallersTool struct {
+	graph          *callgraph.Graph
+	repoModulePath string
+}
+
+func (t *findCallersTool) Name() string { return "find_callers" }
+func (t *findCallersTool) Description() string {
+	return "Given a function or method name, find all callers in the call graph using reverse traversal (up to N hops). Returns the chain of callers from the target back toward entry points. Useful for detecting false negatives when the scanner found no forward path."
+}
+func (t *findCallersTool) InputSchema() anthropic.BetaToolInputSchemaParam {
+	return anthropic.BetaToolInputSchemaParam{
+		Properties: map[string]any{
+			"symbol":    map[string]any{"type": "string", "description": "Function/method name to search for, e.g. \"golang.org/x/net/html.Parse\" or \"(*net/http.Client).Do\""},
+			"max_depth": map[string]any{"type": "integer", "description": "Max hops backward (default: 5)"},
+		},
+		Required: []string{"symbol"},
+	}
+}
+
+func (t *findCallersTool) Execute(ctx context.Context, input json.RawMessage) ([]anthropic.BetaToolResultBlockParamContentUnion, error) {
+	var params struct {
+		Symbol   string `json:"symbol"`
+		MaxDepth int    `json:"max_depth"`
+	}
+	if err := json.Unmarshal(input, &params); err != nil {
+		return textResult(fmt.Sprintf("error: %v", err))
+	}
+	if t.graph == nil {
+		return textResult("error: call graph not available")
+	}
+	if params.MaxDepth <= 0 {
+		params.MaxDepth = 5
+	}
+	if params.MaxDepth > 10 {
+		params.MaxDepth = 10
+	}
+
+	var targets []*callgraph.Node
+	for _, node := range t.graph.Nodes {
+		if node.Func == nil {
+			continue
+		}
+		funcStr := ""
+		func() {
+			defer func() { recover() }()
+			funcStr = node.Func.String()
+		}()
+		if funcStr != "" && strings.Contains(funcStr, params.Symbol) {
+			targets = append(targets, node)
+		}
+	}
+
+	if len(targets) == 0 {
+		return textResult(fmt.Sprintf("No nodes matching %q found in the call graph.", params.Symbol))
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Callers of %q (reverse BFS, max_depth=%d):\n\n", params.Symbol, params.MaxDepth))
+
+	totalCallers := 0
+	for _, target := range targets {
+		if len(targets) > 1 {
+			targetName := "unknown"
+			func() {
+				defer func() { recover() }()
+				targetName = target.Func.String()
+			}()
+			b.WriteString(fmt.Sprintf("--- Target: %s ---\n", targetName))
+		}
+
+		type bfsEntry struct {
+			node  *callgraph.Node
+			depth int
+		}
+		visited := map[*callgraph.Node]bool{target: true}
+		queue := []bfsEntry{}
+
+		for _, inEdge := range target.In {
+			if !visited[inEdge.Caller] {
+				visited[inEdge.Caller] = true
+				queue = append(queue, bfsEntry{inEdge.Caller, 1})
+			}
+		}
+
+		for len(queue) > 0 && totalCallers < 50 {
+			entry := queue[0]
+			queue = queue[1:]
+
+			node := entry.node
+			depth := entry.depth
+
+			funcName := "unknown"
+			location := "unknown"
+			if node.Func != nil {
+				func() {
+					defer func() { recover() }()
+					funcName = node.Func.String()
+				}()
+				if node.Func.Prog != nil {
+					pos := node.Func.Prog.Fset.Position(node.Func.Pos())
+					if pos.IsValid() {
+						location = fmt.Sprintf("%s:%d", pos.Filename, pos.Line)
+					}
+				}
+			}
+
+			edgeDesc := ""
+			for _, outEdge := range node.Out {
+				if visited[outEdge.Callee] {
+					edgeDesc = outEdge.Description()
+					break
+				}
+			}
+
+			isEntry := isEntryPointLike(node, t.repoModulePath)
+			entryMarker := ""
+			if isEntry {
+				entryMarker = " ** ENTRY POINT **"
+			}
+
+			b.WriteString(fmt.Sprintf("  Depth %d: %s at %s [%s]%s\n", depth, funcName, location, edgeDesc, entryMarker))
+			totalCallers++
+
+			if depth < params.MaxDepth {
+				for _, inEdge := range node.In {
+					if !visited[inEdge.Caller] {
+						visited[inEdge.Caller] = true
+						queue = append(queue, bfsEntry{inEdge.Caller, depth + 1})
+					}
+				}
+			}
+		}
+		b.WriteString("\n")
+
+		if totalCallers >= 50 {
+			b.WriteString("  ... (truncated at 50 callers)\n")
+			break
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "[claude] find_callers result: %d callers for %s\n", totalCallers, params.Symbol)
+	return textResult(b.String())
+}
+
+func isEntryPointLike(node *callgraph.Node, repoModulePath string) bool {
+	if node.Func == nil || node.Func.Pkg == nil {
+		return false
+	}
+	name := node.Func.Name()
+	if name == "main" || name == "init" {
+		return true
+	}
+	if isHTTPHandler(node.Func.Signature) {
+		return true
+	}
+	if node.Func.Pkg.Pkg.Name() == "main" && ast.IsExported(name) {
+		return true
+	}
+	return false
 }
 
 func LogClaudeStatus() {

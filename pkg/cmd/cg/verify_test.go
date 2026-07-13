@@ -529,6 +529,127 @@ func TestSafePath(t *testing.T) {
 	}
 }
 
+func TestSplitTypeName(t *testing.T) {
+	tests := []struct {
+		input    string
+		wantPkg  string
+		wantType string
+	}{
+		{"io.Writer", "io", "Writer"},
+		{"golang.org/x/net/idna.Transformer", "golang.org/x/net/idna", "Transformer"},
+		{"net/http.Handler", "net/http", "Handler"},
+		{"Writer", "", ""},
+		{"", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			pkg, typ := splitTypeName(tt.input)
+			if pkg != tt.wantPkg {
+				t.Errorf("pkg = %q, want %q", pkg, tt.wantPkg)
+			}
+			if typ != tt.wantType {
+				t.Errorf("type = %q, want %q", typ, tt.wantType)
+			}
+		})
+	}
+}
+
+func TestFindImplementationsTool_NilProg(t *testing.T) {
+	tool := &findImplementationsTool{prog: nil}
+	if tool.Name() != "find_implementations" {
+		t.Errorf("Name() = %q", tool.Name())
+	}
+	input, _ := json.Marshal(map[string]string{"interface_type": "io.Writer"})
+	result, err := tool.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := result[0].OfText.Text
+	if !strings.Contains(text, "SSA program not available") {
+		t.Errorf("expected SSA program error, got: %s", text)
+	}
+}
+
+func TestFindImplementationsTool_BadInput(t *testing.T) {
+	tool := &findImplementationsTool{prog: &ssa.Program{}}
+	input, _ := json.Marshal(map[string]string{"interface_type": "NoPackage"})
+	result, err := tool.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := result[0].OfText.Text
+	if !strings.Contains(text, "cannot parse") {
+		t.Errorf("expected parse error, got: %s", text)
+	}
+}
+
+func TestFindCallersTool_NilGraph(t *testing.T) {
+	tool := &findCallersTool{graph: nil}
+	if tool.Name() != "find_callers" {
+		t.Errorf("Name() = %q", tool.Name())
+	}
+	input, _ := json.Marshal(map[string]string{"symbol": "foo.Bar"})
+	result, err := tool.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := result[0].OfText.Text
+	if !strings.Contains(text, "call graph not available") {
+		t.Errorf("expected graph error, got: %s", text)
+	}
+}
+
+func TestFindCallersTool_NoMatch(t *testing.T) {
+	graph := &callgraph.Graph{Nodes: make(map[*ssa.Function]*callgraph.Node)}
+	tool := &findCallersTool{graph: graph}
+	input, _ := json.Marshal(map[string]string{"symbol": "nonexistent.Symbol"})
+	result, err := tool.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := result[0].OfText.Text
+	if !strings.Contains(text, "No nodes matching") {
+		t.Errorf("expected no-match message, got: %s", text)
+	}
+}
+
+func TestFindCallersTool_DefaultMaxDepth(t *testing.T) {
+	graph := &callgraph.Graph{Nodes: make(map[*ssa.Function]*callgraph.Node)}
+	tool := &findCallersTool{graph: graph}
+
+	// max_depth=0 should default to 5
+	input, _ := json.Marshal(map[string]any{"symbol": "foo.Bar", "max_depth": 0})
+	result, err := tool.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := result[0].OfText.Text
+	if !strings.Contains(text, "No nodes matching") {
+		t.Errorf("expected no-match message, got: %s", text)
+	}
+
+	// max_depth > 10 should be capped
+	input, _ = json.Marshal(map[string]any{"symbol": "foo.Bar", "max_depth": 99})
+	result, err = tool.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text = result[0].OfText.Text
+	if !strings.Contains(text, "No nodes matching") {
+		t.Errorf("expected no-match message, got: %s", text)
+	}
+}
+
+func TestIsEntryPointLike(t *testing.T) {
+	prog := &ssa.Program{}
+	fn := &ssa.Function{Prog: prog}
+	node := &callgraph.Node{Func: fn}
+	// nil Pkg should return false
+	if isEntryPointLike(node, "") {
+		t.Error("expected false for nil Pkg")
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) > 0 && len(substr) > 0 && findSubstring(s, substr)
 }

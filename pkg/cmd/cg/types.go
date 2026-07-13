@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"golang.org/x/tools/go/callgraph"
+	"golang.org/x/tools/go/ssa"
 )
 
 const (
@@ -70,6 +71,8 @@ type Result struct {
 	ClaudeVerification *ClaudeVerification `json:"ClaudeVerification,omitempty"`
 	Mu                 sync.Mutex          `json:"-"`
 	Progress           bool                `json:"-"`
+	SsaProg            *ssa.Program        `json:"-"`
+	CgGraph            *callgraph.Graph    `json:"-"`
 }
 
 type VulnReport struct {

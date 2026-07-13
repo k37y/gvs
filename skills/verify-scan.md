@@ -35,17 +35,29 @@ The following traces show the call paths the scanner found from entry points to 
 
 ## Available Tools
 
-You have access to three tools for interactively exploring the repository. Use them to gather additional evidence before forming your final assessment. All paths are relative to the repository root.
+You have access to tools for interactively exploring the repository and querying the call graph. Use them to gather additional evidence before forming your final assessment. All file paths are relative to the repository root.
 
-- **grep_code**: Search for a regex pattern across the codebase. Useful for finding symbol usage, interface implementations, build tags, or reflection patterns the scanner may have missed.
-- **read_file**: Read a specific file (or a line range within it). Use this to inspect code around call sites, verify dead-code conditions, or check build constraints.
+- **grep_code**: Search for a regex pattern across the codebase. Useful for finding symbol usage, reflection patterns, build tags, or framework handler registrations.
+- **read_file**: Read a specific file (or a line range within it). Use to inspect code around call sites, verify dead-code conditions, or check build constraints.
 - **list_files**: List files in a directory. Use to understand project structure or find test files vs production files.
+- **find_implementations**: Given an interface type name (e.g., `"io.Writer"`), returns all concrete types in the program that implement it and whether each is instantiated (used as an interface value). Use to verify interface dispatch edges in call traces. One call replaces many grep searches for type instantiations.
+- **find_callers**: Given a function/method name, performs reverse BFS on the call graph to find all callers up to N hops backward. Returns caller chains with edge types and highlights entry points. Use when the scanner says "false" but you suspect a missed path -- the reverse traversal may reveal callers the forward BFS missed due to unrecognized entry points.
 
-**When to use tools:**
-- When the scanner says "false" but you suspect reflection or indirect usage: grep for the symbol name as a string literal.
-- When the scanner says "true" but the call trace uses "dynamic method call": read the file at the call site to check if the concrete type is actually instantiated.
-- When you see CHA over-approximation: grep for concrete instantiations of the interface type to verify if the path is real.
-- When build constraints might eliminate a path: read the top of the file to check `//go:build` tags.
+**You have a limited number of tool calls. Prioritize `find_implementations` and `find_callers` over manual `grep_code` searches when investigating interface dispatch or call reachability.**
+
+**Investigation priority for false positives (scanner says "true"):**
+1. Check call traces for edges marked `"dynamic method call via interface X.Y"`
+2. Call `find_implementations` for interface X
+3. If the callee's receiver type shows `"instantiated: NO"`, it is a false positive
+4. If instantiated, use `find_callers` to verify the caller chain is real
+5. Fall back to `grep_code` / `read_file` only if the above tools are unavailable
+
+**Investigation priority for false negatives (scanner says "false"):**
+1. Call `find_callers` for the vulnerable symbol to check if a reverse path exists
+2. If `find_callers` shows callers chaining back to an entry point, the scanner missed a path -- flag as false negative
+3. If `find_callers` shows callers reaching framework-pattern functions (gin, gRPC, echo, fiber, chi), the scanner missed an entry point
+4. Call `find_implementations` for the vulnerable interface (if applicable) to check if a concrete type IS instantiated but the scanner missed the type flow
+5. Use `grep_code` for reflection, string-literal symbol references, or plugin/driver registration patterns
 
 **Important: You MUST respond with the final JSON after you finish using tools. Do not end with a tool call.**
 
@@ -82,6 +94,15 @@ If the scanner says the repository is NOT vulnerable, check for these scenarios:
    - Type aliases or embedded types that expose the vulnerable method
    - Generic instantiations that use the vulnerable type
 
+6. **Missed type flow (VTA/RTA)**: When `find_implementations` shows a concrete type that implements the vulnerable interface AND is instantiated, but the scanner found no path, investigate whether the type flows to the call site through:
+   - Channel send/receive (type crosses goroutine boundaries)
+   - Global variable assignment (type stored globally, read elsewhere)
+   - Generic instantiation (type parameter resolved to the concrete type)
+   - Complex closures (type captured in a closure that is later invoked)
+   Use `find_callers` on intermediate functions to trace the actual path.
+
+7. **Scanner result is "unknown"**: If the scanner concluded `"unknown"`, investigate aggressively. Use `find_callers` to check if the vulnerable symbol has any callers. Use `find_implementations` to check if relevant interface types have instantiated implementors. The scanner could not determine status due to package load failures, missing entry points, or toolchain version ambiguity.
+
 ### Step 3: Check for false positives (scanner says "true" but may be wrong)
 
 If the scanner says the repository IS vulnerable, check for these scenarios:
@@ -91,7 +112,12 @@ If the scanner says the repository IS vulnerable, check for these scenarios:
    - Unreachable branches after early returns or panics
    - Compile-time constant guards that eliminate the path
 
-2. **Call graph over-approximation**: Especially with `cha` algorithm, which includes ALL methods matching an interface signature even when the concrete type implementing that interface is never instantiated in the codebase. Check the **Call Graph Traces** above for edges marked "dynamic method call" -- these are the most likely CHA false positives. Use `grep_code` to search for concrete instantiations of the receiver type and `read_file` to inspect the call site.
+2. **Call graph over-approximation**: Especially with `cha` algorithm, which includes ALL methods matching an interface signature even when the concrete type is never instantiated. Check the **Call Graph Traces** above for edges marked `"dynamic method call via interface X.Y"` -- these are the most likely false positives. Use `find_implementations` for the interface to check if the callee's concrete type is actually instantiated. If `"instantiated: NO"`, it is a false positive.
+
+   **Harder cases:**
+   - Factory patterns: Even if `find_implementations` shows a type is instantiated, check if the factory function that creates it is actually called. Use `find_callers` on the factory function.
+   - Dependency injection: Types registered via nil pointer casts like `container.Register((*Foo)(nil))` appear as instantiated but are not real allocations.
+   - Reflection: Cross-reference `find_implementations` results with `ReflectionRisks` for types created dynamically.
 
 3. **Build constraint mismatch**: Check for `//go:build` tags on files containing the vulnerable path. If the file has `//go:build windows` or similar platform constraints that don't apply, the code won't be compiled.
 
@@ -114,7 +140,7 @@ After completing your investigation (including any tool usage), respond with ONL
 
 Rules:
 - `reasoning`: 1-3 sentences. State your verdict and the key reason. Reference specific file:line if disagreeing.
-- `evidence`: Each entry must be `file:line: <what was found>`. Omit if you agree and have nothing to add.
+- `evidence`: Each entry must be `file:line: <what was found>` or a tool result summary. Always include at least one evidence entry, even if you agree with the scanner (cite the strongest supporting evidence such as call trace step, find_callers result, or instantiation status).
 - `claude_assessment`: Must be exactly `"true"`, `"false"`, or `"unknown"`.
 - Do NOT repeat the scanner result or restate the CVE description.
 

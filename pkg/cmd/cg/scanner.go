@@ -634,7 +634,7 @@ func (r *Result) checkDirectUsage(pkg, dir string, symbols []string, files []str
 	}
 
 	// Use callgraph library to build the graph directly
-	_, cg, err := r.generateCallGraphWithLibInternal(dir, files)
+	_, prog, cg, err := r.generateCallGraphWithLibInternal(dir, files)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to generate call graph in %s: %v", dir, err)
 		r.Errors = append(r.Errors, errMsg)
@@ -643,6 +643,9 @@ func (r *Result) checkDirectUsage(pkg, dir string, symbols []string, files []str
 		}
 		return "unknown"
 	}
+
+	r.SsaProg = prog
+	r.CgGraph = cg
 
 	// Get the module path for filtering entry points to repo code only
 	repoModulePath := getRepoModulePath(dir, r)
@@ -720,24 +723,24 @@ func getRepoModulePath(dir string, result *Result) string {
 
 // GenerateCallGraphForVisualization is a public wrapper for call graph generation for visualization
 func (r *Result) GenerateCallGraphForVisualization(dir string, files []string) (string, error) {
-	output, _, err := r.generateCallGraphWithLibInternal(dir, files)
+	output, _, _, err := r.generateCallGraphWithLibInternal(dir, files)
 	return output, err
 }
 
 // GenerateCallGraphObject returns the callgraph.Graph object for direct manipulation
 func (r *Result) GenerateCallGraphObject(dir string, files []string) (*callgraph.Graph, error) {
-	_, cg, err := r.generateCallGraphWithLibInternal(dir, files)
+	_, _, cg, err := r.generateCallGraphWithLibInternal(dir, files)
 	return cg, err
 }
 
 // generateCallGraphWithLib creates a call graph using the callgraph library (backward compat wrapper)
 func (r *Result) generateCallGraphWithLib(dir string, files []string) (string, error) {
-	output, _, err := r.generateCallGraphWithLibInternal(dir, files)
+	output, _, _, err := r.generateCallGraphWithLibInternal(dir, files)
 	return output, err
 }
 
-// generateCallGraphWithLibInternal creates a call graph and returns both string output and the graph object
-func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (string, *callgraph.Graph, error) {
+// generateCallGraphWithLibInternal creates a call graph and returns string output, SSA program, and graph object
+func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (string, *ssa.Program, *callgraph.Graph, error) {
 	// Load packages with comprehensive mode to handle all dependencies
 	// Use "./..." to load all packages in the module - this is required for
 	// RTA to properly track reflection-based calls like reflect.ValueOf(func).Call()
@@ -750,11 +753,11 @@ func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (s
 	// Load all packages in the module (like callgraph binary does by default)
 	pkgs, err := packages.Load(cfg, "./...")
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to load packages: %v", err)
+		return "", nil, nil, fmt.Errorf("failed to load packages: %v", err)
 	}
 
 	if len(pkgs) == 0 {
-		return "", nil, fmt.Errorf("no packages loaded")
+		return "", nil, nil, fmt.Errorf("no packages loaded")
 	}
 
 	// Check for package errors and try to filter out packages with issues
@@ -776,7 +779,7 @@ func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (s
 
 		pkgs, err = packages.Load(cfg, "./...")
 		if err != nil {
-			return "", nil, fmt.Errorf("failed to load packages with fallback: %v", err)
+			return "", nil, nil, fmt.Errorf("failed to load packages with fallback: %v", err)
 		}
 
 		for _, pkg := range pkgs {
@@ -787,7 +790,7 @@ func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (s
 	}
 
 	if len(validPkgs) == 0 {
-		return "", nil, fmt.Errorf("no valid packages found after loading")
+		return "", nil, nil, fmt.Errorf("no valid packages found after loading")
 	}
 
 	// Create SSA program with InstantiateGenerics for call graph analysis
@@ -816,7 +819,7 @@ func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (s
 		}
 	}
 
-	return output.String(), cg, nil
+	return output.String(), prog, cg, nil
 }
 
 // extractEntryPoints finds all main functions in the call graph (string-based, for backward compat)
