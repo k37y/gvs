@@ -4,137 +4,173 @@
 		<meta charset="UTF-8">
 		<meta name="viewport" content="width=device-width, initial-scale=1.0">
 		<title>Golang Vulnerability Scanner</title>
-		<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+		<link rel="stylesheet" href="https://unpkg.com/@patternfly/patternfly@6/patternfly.min.css">
 		<link href="styles.css" rel="stylesheet">
 	</head>
-	<body class="container mt-5">
-		<!-- Dark Mode Toggle Button -->
-		<button class="theme-toggle" id="themeToggle" aria-label="Toggle dark mode">
-			<span id="themeIcon" class="theme-icon moon"></span>
-		</button>
-		
-		<h2 class="text-center">Golang Vulnerability Scanner</h2>
-		<p class="text-center text-muted">Analyze your Golang-based repository for vulnerabilities</p>	
-		<div class="card p-3 shadow-sm mb-4">
-			<code class="d-block rounded p-3 text-start" style="font-size: 0.9em;">
-				Important fields that need to be checked in the JSON output<br><br>
-				<strong>IsVulnerable:</strong> It has three values - true, false, and unknown. If it is true, then the repository is vulnerable to the CVE ID. If it is false, then the repository is not vulnerable to the CVE ID. If it is unknown, then the scanning is failed.<br>
-				<strong>AffectedImports:</strong> It is a list of symbols that are affected by the CVE ID. It contains information about the symbol's name, version, and its library name.<br>
-				<strong>UsedImports:</strong> It is a list of symbols that are used in the repository. If it is empty, then the repository is not vulnerable to the CVE ID.<br>
-				<strong>ClaudeVerification:</strong> Independent AI audit by Claude. Contains verdict (agrees_with_scanner), assessment, confidence, concise reasoning, and file:line evidence.<br>
-			</code>
+	<body class="gvs-body">
+
+	<header class="gvs-topbar">
+		<div class="gvs-topbar-brand">
+			<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 196 145" width="24" height="18" aria-hidden="true" role="img"><path d="M127.47 83.49c12.51 0 30.61-2.58 30.61-17.46a14 14 0 0 0-.31-3.42l-7.45-32.36c-1.72-7.12-3.23-10.35-15.73-16.6C124.89 8.69 103.76.5 97.51.5 91.69.5 90 8 83.06 8c-6.68 0-11.64-5.6-17.89-5.6-6 0-9.91 4.09-12.93 12.5 0 0-8.41 23.72-9.49 27.16A6.43 6.43 0 0 0 42.53 44c0 9.22 36.3 39.45 84.94 39.45M160 72.07c1.73 8.19 1.73 9.05 1.73 10.13 0 14-15.74 21.77-36.43 21.77C78.54 104 37.58 76.6 37.58 58.49a18.45 18.45 0 0 1 1.51-7.33C22.27 52 .5 55 .5 74.22c0 31.48 74.59 70.28 133.65 70.28 45.28 0 56.7-20.48 56.7-36.65 0-12.72-11-27.16-30.83-35.78" fill="#e00"/><path d="M160 72.07c1.73 8.19 1.73 9.05 1.73 10.13 0 14-15.74 21.77-36.43 21.77C78.54 104 37.58 76.6 37.58 58.49a18.45 18.45 0 0 1 1.51-7.33l3.66-9.06A6.43 6.43 0 0 0 42.53 44c0 9.22 36.3 39.45 84.94 39.45 12.51 0 30.61-2.58 30.61-17.46a14 14 0 0 0-.31-3.42" fill="#000"/></svg>
+			<span style="font-size:var(--pf-t--global--font--size--heading--h2); white-space:nowrap; font-weight:700;">Golang Vulnerability Scanner</span>
+			<span style="background:#ee0000; color:#fff; font-size:0.75rem; font-weight:700; line-height:1; padding:0.2rem 0.5rem; border-radius:1rem; letter-spacing:0.03em; align-self:center;">AI</span>
 		</div>
-		<div class="card p-4 shadow-sm expandable-card" onclick="handleCardClick(event)">
-			<div class="card-header-section">
-				<div class="row mb-3 align-items-end">
-					<div class="col-md-5">
-						<label for="repo" class="form-label">
-							Repository URL
-							<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted" 
-								  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
-								  data-bs-toggle="tooltip" data-bs-placement="top" 
-								  title="Git repository URL from GitHub, GitLab, Bitbucket, etc. Must be publicly accessible.">?</span>
-						</label>
-						<input type="text" id="repo" class="form-control" placeholder="Enter repo URL" value="https://github.com/openshift/sriov-network-device-plugin">
-					</div>
-					<div class="col-md-2">
-						<label for="branchOrCommit" class="form-label">
-							Branch or Commit ID
-							<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted" 
-								  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
-								  data-bs-toggle="tooltip" data-bs-placement="top" 
-								  title="Branch name (e.g., main, master, develop) or commit hash (e.g., abc123f, 1a2b3c4d5e6f7a8b). For commit hashes, use 7+ character SHA hashes for reliable detection.">?</span>
-						</label>
-						<input type="text" id="branchOrCommit" class="form-control" placeholder="Branch or commit id" value="release-4.18">
-					</div>
-				<div class="col-md-2">
-					<label for="cve" class="form-label">
-						CVE ID (optional)
-						<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted" 
-							  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
-							  data-bs-toggle="tooltip" data-bs-placement="top" 
-							  title="Enter either a CVE ID (e.g., CVE-2024-45338) or GOCVE ID (e.g., GO-2024-3333). If left empty, scans for all known Go vulnerabilities in the repository.">?</span>
-					</label>
-					<input type="text" id="cve" class="form-control" placeholder="Enter CVE ID or GOCVE ID" value="CVE-2024-45339">
+		<nav class="gvs-nav">
+			<a href="#" class="gvs-nav-link gvs-nav-active" data-view="scanner" onclick="showView('scanner',event)">New Scan</a>
+			<a href="#" class="gvs-nav-link" data-view="result" onclick="showView('result',event)">Result</a>
+			<a href="#" class="gvs-nav-link" data-view="history" onclick="showView('history',event)">Scan History</a>
+		</nav>
+	</header>
+
+	<!-- Scanner View -->
+	<div id="scanner-view" class="gvs-view">
+		<div class="gvs-main-card gvs-gopher-bg">
+			<div class="gvs-card-body gvs-two-col">
+				<div class="gvs-col gvs-col-form">
+					<h1 class="gvs-section-title">Scan Configuration</h1>
+					<form class="pf-v6-c-form" onsubmit="return false;">
+						<div class="pf-v6-c-form__group">
+							<div class="pf-v6-c-form__group-label">
+								<label class="pf-v6-c-form__label" for="repo">
+									<span class="pf-v6-c-form__label-text">Repository URL</span>
+								</label>
+							</div>
+							<div class="pf-v6-c-form__group-control">
+								<span class="pf-v6-c-form-control"><input type="text" id="repo" placeholder="https://github.com/org/repo" value="https://github.com/openshift/sriov-network-device-plugin"></span>
+							</div>
+						</div>
+						<div class="pf-v6-l-grid pf-m-gutter">
+							<div class="pf-v6-l-grid__item pf-m-6-col-on-md">
+								<div class="pf-v6-c-form__group">
+									<div class="pf-v6-c-form__group-label"><label class="pf-v6-c-form__label" for="branchOrCommit"><span class="pf-v6-c-form__label-text">Branch / Commit</span></label></div>
+									<div class="pf-v6-c-form__group-control"><span class="pf-v6-c-form-control"><input type="text" id="branchOrCommit" placeholder="e.g., main, release-4.18" value="release-4.18"></span></div>
+								</div>
+							</div>
+							<div class="pf-v6-l-grid__item pf-m-6-col-on-md">
+								<div class="pf-v6-c-form__group">
+									<div class="pf-v6-c-form__group-label"><label class="pf-v6-c-form__label" for="cve"><span class="pf-v6-c-form__label-text">CVE ID / Go CVE ID</span></label></div>
+									<div class="pf-v6-c-form__group-control"><span class="pf-v6-c-form-control"><input type="text" id="cve" placeholder="CVE-2024-XXXXX" value="CVE-2024-45339"></span></div>
+								</div>
+							</div>
+						</div>
+						<div class="pf-v6-c-form__group">
+							<div class="pf-v6-c-form__group-label"><label class="pf-v6-c-form__label" for="algo"><span class="pf-v6-c-form__label-text">Algorithm</span></label></div>
+							<div class="pf-v6-c-form__group-control"><span class="pf-v6-c-form-control"><select id="algo"><option value="rta" selected>RTA</option><option value="vta">VTA</option><option value="cha">CHA</option><option value="static">Static</option></select></span></div>
+						</div>
+						<details class="gvs-advanced">
+							<summary>Advanced options</summary>
+							<div class="gvs-advanced-fields">
+								<div class="pf-v6-c-form__group">
+									<div class="pf-v6-c-form__group-label"><label class="pf-v6-c-form__label" for="library"><span class="pf-v6-c-form__label-text">Library</span></label></div>
+									<div class="pf-v6-c-form__group-control"><span class="pf-v6-c-form-control"><input type="text" id="library" placeholder="e.g., golang.org/x/net/html"></span></div>
+								</div>
+								<div class="pf-v6-c-form__group">
+									<div class="pf-v6-c-form__group-label"><label class="pf-v6-c-form__label" for="symbol"><span class="pf-v6-c-form__label-text">Symbol</span></label></div>
+									<div class="pf-v6-c-form__group-control"><span class="pf-v6-c-form-control"><input type="text" id="symbol" placeholder="e.g., Parse, Render"></span></div>
+								</div>
+								<div class="pf-v6-c-form__group">
+									<div class="pf-v6-c-form__group-label"><label class="pf-v6-c-form__label" for="fixversion"><span class="pf-v6-c-form__label-text">Fixed Version</span></label></div>
+									<div class="pf-v6-c-form__group-control"><span class="pf-v6-c-form-control"><input type="text" id="fixversion" placeholder="e.g., v1.9.4"></span></div>
+								</div>
+							</div>
+						</details>
+						<div class="pf-v6-c-form__group">
+							<button id="scanButton" class="pf-v6-c-button pf-m-primary pf-m-block" type="button" onclick="runScan()">Run Scan</button>
+						</div>
+					</form>
 				</div>
-				<div class="col-md-1">
-					<label for="algo" class="form-label">
-						Algo
-						<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted"
-							  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
-							  data-bs-toggle="tooltip" data-bs-placement="top"
-							  title="Call graph algorithm: RTA (default, best for reflection), VTA (precise but slower), CHA (fast but less precise), Static (fastest, direct calls only).">?</span>
-					</label>
-					<select id="algo" class="form-select">
-						<option value="rta" selected>RTA</option>
-						<option value="vta">VTA</option>
-						<option value="cha">CHA</option>
-						<option value="static">Static</option>
-					</select>
-				</div>
-				<div class="col-md-2 text-end">
-					<button id="scanButton" class="btn btn-primary w-100" onclick="runScan()">Run Scan</button>
-				</div>
-			</div>
-			<div class="row mb-3 align-items-end">
-				<div class="col-md-4">
-					<label for="library" class="form-label">
-						Library (optional)
-						<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted"
-							  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
-							  data-bs-toggle="tooltip" data-bs-placement="top"
-							  title="Specify a library path to scan (e.g., golang.org/x/net/html). When provided with Symbol, this takes precedence over CVE-based scanning.">?</span>
-					</label>
-					<input type="text" id="library" class="form-control" placeholder="e.g., golang.org/x/net/html">
-				</div>
-				<div class="col-md-5">
-					<label for="symbol" class="form-label">
-						Symbol (optional)
-						<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted"
-							  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
-							  data-bs-toggle="tooltip" data-bs-placement="top"
-							  title="Specify a symbol name to scan for (e.g., Parse, Render). Multiple symbols can be comma-separated. Used with Library field.">?</span>
-					</label>
-					<input type="text" id="symbol" class="form-control" placeholder="e.g., Parse, Render">
-				</div>
-				<div class="col-md-3">
-					<label for="fixversion" class="form-label">
-						Fixed Version (optional)
-						<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted"
-							  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
-							  data-bs-toggle="tooltip" data-bs-placement="top"
-							  title="Specify the fixed version for manual scans (e.g., v1.9.4). Used with Library and Symbol fields for version comparison.">?</span>
-					</label>
-					<input type="text" id="fixversion" class="form-control" placeholder="e.g., v1.9.4">
-				</div>
-				</div>
-			</div>
-			
-			<!-- Integrated Progress Section -->
-			<div class="progress-section">
-				<div id="progressContent" class="progress-content collapsed">
-					<div class="progress-placeholder">Server progress will appear here during scans. Progress from previous scans is preserved until the next scan starts.</div>
+				<div class="gvs-col gvs-col-ref">
+					<h3 class="gvs-section-title">Frequently Asked Questions</h3>
+					<dl class="gvs-ref-list">
+						<div class="gvs-ref-item"><dt>What does the GVS scanner analysis do?</dt><dd>It traces whether vulnerable symbols are actually reachable from your code's entry points using call graph analysis, then Claude AI independently verifies the result by inspecting source code, interface implementations, and caller chains to catch false positives and false negatives.</dd></div>
+						<div class="gvs-ref-item"><dt>What algorithms are available?</dt><dd>VTA (most precise, slowest), RTA (balanced), CHA (fast, less precise), Static (fastest, direct calls only)</dd></div>
+						<div class="gvs-ref-item"><dt>How is the final verdict determined?</dt><dd>The repository is confirmed vulnerable only when both GVS scanner and Claude AI independently agree. If either disagrees, the result is treated as not confirmed.
+							<table style="margin-top:0.5rem; border-collapse:collapse; width:100%; font-size:0.85rem;">
+								<thead><tr style="border-bottom:2px solid var(--pf-t--global--border--color--default);">
+									<th style="padding:0.3rem 0.5rem; text-align:left;">GVS Scanner</th>
+									<th style="padding:0.3rem 0.5rem; text-align:left; border-left:1px solid var(--pf-t--global--border--color--default);">Claude AI</th>
+									<th style="padding:0.3rem 0.5rem; text-align:left; border-left:1px solid var(--pf-t--global--border--color--default);">Final Verdict</th>
+								</tr></thead>
+								<tbody>
+									<tr style="background:rgba(200,0,0,0.08);"><td style="padding:0.3rem 0.5rem; color:#c9190b;">Vulnerable</td><td style="padding:0.3rem 0.5rem; border-left:1px solid var(--pf-t--global--border--color--default); color:#3e8635;">Agrees</td><td style="padding:0.3rem 0.5rem; border-left:1px solid var(--pf-t--global--border--color--default); color:#c9190b;"><strong>Vulnerable</strong></td></tr>
+									<tr style="background:rgba(62,134,53,0.08);"><td style="padding:0.3rem 0.5rem; color:#3e8635;">Not Vulnerable</td><td style="padding:0.3rem 0.5rem; border-left:1px solid var(--pf-t--global--border--color--default); color:#3e8635;">Agrees</td><td style="padding:0.3rem 0.5rem; border-left:1px solid var(--pf-t--global--border--color--default); color:#3e8635;"><strong>Not Vulnerable</strong></td></tr>
+									<tr style="background:rgba(62,134,53,0.08);"><td style="padding:0.3rem 0.5rem; color:#c9190b;">Vulnerable</td><td style="padding:0.3rem 0.5rem; border-left:1px solid var(--pf-t--global--border--color--default); color:#c9190b;">Disagrees</td><td style="padding:0.3rem 0.5rem; border-left:1px solid var(--pf-t--global--border--color--default); color:#3e8635;"><strong>Not Vulnerable</strong></td></tr>
+									<tr style="background:rgba(200,0,0,0.08);"><td style="padding:0.3rem 0.5rem; color:#3e8635;">Not Vulnerable</td><td style="padding:0.3rem 0.5rem; border-left:1px solid var(--pf-t--global--border--color--default); color:#c9190b;">Disagrees</td><td style="padding:0.3rem 0.5rem; border-left:1px solid var(--pf-t--global--border--color--default); color:#c9190b;"><strong>Vulnerable</strong></td></tr>
+								</tbody>
+							</table>
+						</dd></div>
+						<div class="gvs-ref-item"><dt>How long does a scan take?</dt><dd>Typically 2-10 minutes depending on repository size and algorithm chosen.</dd></div>
+						<div class="gvs-ref-item"><dt>Do I need Library/Symbol/Fix Version?</dt><dd>Only if bypassing CVE lookup. All three must be provided together.</dd></div>
+					</dl>
 				</div>
 			</div>
 		</div>
-	<div id="output" class="result-card"></div>
-	<div id="reportContainer" class="report-container" style="display: none;">
-		<button id="reportButton" class="btn btn-outline-secondary btn-sm" onclick="reportInaccuracy()">
-			Report Inaccuracy
-		</button>
 	</div>
+
+	<!-- Result View -->
+	<div id="result-view" class="gvs-view" style="display:none">
+		<div class="gvs-main-card gvs-result-card">
+			<div class="gvs-result-split">
+				<div class="gvs-result-pane gvs-log-pane">
+					<div class="gvs-pane-header">
+						<h3 class="gvs-pane-title">Progress Log</h3>
+						<button class="gvs-copy-btn" onclick="copyPaneContent(this, 'resultProgressContent')">Copy</button>
+					</div>
+					<div id="resultProgressContent" class="gvs-log-output">
+						<div class="gvs-log-placeholder">Progress will appear here when a scan starts.</div>
+					</div>
+				</div>
+				<div class="gvs-result-pane gvs-output-pane">
+					<div class="gvs-pane-header">
+						<h3 class="gvs-pane-title">Scan Result</h3>
+						<button class="gvs-copy-btn" onclick="copyPaneContent(this, 'output')">Copy</button>
+					</div>
+					<div id="output" class="gvs-scan-output">
+						<div class="gvs-log-placeholder">Scan results will appear here after completion.</div>
+					</div>
+					<div id="reportContainer" style="display:none; margin-top:8px; text-align:right;">
+						<button class="pf-v6-c-button pf-m-link pf-m-small" type="button" onclick="openFeedbackModal()">Feedback for Claude</button>
+						<button id="reportButton" class="pf-v6-c-button pf-m-link pf-m-small" type="button" onclick="reportInaccuracy()">Report Inaccuracy</button>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<!-- History View -->
+	<div id="history-view" class="gvs-view" style="display:none">
+		<div class="gvs-main-card">
+			<div class="gvs-card-header">
+				<div style="display:flex;justify-content:space-between;align-items:center">
+					<h1 class="gvs-card-title">Scan History</h1>
+					<button class="pf-v6-c-button pf-m-danger pf-m-small" type="button" onclick="clearScanHistory()">Clear All</button>
+				</div>
+				<p class="gvs-card-desc">Previously completed scans stored in your browser.</p>
+			</div>
+			<div class="gvs-card-body" id="historyCardBody">
+				<div class="pf-v6-c-empty-state">
+					<div class="pf-v6-c-empty-state__content">
+						<div class="pf-v6-c-empty-state__body">No scan history yet. Run a scan to see results here.</div>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<!-- Feedback Modal -->
+	<div id="feedbackModal" class="gvs-modal-overlay" style="display:none" onclick="closeFeedbackModal(event)">
+		<div class="gvs-modal">
+			<h3 class="gvs-modal-title">Feedback for Claude</h3>
+			<p class="gvs-modal-desc">How does GVS scan result compare with Claude's verification?</p>
+			<div class="gvs-modal-actions">
+				<button class="pf-v6-c-button pf-m-secondary" type="button" onclick="submitFeedback('gvs_only')">GVS was right</button>
+				<button class="pf-v6-c-button pf-m-secondary" type="button" onclick="submitFeedback('claude_only')">Claude was right</button>
+				<button class="pf-v6-c-button pf-m-primary" type="button" onclick="submitFeedback('both')">Both were right</button>
+			</div>
+		</div>
+	</div>
+
 	<script src="config.js"></script>
-		<script src="script.js"></script>
-		<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-		<script>
-			// Initialize Bootstrap tooltips
-			document.addEventListener('DOMContentLoaded', function () {
-				var tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
-				var tooltipList = tooltipTriggerList.map(function (tooltipTriggerEl) {
-					return new bootstrap.Tooltip(tooltipTriggerEl);
-				});
-			});
-		</script>
-		<footer class="mt-5 pb-4 text-center text-muted">&copy; 2025 Golang Vulnerability Scanner</footer>
+	<script src="script.js"></script>
 	</body>
 </html>

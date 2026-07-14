@@ -106,41 +106,82 @@ class FormHistoryManager {
 	}
 }
 
-// Dark Mode Toggle Functionality
-class ThemeManager {
-	constructor() {
-		this.themeToggle = document.getElementById('themeToggle');
-		this.themeIcon = document.getElementById('themeIcon');
-		this.currentTheme = localStorage.getItem('theme') || 'light';
-		
-		this.init();
+// View switching
+function showView(name, event) {
+	if (event) event.preventDefault();
+	['scanner', 'result', 'history'].forEach(v => {
+		document.getElementById(v + '-view').style.display = v === name ? '' : 'none';
+	});
+	document.querySelectorAll('.gvs-nav-link').forEach(l => {
+		l.classList.toggle('gvs-nav-active', l.dataset.view === name);
+	});
+	if (name === 'history') renderScanHistory();
+}
+
+function showScannerView(event) { showView('scanner', event); }
+function showHistoryView(event) { showView('history', event); }
+function showResultView(event) { showView('result', event); }
+
+// Scan history management
+function saveScanToHistory(scanData) {
+	let history = JSON.parse(localStorage.getItem('gvs-scan-history') || '[]');
+	history.unshift({ ...scanData, timestamp: new Date().toISOString() });
+	if (history.length > 50) history = history.slice(0, 50);
+	localStorage.setItem('gvs-scan-history', JSON.stringify(history));
+}
+
+function clearScanHistory() {
+	localStorage.removeItem('gvs-scan-history');
+	renderScanHistory();
+}
+
+function renderScanHistory() {
+	const body = document.getElementById('historyCardBody');
+	const history = JSON.parse(localStorage.getItem('gvs-scan-history') || '[]');
+	if (!history.length) {
+		body.innerHTML = '<div class="pf-v6-c-empty-state"><div class="pf-v6-c-empty-state__content"><div class="pf-v6-c-empty-state__body">No scan history yet. Run a scan to see results here.</div></div></div>';
+		return;
 	}
-	
-	init() {
-		this.applyTheme(this.currentTheme);
-		this.themeToggle.addEventListener('click', () => this.toggleTheme());
+	let html = '<table class="gvs-history-table"><thead><tr><th>Date</th><th>Repository</th><th>Branch</th><th>CVE</th><th>Algo</th><th>Status</th><th>AI Agrees</th><th>Feedback</th><th></th></tr></thead><tbody>';
+	history.forEach((item, i) => {
+		const date = new Date(item.timestamp).toLocaleDateString();
+		const repo = item.repo || '';
+		const branch = item.branchOrCommit || '-';
+		const algo = item.algo || '-';
+		const vuln = String(item.isVulnerable).toLowerCase();
+		let label = '<span class="gvs-label gvs-label-warning">unknown</span>';
+		if (vuln === 'true') label = '<span class="gvs-label gvs-label-danger">true</span>';
+		else if (vuln === 'false') label = '<span class="gvs-label gvs-label-success">false</span>';
+		const cv = item.output?.ClaudeVerification;
+		let aiLabel = '<span class="gvs-label gvs-label-warning">-</span>';
+		if (cv) {
+			aiLabel = cv.agrees_with_scanner
+				? '<span class="gvs-label gvs-label-success">Yes</span>'
+				: '<span class="gvs-label gvs-label-danger">No</span>';
+		}
+		const feedback = item.feedback || '-';
+		html += `<tr><td>${date}</td><td>${repo}</td><td>${branch}</td><td>${item.cve || '-'}</td><td>${algo}</td><td>${label}</td><td>${aiLabel}</td><td>${feedback}</td><td><button class="pf-v6-c-button pf-m-link pf-m-small" onclick="loadHistoryScan(${i})">View</button></td></tr>`;
+	});
+	html += '</tbody></table>';
+	body.innerHTML = html;
+}
+
+function loadHistoryScan(index) {
+	const history = JSON.parse(localStorage.getItem('gvs-scan-history') || '[]');
+	const item = history[index];
+	if (!item) return;
+	showResultView();
+	const outputDiv = document.getElementById('output');
+	const progressContent = document.getElementById('resultProgressContent');
+	progressContent.innerHTML = item.logs || 'Loaded from scan history.\n';
+	if (item.output) {
+		outputDiv.innerHTML = `<pre>${syntaxHighlight(JSON.stringify(item.output, null, 2))}</pre>`;
 	}
-	
-	toggleTheme() {
-		this.currentTheme = this.currentTheme === 'light' ? 'dark' : 'light';
-		this.applyTheme(this.currentTheme);
-		localStorage.setItem('theme', this.currentTheme);
-	}
-	
-	applyTheme(theme) {
-		document.documentElement.setAttribute('data-theme', theme);
-		this.themeIcon.className = theme === 'light' ? 'theme-icon moon' : 'theme-icon sun';
-		this.themeToggle.setAttribute('aria-label', 
-			theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'
-		);
-	}
+	document.getElementById("reportContainer").style.display = "block";
 }
 
 // Initialize all components on DOM content loaded
 document.addEventListener('DOMContentLoaded', function() {
-	// Initialize theme manager
-	new ThemeManager();
-	
 	// Initialize form history manager
 	window.formHistory = new FormHistoryManager();
 	
@@ -231,6 +272,60 @@ function syntaxHighlight(json) {
 	return json;
 }
 
+function highlightLog(line) {
+	var s = line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+	if (/^\[claude\].*(?:Failed|ERROR|WARNING)/.test(line))
+		return '<span class="log-error">' + s + '</span>';
+	if (/^\[claude\].*tool_call /.test(line))
+		return s.replace(/(tool_call )(\w+)/, '$1<span class="log-tool">$2</span>');
+	if (/^\[claude\]/.test(line))
+		return '<span class="log-claude">' + s + '</span>';
+	if (/✓/.test(line))
+		return '<span class="log-success">' + s + '</span>';
+	if (/✗|Failed|ERROR|^Error:|^Network Error:/.test(line))
+		return '<span class="log-error">' + s + '</span>';
+	if (/WARNING:/.test(line))
+		return '<span class="log-warn">' + s + '</span>';
+	if (/^Scan Completed/.test(line))
+		return '<span class="log-success">' + s + '</span>';
+	if (/^(Scan (?:Started|Failed)|Initializing)/.test(line))
+		return '<span class="log-status">' + s + '</span>';
+	if (/^(Cloning|Clone successful|Running |Found |Discovering)/.test(line))
+		return '<span class="log-info">' + s + '</span>';
+	if (/^Claude verification:/.test(line))
+		return '<span class="log-claude">' + s + '</span>';
+	return s;
+}
+
+function copyPaneContent(btn, elementId) {
+	const el = document.getElementById(elementId);
+	if (!el) return;
+	const text = el.innerText || el.textContent;
+
+	function onSuccess() {
+		btn.classList.add('copied');
+		btn.textContent = 'Copied!';
+		setTimeout(() => {
+			btn.classList.remove('copied');
+			btn.textContent = 'Copy';
+		}, 1500);
+	}
+
+	if (navigator.clipboard && window.isSecureContext) {
+		navigator.clipboard.writeText(text).then(onSuccess);
+	} else {
+		const ta = document.createElement('textarea');
+		ta.value = text;
+		ta.style.position = 'fixed';
+		ta.style.opacity = '0';
+		document.body.appendChild(ta);
+		ta.select();
+		document.execCommand('copy');
+		document.body.removeChild(ta);
+		onSuccess();
+	}
+}
+
 function runScan() {
 	if (scanInProgress) return;
 
@@ -288,21 +383,21 @@ function runScan() {
 	const algo = document.getElementById("algo").value;
 	const graph = !!(cve || (library && symbol));
 	const outputDiv = document.getElementById("output");
-	const progressContent = document.getElementById("progressContent");
+	const progressContent = document.getElementById("resultProgressContent");
 	const scanButton = document.getElementById("scanButton");
 
-	outputDiv.style.display = "none";
-	outputDiv.className = "result-card";
-	outputDiv.innerHTML = "";
+	// Switch to Result view
+	showResultView();
+
+	outputDiv.className = "gvs-scan-output";
+	outputDiv.innerHTML = '<div class="gvs-log-placeholder">Waiting for results...</div>';
 	
 	// Hide report button when starting a new scan
 	document.getElementById("reportContainer").style.display = "none";
 	
 	// Clear previous progress output and initialize new scan
 	const timestamp = new Date().toLocaleTimeString();
-	progressContent.innerHTML = `Scan Started at ${timestamp}\nInitializing scan...\n`;
-	// Auto-expand progress card when scan starts
-	expandProgressCard();
+	progressContent.innerHTML = highlightLog(`Scan Started at ${timestamp}`) + '\n' + highlightLog('Initializing scan...') + '\n';
 	
 	scanButton.disabled = true;
 	scanButton.innerText = "Scanning...";
@@ -335,10 +430,7 @@ function runScan() {
 
 	// Use callgraph endpoint if CVE is provided, or if library and symbol are provided for direct scanning
 	if (repo && branchOrCommit && (cve || (library && symbol))) {
-		const hostUrl = `${location.protocol}//${location.host}`;
 		outputDiv.innerHTML = getRandomSustainingQuestion();
-		outputDiv.classList.add("alert-warning");
-		outputDiv.style.display = "block";
 
 		fetch(`${API_BASE_URL}/callgraph`, {
 			method: "POST",
@@ -354,8 +446,7 @@ function runScan() {
 					outputDiv.innerHTML = `<strong>Error:</strong> ${data.error}<br>`;
 					outputDiv.classList.add("alert-danger");
 					
-					// Add error message to progress output
-					progressContent.innerHTML += `Error: ${data.error}\n`;
+					progressContent.innerHTML += highlightLog(`Error: ${data.error}`) + '\n';
 					progressContent.scrollTop = progressContent.scrollHeight;
 					
 					cleanup()
@@ -369,8 +460,7 @@ function runScan() {
 				outputDiv.innerHTML += `<strong>Network Error:</strong> ${err.message}<br>`;
 				outputDiv.classList.add("alert-danger");
 				
-				// Add error message to progress output
-				progressContent.innerHTML += `Network Error: ${err.message}\n`;
+				progressContent.innerHTML += highlightLog(`Network Error: ${err.message}`) + '\n';
 				progressContent.scrollTop = progressContent.scrollHeight;
 			});
 
@@ -379,9 +469,6 @@ function runScan() {
 		const timeoutId = setTimeout(() => controller.abort(), 360000);
 
 		outputDiv.innerHTML = getRandomSustainingQuestion();
-		outputDiv.classList.remove("alert-success", "alert-danger", "alert-warning");
-		outputDiv.classList.add("alert-warning");
-		outputDiv.style.display = "block";
 
 		fetch(`${API_BASE_URL}/scan`, {
 			method: "POST",
@@ -396,8 +483,7 @@ function runScan() {
 					outputDiv.innerHTML = `<strong>Error:</strong> ${data.error}<br>`;
 					outputDiv.classList.add("alert-danger");
 					
-					// Add error message to progress output
-					progressContent.innerHTML += `Error: ${data.error}\n`;
+					progressContent.innerHTML += highlightLog(`Error: ${data.error}`) + '\n';
 					progressContent.scrollTop = progressContent.scrollHeight;
 					
 					cleanup()
@@ -412,11 +498,8 @@ function runScan() {
 					? "Request timed out (360 sec)"
 					: error.message || error;
 				outputDiv.innerHTML = `<strong>Error:</strong> ${errMsg}`;
-				outputDiv.classList.add("alert-danger");
-				outputDiv.style.display = "block";
 				
-				// Add error message to progress output
-				progressContent.innerHTML += `Network Error: ${errMsg}\n`;
+				progressContent.innerHTML += highlightLog(`Network Error: ${errMsg}`) + '\n';
 				progressContent.scrollTop = progressContent.scrollHeight;
 			})
 			.finally(() => {
@@ -426,7 +509,7 @@ function runScan() {
 
 	function pollStatus(taskId, showProgress) {
 		const pollInterval = 3000;
-		const progressContent = document.getElementById("progressContent");
+		const progressContent = document.getElementById("resultProgressContent");
 		
 		// Always start progress streaming
 		startProgressStream(taskId);
@@ -442,14 +525,12 @@ function runScan() {
 				.then(response => response.json())
 				.then(statusData => {
 					if (statusData.error) {
-						outputDiv.innerHTML = "";
 						outputDiv.innerHTML = `<strong>Error:</strong> ${statusData.error}<br>`;
-						outputDiv.classList.add("alert-danger");
 						
 						// Add error message to progress output
-						const progressContent = document.getElementById("progressContent");
+						const progressContent = document.getElementById("resultProgressContent");
 						const timestamp = new Date().toLocaleTimeString();
-						progressContent.innerHTML += `Scan Failed at ${timestamp}: ${statusData.error}\n`;
+						progressContent.innerHTML += highlightLog(`Scan Failed at ${timestamp}: ${statusData.error}`) + '\n';
 						progressContent.scrollTop = progressContent.scrollHeight;
 						
 						clearInterval(intervalId);
@@ -458,20 +539,32 @@ function runScan() {
 					}
 
 					if (statusData.status === "completed") {
-						outputDiv.innerHTML = "";
 						outputDiv.innerHTML = `<pre>${syntaxHighlight(JSON.stringify(statusData.output, null, 2))}</pre>`;
-						outputDiv.classList.remove("alert-warning");
-						outputDiv.classList.add("alert-success");
 						clearInterval(intervalId);
 						
 						// Show report inaccuracy button
 						document.getElementById("reportContainer").style.display = "block";
-						
-						// Add completion message to progress output
-						const progressContent = document.getElementById("progressContent");
+
+						// Render cached logs if returned by the server (cache hit)
+						const progressContent = document.getElementById("resultProgressContent");
+						if (statusData.logs) {
+							const logLines = statusData.logs.split('\n').filter(l => l).map(l => highlightLog(l));
+							progressContent.innerHTML += logLines.join('\n') + '\n';
+						}
+
 						const timestamp = new Date().toLocaleTimeString();
-						progressContent.innerHTML += `Scan Completed Successfully at ${timestamp}\n`;
+						progressContent.innerHTML += highlightLog(`Scan Completed Successfully at ${timestamp}`) + '\n';
 						progressContent.scrollTop = progressContent.scrollHeight;
+
+					saveScanToHistory({
+						repo: document.getElementById("repo").value.trim(),
+						branchOrCommit: document.getElementById("branchOrCommit").value.trim(),
+						cve: document.getElementById("cve").value.trim(),
+						algo: document.getElementById("algo").value,
+						isVulnerable: statusData.output?.IsVulnerable,
+						output: statusData.output,
+						logs: progressContent.innerHTML
+					});
 						
 						// Close progress stream if active
 						if (window.currentProgressStream) {
@@ -485,13 +578,11 @@ function runScan() {
 					outputDiv.scrollTop = outputDiv.scrollHeight;
 				})
 				.catch(err => {
-					outputDiv.innerHTML = "";
-					outputDiv.innerHTML = `<br><strong>Error polling status:</strong> ${err.message}<br>`;
-					outputDiv.classList.add("alert-danger");
+					outputDiv.innerHTML = `<strong>Error polling status:</strong> ${err.message}<br>`;
 					
 					// Add error message to progress output
-					const progressContent = document.getElementById("progressContent");
-					progressContent.innerHTML += `Network Error: ${err.message}\n`;
+					const progressContent = document.getElementById("resultProgressContent");
+					progressContent.innerHTML += highlightLog(`Network Error: ${err.message}`) + '\n';
 					progressContent.scrollTop = progressContent.scrollHeight;
 					
 					clearInterval(intervalId);
@@ -517,7 +608,7 @@ function runScan() {
 }
 
 function startProgressStream(taskId) {
-	const progressContent = document.getElementById("progressContent");
+	const progressContent = document.getElementById("resultProgressContent");
 
 	// Use Server-Sent Events for real-time progress updates
 	const eventSource = new EventSource(`${API_BASE_URL}/progress/${taskId}`);
@@ -525,7 +616,7 @@ function startProgressStream(taskId) {
 	eventSource.onmessage = function(event) {
 		const data = event.data;
 		if (data && data.trim()) {
-			progressContent.innerHTML += data + '\n';
+			progressContent.innerHTML += highlightLog(data) + '\n';
 			progressContent.scrollTop = progressContent.scrollHeight;
 		}
 	};
@@ -539,45 +630,34 @@ function startProgressStream(taskId) {
 	window.currentProgressStream = eventSource;
 }
 
-function handleCardClick(event) {
-	// Prevent expansion when clicking on form elements
-	const clickableElements = ['INPUT', 'SELECT', 'BUTTON', 'LABEL', 'SPAN'];
-	const isFormElement = clickableElements.includes(event.target.tagName);
-	const isTooltip = event.target.hasAttribute('data-bs-toggle');
-	
-	if (isFormElement || isTooltip) {
-		return;
-	}
-	
-	toggleProgressExpansion();
+function openFeedbackModal() {
+	document.getElementById('feedbackModal').style.display = '';
 }
 
-function toggleProgressExpansion() {
-	const progressContent = document.getElementById("progressContent");
-	
-	if (progressContent.classList.contains("collapsed")) {
-		expandProgressCard();
-	} else {
-		collapseProgressCard();
+function closeFeedbackModal(event) {
+	if (event && event.target === document.getElementById('feedbackModal')) {
+		document.getElementById('feedbackModal').style.display = 'none';
 	}
 }
 
-function expandProgressCard() {
-	const progressContent = document.getElementById("progressContent");
-	progressContent.classList.remove("collapsed");
-}
+function submitFeedback(choice) {
+	document.getElementById('feedbackModal').style.display = 'none';
+	const feedbackLabels = { gvs_only: 'GVS was right', claude_only: 'Claude was right', both: 'Both were right' };
+	const feedbackText = feedbackLabels[choice] || choice;
 
-function collapseProgressCard() {
-	const progressContent = document.getElementById("progressContent");
-	progressContent.classList.add("collapsed");
-}
+	let history = JSON.parse(localStorage.getItem('gvs-scan-history') || '[]');
+	if (history.length > 0) {
+		history[0].feedback = feedbackText;
+		localStorage.setItem('gvs-scan-history', JSON.stringify(history));
+	}
 
-function resetProgressCard() {
-	const progressContent = document.getElementById("progressContent");
-	
-	// Reset to collapsed state with placeholder (only used on page load)
-	collapseProgressCard();
-	progressContent.innerHTML = '<div class="progress-placeholder">Server progress will appear here during scans. Progress from previous scans is preserved until the next scan starts.</div>';
+	const repo = document.getElementById("repo").value.trim();
+	const cve = document.getElementById("cve").value.trim();
+	const labels = { gvs_only: 'gvs-correct', claude_only: 'claude-correct', both: 'both-correct' };
+	const title = `Claude Feedback: ${cve || repo} - ${feedbackText}`;
+	const body = `## Feedback\n- **Choice**: ${feedbackText}\n- **Repository**: ${repo}\n- **CVE**: ${cve || 'N/A'}`;
+	const url = `https://github.com/k37y/gvs/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}&labels=${labels[choice]}`;
+	window.open(url, '_blank');
 }
 
 function reportInaccuracy() {
