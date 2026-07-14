@@ -142,17 +142,25 @@ function renderScanHistory() {
 		body.innerHTML = '<div class="pf-v6-c-empty-state"><div class="pf-v6-c-empty-state__content"><div class="pf-v6-c-empty-state__body">No scan history yet. Run a scan to see results here.</div></div></div>';
 		return;
 	}
-	let html = '<table class="gvs-history-table"><thead><tr><th>Date</th><th>Repository</th><th>Branch</th><th>CVE</th><th>Status</th><th>Feedback</th><th></th></tr></thead><tbody>';
+	let html = '<table class="gvs-history-table"><thead><tr><th>Date</th><th>Repository</th><th>Branch</th><th>CVE</th><th>Algo</th><th>Status</th><th>AI Agrees</th><th>Feedback</th><th></th></tr></thead><tbody>';
 	history.forEach((item, i) => {
 		const date = new Date(item.timestamp).toLocaleDateString();
 		const repo = item.repo || '';
 		const branch = item.branchOrCommit || '-';
+		const algo = item.algo || '-';
 		const vuln = String(item.isVulnerable).toLowerCase();
 		let label = '<span class="gvs-label gvs-label-warning">unknown</span>';
 		if (vuln === 'true') label = '<span class="gvs-label gvs-label-danger">true</span>';
 		else if (vuln === 'false') label = '<span class="gvs-label gvs-label-success">false</span>';
+		const cv = item.output?.ClaudeVerification;
+		let aiLabel = '<span class="gvs-label gvs-label-warning">-</span>';
+		if (cv) {
+			aiLabel = cv.agrees_with_scanner
+				? '<span class="gvs-label gvs-label-success">Yes</span>'
+				: '<span class="gvs-label gvs-label-danger">No</span>';
+		}
 		const feedback = item.feedback || '-';
-		html += `<tr><td>${date}</td><td>${repo}</td><td>${branch}</td><td>${item.cve || '-'}</td><td>${label}</td><td>${feedback}</td><td><button class="pf-v6-c-button pf-m-link pf-m-small" onclick="loadHistoryScan(${i})">View</button></td></tr>`;
+		html += `<tr><td>${date}</td><td>${repo}</td><td>${branch}</td><td>${item.cve || '-'}</td><td>${algo}</td><td>${label}</td><td>${aiLabel}</td><td>${feedback}</td><td><button class="pf-v6-c-button pf-m-link pf-m-small" onclick="loadHistoryScan(${i})">View</button></td></tr>`;
 	});
 	html += '</tbody></table>';
 	body.innerHTML = html;
@@ -165,7 +173,7 @@ function loadHistoryScan(index) {
 	showResultView();
 	const outputDiv = document.getElementById('output');
 	const progressContent = document.getElementById('resultProgressContent');
-	progressContent.innerHTML = 'Loaded from scan history.\n';
+	progressContent.innerHTML = item.logs || 'Loaded from scan history.\n';
 	if (item.output) {
 		outputDiv.innerHTML = `<pre>${syntaxHighlight(JSON.stringify(item.output, null, 2))}</pre>`;
 	}
@@ -264,6 +272,60 @@ function syntaxHighlight(json) {
 	return json;
 }
 
+function highlightLog(line) {
+	var s = line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+	if (/^\[claude\].*(?:Failed|ERROR|WARNING)/.test(line))
+		return '<span class="log-error">' + s + '</span>';
+	if (/^\[claude\].*tool_call /.test(line))
+		return s.replace(/(tool_call )(\w+)/, '$1<span class="log-tool">$2</span>');
+	if (/^\[claude\]/.test(line))
+		return '<span class="log-claude">' + s + '</span>';
+	if (/✓/.test(line))
+		return '<span class="log-success">' + s + '</span>';
+	if (/✗|Failed|ERROR|^Error:|^Network Error:/.test(line))
+		return '<span class="log-error">' + s + '</span>';
+	if (/WARNING:/.test(line))
+		return '<span class="log-warn">' + s + '</span>';
+	if (/^Scan Completed/.test(line))
+		return '<span class="log-success">' + s + '</span>';
+	if (/^(Scan (?:Started|Failed)|Initializing)/.test(line))
+		return '<span class="log-status">' + s + '</span>';
+	if (/^(Cloning|Clone successful|Running |Found |Discovering)/.test(line))
+		return '<span class="log-info">' + s + '</span>';
+	if (/^Claude verification:/.test(line))
+		return '<span class="log-claude">' + s + '</span>';
+	return s;
+}
+
+function copyPaneContent(btn, elementId) {
+	const el = document.getElementById(elementId);
+	if (!el) return;
+	const text = el.innerText || el.textContent;
+
+	function onSuccess() {
+		btn.classList.add('copied');
+		btn.textContent = 'Copied!';
+		setTimeout(() => {
+			btn.classList.remove('copied');
+			btn.textContent = 'Copy';
+		}, 1500);
+	}
+
+	if (navigator.clipboard && window.isSecureContext) {
+		navigator.clipboard.writeText(text).then(onSuccess);
+	} else {
+		const ta = document.createElement('textarea');
+		ta.value = text;
+		ta.style.position = 'fixed';
+		ta.style.opacity = '0';
+		document.body.appendChild(ta);
+		ta.select();
+		document.execCommand('copy');
+		document.body.removeChild(ta);
+		onSuccess();
+	}
+}
+
 function runScan() {
 	if (scanInProgress) return;
 
@@ -335,7 +397,7 @@ function runScan() {
 	
 	// Clear previous progress output and initialize new scan
 	const timestamp = new Date().toLocaleTimeString();
-	progressContent.innerHTML = `Scan Started at ${timestamp}\nInitializing scan...\n`;
+	progressContent.innerHTML = highlightLog(`Scan Started at ${timestamp}`) + '\n' + highlightLog('Initializing scan...') + '\n';
 	
 	scanButton.disabled = true;
 	scanButton.innerText = "Scanning...";
@@ -384,8 +446,7 @@ function runScan() {
 					outputDiv.innerHTML = `<strong>Error:</strong> ${data.error}<br>`;
 					outputDiv.classList.add("alert-danger");
 					
-					// Add error message to progress output
-					progressContent.innerHTML += `Error: ${data.error}\n`;
+					progressContent.innerHTML += highlightLog(`Error: ${data.error}`) + '\n';
 					progressContent.scrollTop = progressContent.scrollHeight;
 					
 					cleanup()
@@ -399,8 +460,7 @@ function runScan() {
 				outputDiv.innerHTML += `<strong>Network Error:</strong> ${err.message}<br>`;
 				outputDiv.classList.add("alert-danger");
 				
-				// Add error message to progress output
-				progressContent.innerHTML += `Network Error: ${err.message}\n`;
+				progressContent.innerHTML += highlightLog(`Network Error: ${err.message}`) + '\n';
 				progressContent.scrollTop = progressContent.scrollHeight;
 			});
 
@@ -423,8 +483,7 @@ function runScan() {
 					outputDiv.innerHTML = `<strong>Error:</strong> ${data.error}<br>`;
 					outputDiv.classList.add("alert-danger");
 					
-					// Add error message to progress output
-					progressContent.innerHTML += `Error: ${data.error}\n`;
+					progressContent.innerHTML += highlightLog(`Error: ${data.error}`) + '\n';
 					progressContent.scrollTop = progressContent.scrollHeight;
 					
 					cleanup()
@@ -440,8 +499,7 @@ function runScan() {
 					: error.message || error;
 				outputDiv.innerHTML = `<strong>Error:</strong> ${errMsg}`;
 				
-				// Add error message to progress output
-				progressContent.innerHTML += `Network Error: ${errMsg}\n`;
+				progressContent.innerHTML += highlightLog(`Network Error: ${errMsg}`) + '\n';
 				progressContent.scrollTop = progressContent.scrollHeight;
 			})
 			.finally(() => {
@@ -472,7 +530,7 @@ function runScan() {
 						// Add error message to progress output
 						const progressContent = document.getElementById("resultProgressContent");
 						const timestamp = new Date().toLocaleTimeString();
-						progressContent.innerHTML += `Scan Failed at ${timestamp}: ${statusData.error}\n`;
+						progressContent.innerHTML += highlightLog(`Scan Failed at ${timestamp}: ${statusData.error}`) + '\n';
 						progressContent.scrollTop = progressContent.scrollHeight;
 						
 						clearInterval(intervalId);
@@ -486,20 +544,27 @@ function runScan() {
 						
 						// Show report inaccuracy button
 						document.getElementById("reportContainer").style.display = "block";
-						
-						saveScanToHistory({
-							repo: document.getElementById("repo").value.trim(),
-							branchOrCommit: document.getElementById("branchOrCommit").value.trim(),
-							cve: document.getElementById("cve").value.trim(),
-							isVulnerable: statusData.output?.IsVulnerable,
-							output: statusData.output
-						});
-						
-						// Add completion message to progress output
+
+						// Render cached logs if returned by the server (cache hit)
 						const progressContent = document.getElementById("resultProgressContent");
+						if (statusData.logs) {
+							const logLines = statusData.logs.split('\n').filter(l => l).map(l => highlightLog(l));
+							progressContent.innerHTML += logLines.join('\n') + '\n';
+						}
+
 						const timestamp = new Date().toLocaleTimeString();
-						progressContent.innerHTML += `Scan Completed Successfully at ${timestamp}\n`;
+						progressContent.innerHTML += highlightLog(`Scan Completed Successfully at ${timestamp}`) + '\n';
 						progressContent.scrollTop = progressContent.scrollHeight;
+
+					saveScanToHistory({
+						repo: document.getElementById("repo").value.trim(),
+						branchOrCommit: document.getElementById("branchOrCommit").value.trim(),
+						cve: document.getElementById("cve").value.trim(),
+						algo: document.getElementById("algo").value,
+						isVulnerable: statusData.output?.IsVulnerable,
+						output: statusData.output,
+						logs: progressContent.innerHTML
+					});
 						
 						// Close progress stream if active
 						if (window.currentProgressStream) {
@@ -517,7 +582,7 @@ function runScan() {
 					
 					// Add error message to progress output
 					const progressContent = document.getElementById("resultProgressContent");
-					progressContent.innerHTML += `Network Error: ${err.message}\n`;
+					progressContent.innerHTML += highlightLog(`Network Error: ${err.message}`) + '\n';
 					progressContent.scrollTop = progressContent.scrollHeight;
 					
 					clearInterval(intervalId);
@@ -551,7 +616,7 @@ function startProgressStream(taskId) {
 	eventSource.onmessage = function(event) {
 		const data = event.data;
 		if (data && data.trim()) {
-			progressContent.innerHTML += data + '\n';
+			progressContent.innerHTML += highlightLog(data) + '\n';
 			progressContent.scrollTop = progressContent.scrollHeight;
 		}
 	};

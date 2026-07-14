@@ -60,6 +60,7 @@ type TaskResult struct {
 	Status TaskStatus `json:"status"`
 	Output string     `json:"output,omitempty"`
 	Error  string     `json:"error,omitempty"`
+	Logs   string     `json:"logs,omitempty"`
 }
 
 func ScanHandler(w http.ResponseWriter, r *http.Request) {
@@ -359,7 +360,10 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 
 		cacheKey := fmt.Sprintf("%s@%s:%s:lib=%s:sym=%s:fixver=%s:algo=%s", repo, branchOrCommit, cve, library, symbol, fixversion, algo)
 		if cachedData, err := RetrieveCacheFromDisk(cacheKey); err == nil {
-			updateStatus(StatusCompleted, string(cachedData), "")
+			cachedLogs, _ := RetrieveCacheLogFromDisk(cacheKey)
+			taskMutex.Lock()
+			taskStore[taskId] = &TaskResult{Status: StatusCompleted, Output: string(cachedData), Logs: string(cachedLogs)}
+			taskMutex.Unlock()
 			log.Printf("[Task %s] Retrieved callgraph from cache", taskId)
 			return
 		}
@@ -418,7 +422,7 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 		args = append(args, cve, cloneDir)
 		cmd = exec.Command("cg", args...)
 
-		output, err := runCgWithProgressCapture(cmd, sendProgress)
+		output, progressLogs, err := runCgWithProgressCapture(cmd, sendProgress)
 
 		if err != nil {
 			log.Printf("[Task %s] cg execution failed: %v", taskId, err)
@@ -434,6 +438,9 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 
 		if err := SaveCacheToDisk(cacheKey, output); err != nil {
 			log.Printf("[Task %s] Failed to save cache: %v", taskId, err)
+		}
+		if err := SaveCacheLogsToDisk(cacheKey, progressLogs); err != nil {
+			log.Printf("[Task %s] Failed to save cache logs: %v", taskId, err)
 		}
 	}(taskId, req.Repo, req.BranchOrCommit, req.CVE, req.Library, req.Symbol, req.FixVersion, req.Algo, baseURL)
 
@@ -477,6 +484,10 @@ func StatusHandler(w http.ResponseWriter, r *http.Request) {
 
 	if result.Error != "" {
 		resp["error"] = result.Error
+	}
+
+	if result.Logs != "" {
+		resp["logs"] = result.Logs
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -532,26 +543,24 @@ func ProgressHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func runCgWithProgressCapture(cmd *exec.Cmd, sendProgress func(string)) ([]byte, error) {
-	// Create pipes for stdout and stderr
+func runCgWithProgressCapture(cmd *exec.Cmd, sendProgress func(string)) (output []byte, logs []byte, err error) {
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	// Start the command
 	if err := cmd.Start(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var outputBuffer strings.Builder
+	var logsBuffer strings.Builder
 	var wg sync.WaitGroup
 
-	// Read stdout
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -562,7 +571,6 @@ func runCgWithProgressCapture(cmd *exec.Cmd, sendProgress func(string)) ([]byte,
 		}
 	}()
 
-	// Read stderr (progress output)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -570,14 +578,14 @@ func runCgWithProgressCapture(cmd *exec.Cmd, sendProgress func(string)) ([]byte,
 		for scanner.Scan() {
 			line := scanner.Text()
 			sendProgress(line)
+			logsBuffer.WriteString(line + "\n")
 		}
 	}()
 
-	// Wait for command to finish
 	err = cmd.Wait()
 	wg.Wait()
 
-	return []byte(outputBuffer.String()), err
+	return []byte(outputBuffer.String()), []byte(logsBuffer.String()), err
 }
 
 func runGovulncheckWithProgress(directory, target string, sendProgress func(string)) (string, int, error) {

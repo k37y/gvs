@@ -189,6 +189,11 @@ html, body {
 
 .gvs-advanced-fields {
 	margin-top: 12px;
+	font-size: 1rem;
+}
+
+.gvs-advanced-fields .pf-v6-c-form__group + .pf-v6-c-form__group {
+	margin-top: var(--pf-v6-c-form--m-horizontal--spacer, 1rem);
 }
 
 /* === Output Reference === */
@@ -237,16 +242,45 @@ html, body {
 	border-right: 1px solid var(--pf-t--global--border--color--default, #e0e0e0);
 }
 
+.gvs-pane-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin: 0 -24px 12px;
+	padding: 0 24px 10px;
+	border-bottom: 1px solid var(--pf-t--global--border--color--default, #e0e0e0);
+	flex-shrink: 0;
+}
+
 .gvs-pane-title {
 	font-size: 1.05em;
 	font-weight: 400;
 	text-transform: none;
 	letter-spacing: normal;
 	color: #151515;
-	margin: 0 -24px 12px;
-	padding: 0 24px 10px;
-	border-bottom: 1px solid var(--pf-t--global--border--color--default, #e0e0e0);
-	flex-shrink: 0;
+	margin: 0;
+}
+
+.gvs-copy-btn {
+	background: none;
+	border: 1px solid transparent;
+	border-radius: 4px;
+	color: #6a6e73;
+	cursor: pointer;
+	padding: 4px 6px;
+	line-height: 1;
+	display: inline-flex;
+	align-items: center;
+	transition: color 0.15s, border-color 0.15s;
+}
+
+.gvs-copy-btn:hover {
+	color: var(--gvs-brand);
+	border-color: var(--pf-t--global--border--color--default, #e0e0e0);
+}
+
+.gvs-copy-btn.copied {
+	color: var(--gvs-brand);
 }
 
 /* === Report buttons === */
@@ -310,9 +344,18 @@ html, body {
 	color: var(--gvs-alert-danger-color) !important;
 }
 
-/* === Syntax highlighting === */
+/* === JSON syntax highlighting === */
 .highlight-key { color: var(--gvs-highlight-key) !important; font-weight: bold; }
 .highlight-value { color: var(--gvs-highlight-value) !important; font-weight: bold; }
+
+/* === Log syntax highlighting === */
+.log-claude { color: var(--pf-t--global--color--status--info--default, #0066cc); }
+.log-success { color: var(--pf-t--global--color--status--success--default, #3e8635); }
+.log-error { color: var(--pf-t--global--color--status--danger--default, #c9190b); }
+.log-warn { color: var(--pf-t--global--color--status--warning--default, #f0ab00); }
+.log-info { color: var(--pf-t--global--text--color--subtle, #6a6e73); }
+.log-status { font-weight: 600; }
+.log-tool { font-weight: 600; color: var(--pf-t--global--color--nonstatus--purple--default, #6753ac); }
 
 /* === Graph link === */
 .graph-link { color: var(--gvs-brand); }
