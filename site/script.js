@@ -286,7 +286,7 @@ function runScan() {
 	const branchOrCommit = document.getElementById("branchOrCommit").value.trim();
 	const cve = document.getElementById("cve").value.trim();
 	const algo = document.getElementById("algo").value;
-	const graph = (cve || (library && symbol)) ? document.getElementById("graph").value === "true" : false;
+	const graph = !!(cve || (library && symbol));
 	const outputDiv = document.getElementById("output");
 	const progressContent = document.getElementById("progressContent");
 	const scanButton = document.getElementById("scanButton");

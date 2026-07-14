@@ -38,8 +38,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	cg.LogClaudeStatus()
+
 	// Define flags
-	var fix = flag.Bool("fix", false, "run fix commands after analysis")
 	var algo = flag.String("algo", "rta", "call graph algorithm: rta (default), cha, vta, static")
 	var progress = flag.Bool("progress", false, "show progress of completed and pending jobs")
 	var library = flag.String("library", "", "override library path to scan (e.g., golang.org/x/net/html)")
@@ -96,7 +97,7 @@ func main() {
 	}
 
 	if info, err := os.Stat(directory); err != nil || !info.IsDir() {
-		fmt.Printf("Invalid directory: %s\n", directory)
+		fmt.Fprintf(os.Stderr, "Invalid directory: %s\n", directory)
 		os.Exit(1)
 	}
 
@@ -111,8 +112,8 @@ func main() {
 		}
 	}
 	if !isValid {
-		fmt.Printf("Error: Invalid algorithm '%s'\n", *algo)
-		fmt.Printf("Supported algorithms: vta, cha, rta, static\n")
+		fmt.Fprintf(os.Stderr, "Error: Invalid algorithm '%s'\n", *algo)
+		fmt.Fprintf(os.Stderr, "Supported algorithms: vta, cha, rta, static\n")
 		os.Exit(1)
 	}
 	// Always set environment variable for the scanner to use
@@ -133,9 +134,9 @@ func main() {
 	var result *cg.Result
 	if *progress {
 		fmt.Fprintf(os.Stderr, "Initializing vulnerability scan...\n")
-		result = initResultWithProgress(cveID, directory, *fix, *library, *symbols, *fixversion)
+		result = initResultWithProgress(cveID, directory, *library, *symbols, *fixversion)
 	} else {
-		result = cg.InitResult(cveID, directory, *fix, *library, *symbols, *fixversion)
+		result = cg.InitResult(cveID, directory, *library, *symbols, *fixversion)
 	}
 
 	// Set progress flag on result for scanner to use
@@ -320,65 +321,6 @@ func main() {
 		}
 	}
 
-	// Run fix commands BEFORE generating output (only if fix is true)
-	if *fix {
-		// Convert to cli.Result for shared function compatibility
-		// Include all CVE assessment data for complete output
-		fixResult := &cli.Result{
-			IsVulnerable:    result.IsVulnerable,
-			UsedImports:     cg.ConvertUsedImports(result.UsedImports),
-			Files:           result.Files,
-			AffectedImports: cg.ConvertAffectedImports(result.AffectedImports),
-			GoCVE:           result.GoCVE,
-			CVE:             result.CVE,
-			Repository:      result.Repository,
-			Branch:          result.Branch,
-			Directory:       result.Directory,
-			CursorCommand:   result.CursorCommand,
-			Errors:          result.Errors,
-			FixErrors:       result.FixErrors,
-			FixSuccess:      result.FixSuccess,
-			Summary:         result.Summary,
-		}
-
-		// Count packages with fix commands for progress tracking
-		packagesWithFixes := 0
-		for _, details := range result.UsedImports {
-			if len(details.FixCommands) > 0 {
-				packagesWithFixes++
-			}
-		}
-
-		if packagesWithFixes > 0 && *progress {
-			fmt.Fprintf(os.Stderr, "Running fix commands for %d package(s)...\n", packagesWithFixes)
-		}
-
-		processedPackages := 0
-		for pkg, details := range result.UsedImports {
-			if len(details.FixCommands) > 0 {
-				if *progress {
-					processedPackages++
-					fmt.Fprintf(os.Stderr, "Fix progress: %d/%d packages processed (%.1f%%) - Running fixes for %s\n",
-						processedPackages, packagesWithFixes,
-						float64(processedPackages)/float64(packagesWithFixes)*100, pkg)
-				}
-				cli.RunFixCommands(pkg, result.Directory, details.FixCommands, fixResult)
-			}
-		}
-
-		if packagesWithFixes > 0 && *progress {
-			fmt.Fprintf(os.Stderr, "Fix commands completed for all packages\n")
-		}
-
-		// Read gvs-output.txt to populate fix results (only if fixes were run)
-		cli.ReadFixResults(fixResult)
-
-		// Copy back the results
-		result.FixErrors = fixResult.FixErrors
-		result.FixSuccess = fixResult.FixSuccess
-		result.Errors = fixResult.Errors
-	}
-
 	// Generate call graph visualizations if requested (one per affected symbol)
 	if *graph != "" || isFlagPassed("graph") {
 		// Validate that sfdp is available
@@ -463,8 +405,8 @@ func main() {
 		}
 	}
 
-	// Generate summary and output JSON
-	cg.GenerateSummaryWithGemini(result)
+	// Verify with Claude and generate summary
+	cg.VerifyAndSummarizeWithClaude(result, directory)
 	jsonOutput, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		errMsg := "Failed to marshal result to JSON: " + err.Error()
@@ -649,21 +591,11 @@ func generateSVGFromPath(path []*callgraph.Node, outputPath string, showProgress
 }
 
 // initResultWithProgress initializes the result with progress tracking for each phase
-func initResultWithProgress(cve, dir string, fix bool, library, symbols, fixversion string) *cg.Result {
+func initResultWithProgress(cve, dir string, library, symbols, fixversion string) *cg.Result {
 	r := &cg.Result{
 		CVE:          cve,
 		Directory:    dir,
 		IsVulnerable: "unknown",
-	}
-
-	// Only initialize fix-related fields if fix is true
-	if fix {
-		cursorCmd := fmt.Sprintf("cursor --remote ssh-remote+gvs-host %s", dir)
-		r.CursorCommand = &cursorCmd
-		fixErrors := []string{}
-		fixSuccess := []string{}
-		r.FixErrors = &fixErrors
-		r.FixSuccess = &fixSuccess
 	}
 
 	// Check if library and symbols are provided for direct scanning (takes precedence)

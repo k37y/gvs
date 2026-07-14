@@ -21,15 +21,13 @@
 				<strong>IsVulnerable:</strong> It has three values - true, false, and unknown. If it is true, then the repository is vulnerable to the CVE ID. If it is false, then the repository is not vulnerable to the CVE ID. If it is unknown, then the scanning is failed.<br>
 				<strong>AffectedImports:</strong> It is a list of symbols that are affected by the CVE ID. It contains information about the symbol's name, version, and its library name.<br>
 				<strong>UsedImports:</strong> It is a list of symbols that are used in the repository. If it is empty, then the repository is not vulnerable to the CVE ID.<br>
-				<strong>FixSuccess / FixErrors:</strong> It is the output and error after running the UsedImports.FixCommands in the JSON output from GVS host.<br>
-				<strong>CursorCommand:</strong> It is a command that can be executed in the terminal to open the scanned repository in Cursor IDE. Type 'read gvs-output.txt and get the context' in the Cursor chat to start working on the fix.<br>
-				<strong>Summary:</strong> It is a summary of the JSON output using the Gemini API.<br>
+				<strong>ClaudeVerification:</strong> Independent AI audit by Claude. Contains verdict (agrees_with_scanner), assessment, confidence, concise reasoning, and file:line evidence.<br>
 			</code>
 		</div>
 		<div class="card p-4 shadow-sm expandable-card" onclick="handleCardClick(event)">
 			<div class="card-header-section">
 				<div class="row mb-3 align-items-end">
-					<div class="col-md-4">
+					<div class="col-md-5">
 						<label for="repo" class="form-label">
 							Repository URL
 							<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted" 
@@ -72,19 +70,6 @@
 						<option value="vta">VTA</option>
 						<option value="cha">CHA</option>
 						<option value="static">Static</option>
-					</select>
-				</div>
-				<div class="col-md-1">
-					<label for="graph" class="form-label">
-						Graph
-						<span class="d-inline-flex align-items-center justify-content-center ms-1 text-muted"
-							  style="width: 16px; height: 16px; border-radius: 50%; border: 1px solid #6c757d; font-size: 11px; cursor: help; vertical-align: middle; transform: translateY(-2px);"
-							  data-bs-toggle="tooltip" data-bs-placement="top"
-							  title="Generate call graph visualizations (SVG) showing paths from main to vulnerable symbols. One graph per affected symbol. Requires graphviz/sfdp.">?</span>
-					</label>
-					<select id="graph" class="form-select">
-						<option value="false">No</option>
-						<option value="true">Yes</option>
 					</select>
 				</div>
 				<div class="col-md-2 text-end">
