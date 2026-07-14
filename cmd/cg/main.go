@@ -97,7 +97,7 @@ func main() {
 	}
 
 	if info, err := os.Stat(directory); err != nil || !info.IsDir() {
-		fmt.Printf("Invalid directory: %s\n", directory)
+		fmt.Fprintf(os.Stderr, "Invalid directory: %s\n", directory)
 		os.Exit(1)
 	}
 
@@ -112,8 +112,8 @@ func main() {
 		}
 	}
 	if !isValid {
-		fmt.Printf("Error: Invalid algorithm '%s'\n", *algo)
-		fmt.Printf("Supported algorithms: vta, cha, rta, static\n")
+		fmt.Fprintf(os.Stderr, "Error: Invalid algorithm '%s'\n", *algo)
+		fmt.Fprintf(os.Stderr, "Supported algorithms: vta, cha, rta, static\n")
 		os.Exit(1)
 	}
 	// Always set environment variable for the scanner to use
