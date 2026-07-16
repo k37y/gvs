@@ -895,7 +895,6 @@ func loadSkillPrompt() (string, bool) {
 
 func buildVerificationPrompt(result *Result, skillTemplate string, sourceSnippets map[string]string) (string, error) {
 	promptResult := struct {
-		IsVulnerable    string                            `json:"IsVulnerable"`
 		UsedImports     map[string]UsedImportsDetails     `json:"UsedImports,omitempty"`
 		AffectedImports map[string]AffectedImportsDetails `json:"AffectedImports,omitempty"`
 		GoCVE           string                            `json:"GoCVE"`
@@ -905,7 +904,6 @@ func buildVerificationPrompt(result *Result, skillTemplate string, sourceSnippet
 		ReflectionRisks []ReflectionRisk                  `json:"ReflectionRisks,omitempty"`
 		Errors          []string                          `json:"Errors,omitempty"`
 	}{
-		IsVulnerable:    result.IsVulnerable,
 		UsedImports:     result.UsedImports,
 		AffectedImports: result.AffectedImports,
 		GoCVE:           result.GoCVE,
