@@ -1,0 +1,31 @@
+[Unit]
+Description=GVS MCP Server (Model Context Protocol)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/gvs
+ExecStart=%h/.local/bin/gvs-mcp
+Environment=PATH=%h/.local/bin:%h/.local/go/bin:%h/go/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin
+Environment=GOCACHE=%h/.cache/go-build
+Environment=GOPATH=%h/go
+Environment=HOME=%h
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=30
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+# Optional environment file for custom configuration
+# Create ~/.config/gvs/gvs-mcp.env with variables like:
+#   GVS_MCP_PORT=8083
+#   GVS_MCP_API_KEY=your-secret-key
+#   GVS_MCP_STATELESS=true
+EnvironmentFile=-%h/.config/gvs/gvs-mcp.env
+
+[Install]
+WantedBy=default.target

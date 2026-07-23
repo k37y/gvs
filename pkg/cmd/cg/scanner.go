@@ -492,6 +492,11 @@ func findMainGoFiles(res *Result) {
 	res.Files = result
 }
 
+// FindMainGoFiles is an exported wrapper for finding main Go files in a result
+func FindMainGoFiles(res *Result) {
+	findMainGoFiles(res)
+}
+
 func fetchAffectedSymbols(result *Result) {
 	client := http.Client{Timeout: 10 * time.Second}
 	url := fmt.Sprintf(VulnsURL+"/ID/%s.json", result.GoCVE)
@@ -651,9 +656,9 @@ func (r *Result) checkDirectUsage(pkg, dir string, symbols []string, files []str
 		wg.Add(1)
 		go func(sym string) {
 			defer wg.Done()
-		if progress {
-			fmt.Fprintf(os.Stderr, "[%s] Scanning %s.%s...\n", relDir, pkg, sym)
-		}
+			if progress {
+				fmt.Fprintf(os.Stderr, "[%s] Scanning %s.%s...\n", relDir, pkg, sym)
+			}
 			// Use BFS to find path to symbol from any entry point
 			if path, found := findPathToSymbolFromAny(entryPoints, pkg, sym, progress); found {
 				r.Mu.Lock()
@@ -1001,7 +1006,6 @@ func matchesSymbol(node *callgraph.Node, pkg, symbol string) bool {
 
 	return false
 }
-
 
 // getCallGraphAlgorithm returns the algorithm to use for call graph generation
 // based on the ALGO environment variable.

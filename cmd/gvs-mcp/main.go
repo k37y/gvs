@@ -67,7 +67,7 @@ func registerTools(server *mcp.Server) {
 	// Tool 1: scan_vulnerability - Deep CVE analysis with optional graph
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "scan_vulnerability",
-		Description: "Check if a Go repository is vulnerable to a specific CVE. Performs deep call graph analysis to determine if vulnerable code is actually reachable. Optionally generates SVG visualization of the call path.",
+		Description: "Check if a Go repository is vulnerable to a specific CVE. Performs deep call graph analysis to determine if vulnerable code is actually reachable. Optionally generates SVG visualization. Supports 'algorithm' parameter: 'static' (fastest), 'cha' (class hierarchy), 'rta' (default, good for reflection), 'vta' (slowest, highest precision).",
 	}, ScanVulnerability)
 
 	// Tool 2: lookup_cve - CVE info without scanning
@@ -85,7 +85,7 @@ func registerTools(server *mcp.Server) {
 	// Tool 4: get_call_graph - SVG visualization
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_call_graph",
-		Description: "Generate call graph visualization showing the path from entry points to a vulnerable symbol. Returns SVG image.",
+		Description: "Generate call graph visualization showing the path from entry points to a vulnerable symbol. Returns SVG image. Supports 'algorithm' parameter: 'static', 'cha', 'rta' (default), 'vta'.",
 	}, GetCallGraph)
 
 	// Tool 5: scan_all_vulnerabilities - govulncheck full scan
@@ -94,11 +94,17 @@ func registerTools(server *mcp.Server) {
 		Description: "Scan a Go repository for ALL known vulnerabilities using govulncheck. Discovers all CVEs affecting the project without needing to specify a particular CVE.",
 	}, ScanAllVulnerabilities)
 
-	// Tool 6: analyze_reflection_risks - RTA-based reflection analysis
+	// Tool 6: analyze_reflection_risks - reflection analysis
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "analyze_reflection_risks",
-		Description: "Analyze code for reflection patterns that could invoke vulnerable symbols at runtime. Uses RTA algorithm (best for reflection tracking). Detects patterns like reflect.ValueOf, MethodByName, function registries, etc.",
+		Description: "Analyze code for reflection patterns that could invoke vulnerable symbols at runtime. Detects patterns like reflect.ValueOf, MethodByName, function registries, etc. Supports 'algorithm' parameter: 'static', 'cha', 'rta' (default, best for reflection), 'vta'.",
 	}, AnalyzeReflectionRisks)
+
+	// Tool 7: check_symbol_reachability - Manual symbol reachability check
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "check_symbol_reachability",
+		Description: "Check if a specific symbol from any Go package is reachable from entry points in a repository. Use this to manually verify if code can call a particular function without needing a CVE ID. Supports 'algorithm' parameter: 'static', 'cha', 'rta' (default), 'vta'. Returns the call path if reachable.",
+	}, CheckSymbolReachability)
 }
 
 // authMiddleware adds Bearer token authentication

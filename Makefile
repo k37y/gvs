@@ -175,6 +175,7 @@ USER_DATADIR = $(HOME)/.local/share/gvs
 USER_UNITDIR = $(HOME)/.config/systemd/user
 USER_CONFDIR = $(HOME)/.config/gvs
 USER_SERVICE = gvs-user.service
+USER_MCP_SERVICE = gvs-mcp-user.service
 
 .PHONY: install-user
 
@@ -211,6 +212,49 @@ install-user: gvs cg
 	@echo ""
 	@echo "To enable service at boot (without login):"
 	@echo "  make enable-linger"
+
+.PHONY: install-mcp-user
+
+install-mcp-user: gvs-mcp
+	@echo "Installing gvs-mcp to $(USER_BINDIR)..."
+	install -d $(USER_BINDIR)
+	install -m755 ./bin/gvs-mcp $(USER_BINDIR)/gvs-mcp
+	@echo "Creating data directory $(USER_DATADIR)..."
+	install -d $(USER_DATADIR)
+	@echo "Installing systemd user service to $(USER_UNITDIR)..."
+	install -d $(USER_UNITDIR)
+	install -m644 $(USER_MCP_SERVICE) $(USER_UNITDIR)/gvs-mcp.service
+	@echo "Creating config directory $(USER_CONFDIR)..."
+	install -d $(USER_CONFDIR)
+	@if [ ! -f $(USER_CONFDIR)/gvs-mcp.env ]; then \
+		echo "# GVS MCP configuration" > $(USER_CONFDIR)/gvs-mcp.env; \
+		echo "# GVS_MCP_PORT=8083" >> $(USER_CONFDIR)/gvs-mcp.env; \
+		echo "# GVS_MCP_API_KEY=" >> $(USER_CONFDIR)/gvs-mcp.env; \
+		echo "# GVS_MCP_STATELESS=true" >> $(USER_CONFDIR)/gvs-mcp.env; \
+	fi
+	@echo "Reloading systemd user daemon..."
+	systemctl --user daemon-reload
+	@echo ""
+	@echo "Installation complete!"
+	@echo "To enable and start the service:"
+	@echo "  systemctl --user enable --now gvs-mcp"
+	@echo ""
+	@echo "To enable service at boot (without login):"
+	@echo "  make enable-linger"
+
+.PHONY: uninstall-mcp-user
+
+uninstall-mcp-user:
+	@echo "Stopping and disabling gvs-mcp user service..."
+	-systemctl --user disable --now gvs-mcp || true
+	@echo "Removing binary..."
+	rm -f $(USER_BINDIR)/gvs-mcp
+	@echo "Removing systemd user service..."
+	rm -f $(USER_UNITDIR)/gvs-mcp.service
+	@echo "Reloading systemd user daemon..."
+	systemctl --user daemon-reload
+	@echo "Uninstall complete."
+	@echo "Note: Config directory $(USER_CONFDIR) was preserved."
 
 .PHONY: uninstall-user
 

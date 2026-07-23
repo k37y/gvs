@@ -96,6 +96,15 @@ type AnalyzeReflectionRisksInput struct {
 	Algorithm string `json:"algorithm,omitempty" jsonschema:"Call graph algorithm: static, cha, rta (default for reflection), or vta"`
 }
 
+type CheckSymbolReachabilityInput struct {
+	Repo          string `json:"repo" jsonschema:"Git repository URL"`
+	Branch        string `json:"branch,omitempty" jsonschema:"Branch name or commit hash (optional, defaults to detected default)"`
+	Package       string `json:"package" jsonschema:"Full Go package path (e.g., golang.org/x/crypto/ssh)"`
+	Symbol        string `json:"symbol" jsonschema:"Symbol name to check (e.g., NewServerConn, or package.Symbol)"`
+	Algorithm     string `json:"algorithm,omitempty" jsonschema:"Call graph algorithm: static, cha, rta (default), or vta"`
+	GenerateGraph bool   `json:"generate_graph,omitempty" jsonschema:"Generate SVG call graph visualization if reachable"`
+}
+
 // Output types
 
 type ScanResult struct {
@@ -148,6 +157,19 @@ type ReflectionAnalysisResult struct {
 	MediumConfidenceRisks int                 `json:"medium_confidence_risks"`
 	LowConfidenceRisks    int                 `json:"low_confidence_risks"`
 	Summary               string              `json:"summary"`
+}
+
+type SymbolReachabilityResult struct {
+	Repo        string   `json:"repo"`
+	Branch      string   `json:"branch"`
+	Package     string   `json:"package"`
+	Symbol      string   `json:"symbol"`
+	Algorithm   string   `json:"algorithm"`
+	IsReachable bool     `json:"is_reachable"`
+	CallPath    []string `json:"call_path,omitempty"`
+	EntryPoint  string   `json:"entry_point,omitempty"`
+	GraphSVG    string   `json:"graph_svg,omitempty"`
+	Summary     string   `json:"summary"`
 }
 
 // ScanVulnerability performs deep CVE analysis with optional call graph
@@ -660,6 +682,137 @@ func AnalyzeReflectionRisks(ctx context.Context, req *mcp.CallToolRequest, input
 	} else {
 		output.Summary = "No reflection-based risks detected"
 	}
+
+	return nil, output, nil
+}
+
+// CheckSymbolReachability checks if a specific symbol is reachable from entry points
+func CheckSymbolReachability(ctx context.Context, req *mcp.CallToolRequest, input CheckSymbolReachabilityInput) (*mcp.CallToolResult, SymbolReachabilityResult, error) {
+	const tool = "check_symbol_reachability"
+	logProgress(tool, fmt.Sprintf("Starting reachability check for repo=%s, package=%s, symbol=%s", input.Repo, input.Package, input.Symbol))
+
+	if input.Repo == "" || input.Package == "" || input.Symbol == "" {
+		return nil, SymbolReachabilityResult{}, fmt.Errorf("repo, package, and symbol are required")
+	}
+
+	branch := input.Branch
+	if branch == "" {
+		branch = detectDefaultBranch(input.Repo)
+		logProgress(tool, fmt.Sprintf("No branch specified, detected default: %s", branch))
+	}
+
+	// Clone repository
+	logProgress(tool, fmt.Sprintf("Cloning repository (branch: %s)...", branch))
+	cloneDir, err := os.MkdirTemp("", "gvs-mcp-reach-*")
+	if err != nil {
+		return nil, SymbolReachabilityResult{}, fmt.Errorf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(cloneDir)
+
+	if err := common.CloneRepo(input.Repo, branch, cloneDir); err != nil {
+		logProgress(tool, fmt.Sprintf("Clone failed: %v", err))
+		return nil, SymbolReachabilityResult{}, fmt.Errorf("failed to clone repository: %v", err)
+	}
+	logProgress(tool, "Clone completed successfully")
+
+	// Set algorithm
+	algo := setAlgorithm(input.Algorithm, "rta")
+	logProgress(tool, fmt.Sprintf("Using algorithm: %s", algo))
+
+	output := SymbolReachabilityResult{
+		Repo:      input.Repo,
+		Branch:    branch,
+		Package:   input.Package,
+		Symbol:    input.Symbol,
+		Algorithm: algo,
+	}
+
+	// Build full symbol name
+	fullSymbol := input.Symbol
+	if !strings.Contains(input.Symbol, ".") {
+		fullSymbol = input.Package + "." + input.Symbol
+	}
+
+	// Create a Result to find main files
+	tempResult := &cg.Result{
+		Directory: cloneDir,
+		Errors:    []string{},
+	}
+	cg.FindMainGoFiles(tempResult)
+
+	if len(tempResult.Files) == 0 {
+		return nil, SymbolReachabilityResult{}, fmt.Errorf("no main packages found in repository")
+	}
+
+	// Try each module and file set
+	for modDir, fileSets := range tempResult.Files {
+		fullModDir := filepath.Join(cloneDir, modDir)
+		logProgress(tool, fmt.Sprintf("Analyzing module: %s", modDir))
+
+		for _, files := range fileSets {
+			if len(files) == 0 {
+				continue
+			}
+
+			// Generate call graph
+			cgGraph, err := tempResult.GenerateCallGraphObject(fullModDir, files)
+			if err != nil {
+				logProgress(tool, fmt.Sprintf("Failed to generate call graph: %v", err))
+				continue
+			}
+
+			// Find entry points (main functions)
+			var entryPoints []*callgraph.Node
+			for _, node := range cgGraph.Nodes {
+				if node.Func != nil && node.Func.Name() == "main" {
+					entryPoints = append(entryPoints, node)
+				}
+			}
+
+			if len(entryPoints) == 0 {
+				continue
+			}
+
+			// Search for path to the symbol
+			for _, entry := range entryPoints {
+				path, found := cg.FindPathToSymbolExported(entry, input.Package, fullSymbol, false)
+				if found && len(path) > 0 {
+					output.IsReachable = true
+					output.EntryPoint = entry.Func.String()
+
+					// Build call path as string slice
+					for _, node := range path {
+						if node.Func != nil {
+							output.CallPath = append(output.CallPath, node.Func.String())
+						}
+					}
+
+					logProgress(tool, fmt.Sprintf("Symbol is reachable via %d-step call path", len(path)))
+
+					// Generate graph if requested
+					if input.GenerateGraph {
+						dotOutput := pathToDOT(path)
+						sfdpCmd := exec.Command("sfdp", "-Tsvg", "-Goverlap=scale")
+						sfdpCmd.Stdin = strings.NewReader(dotOutput)
+						svgOutput, err := sfdpCmd.Output()
+						if err == nil {
+							output.GraphSVG = string(svgOutput)
+						} else {
+							output.GraphSVG = dotOutput // Fallback to DOT format
+						}
+					}
+
+					output.Summary = fmt.Sprintf("Symbol %s IS reachable from %s via %d function calls", fullSymbol, output.EntryPoint, len(path)-1)
+					return nil, output, nil
+				}
+			}
+		}
+	}
+
+	// Symbol not reachable
+	output.IsReachable = false
+	output.Summary = fmt.Sprintf("Symbol %s is NOT reachable from any entry point in the repository", fullSymbol)
+	logProgress(tool, "Symbol is not reachable")
 
 	return nil, output, nil
 }
