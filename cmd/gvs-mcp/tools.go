@@ -175,12 +175,27 @@ type SymbolReachabilityResult struct {
 // ScanVulnerability performs deep CVE analysis with optional call graph
 func ScanVulnerability(ctx context.Context, req *mcp.CallToolRequest, input ScanVulnerabilityInput) (*mcp.CallToolResult, ScanResult, error) {
 	const tool = "scan_vulnerability"
-	logProgress(tool, fmt.Sprintf("Starting scan for repo=%s, cve=%s", input.Repo, input.CVE))
+
+	// Helper to send progress notifications to Claude
+	sendProgress := func(message string, current, total float64) {
+		if token := req.Params.GetProgressToken(); token != nil {
+			req.Session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
+				Message:       message,
+				ProgressToken: token,
+				Progress:      current,
+				Total:         total,
+			})
+		}
+		logProgress(tool, message)
+	}
+
+	sendProgress(fmt.Sprintf("Starting vulnerability scan for %s (CVE: %s). ETA: 1-5 minutes", input.Repo, input.CVE), 0, 6)
 
 	if input.Repo == "" || input.CVE == "" {
 		return nil, ScanResult{}, fmt.Errorf("repo and cve are required")
 	}
 
+	sendProgress("Detecting repository default branch...", 1, 6)
 	branch := input.Branch
 	if branch == "" {
 		branch = detectDefaultBranch(input.Repo)
@@ -188,7 +203,7 @@ func ScanVulnerability(ctx context.Context, req *mcp.CallToolRequest, input Scan
 	}
 
 	// Clone repository
-	logProgress(tool, fmt.Sprintf("Cloning repository (branch: %s)...", branch))
+	sendProgress(fmt.Sprintf("Cloning repository (branch: %s)... This may take 10-30 seconds", branch), 2, 6)
 	cloneDir, err := os.MkdirTemp("", "gvs-mcp-*")
 	if err != nil {
 		return nil, ScanResult{}, fmt.Errorf("failed to create temp dir: %v", err)
@@ -199,25 +214,22 @@ func ScanVulnerability(ctx context.Context, req *mcp.CallToolRequest, input Scan
 		logProgress(tool, fmt.Sprintf("Clone failed: %v", err))
 		return nil, ScanResult{}, fmt.Errorf("failed to clone repository: %v", err)
 	}
-	logProgress(tool, "Clone completed successfully")
+	sendProgress("Clone completed successfully", 3, 6)
 
 	// Set algorithm (defaults to rta for good reflection tracking)
 	algo := setAlgorithm(input.Algorithm, "rta")
-	logProgress(tool, fmt.Sprintf("Using algorithm: %s", algo))
-
-	// Initialize and run scan
-	logProgress(tool, "Initializing vulnerability analysis...")
+	sendProgress(fmt.Sprintf("Initializing vulnerability analysis (algorithm: %s)...", algo), 3.5, 6)
 	result := cg.InitResult(input.CVE, cloneDir, false, "", "", "")
 
 	// Run vulnerability analysis
-	logProgress(tool, "Running call graph analysis...")
+	sendProgress("Building call graph and analyzing reachability... This may take 30 seconds to 3 minutes depending on repository size and algorithm", 4, 6)
 	runVulnerabilityAnalysis(result)
-	logProgress(tool, fmt.Sprintf("Analysis complete. Vulnerable: %s", result.IsVulnerable))
+	sendProgress(fmt.Sprintf("Call graph analysis complete. Vulnerability status: %s", result.IsVulnerable), 5, 6)
 
 	// Generate summary
-	logProgress(tool, "Generating AI summary...")
+	sendProgress("Generating AI-powered summary (2-5 seconds)...", 5.5, 6)
 	cg.GenerateSummaryWithGemini(result)
-	logProgress(tool, "Scan complete")
+	sendProgress("Scan complete!", 6, 6)
 
 	// Build output
 	output := ScanResult{
@@ -277,7 +289,21 @@ func ScanVulnerability(ctx context.Context, req *mcp.CallToolRequest, input Scan
 // LookupCVE fetches CVE details from the Go vulnerability database
 func LookupCVE(ctx context.Context, req *mcp.CallToolRequest, input LookupCVEInput) (*mcp.CallToolResult, CVEInfo, error) {
 	const tool = "lookup_cve"
-	logProgress(tool, fmt.Sprintf("Looking up CVE: %s", input.CVE))
+
+	// Helper to send progress notifications to Claude
+	sendProgress := func(message string, current, total float64) {
+		if token := req.Params.GetProgressToken(); token != nil {
+			req.Session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
+				Message:       message,
+				ProgressToken: token,
+				Progress:      current,
+				Total:         total,
+			})
+		}
+		logProgress(tool, message)
+	}
+
+	sendProgress(fmt.Sprintf("Looking up CVE: %s", input.CVE), 0, 3)
 
 	if input.CVE == "" {
 		return nil, CVEInfo{}, fmt.Errorf("cve is required")
@@ -287,22 +313,22 @@ func LookupCVE(ctx context.Context, req *mcp.CallToolRequest, input LookupCVEInp
 	var goID string
 	if common.IsGOCVEID(input.CVE) {
 		goID = input.CVE
-		logProgress(tool, fmt.Sprintf("Input is GO-ID: %s", goID))
+		sendProgress(fmt.Sprintf("Input is GO-ID: %s", goID), 1, 3)
 	} else if common.IsCVEID(input.CVE) {
 		// Convert CVE to GO-ID
-		logProgress(tool, "Converting CVE to GO-ID...")
+		sendProgress("Converting CVE to GO-ID...", 1, 3)
 		goID = fetchGoVulnID(input.CVE)
 		if goID == "" {
 			logProgress(tool, "No Go vulnerability found for this CVE")
 			return nil, CVEInfo{}, fmt.Errorf("no Go vulnerability found for %s", input.CVE)
 		}
-		logProgress(tool, fmt.Sprintf("Found GO-ID: %s", goID))
+		sendProgress(fmt.Sprintf("Found GO-ID: %s", goID), 1.5, 3)
 	} else {
 		return nil, CVEInfo{}, fmt.Errorf("invalid CVE format: %s", input.CVE)
 	}
 
 	// Fetch vulnerability details
-	logProgress(tool, "Fetching vulnerability details from Go database...")
+	sendProgress("Fetching vulnerability details from Go database...", 2, 3)
 	client := http.Client{Timeout: 10 * time.Second}
 	url := fmt.Sprintf("%s/ID/%s.json", cg.VulnsURL, goID)
 
@@ -348,16 +374,35 @@ func LookupCVE(ctx context.Context, req *mcp.CallToolRequest, input LookupCVEInp
 		}
 	}
 
+	sendProgress("CVE lookup complete", 3, 3)
 	return nil, output, nil
 }
 
 // CheckPackageVersion checks if a package version has known vulnerabilities
 func CheckPackageVersion(ctx context.Context, req *mcp.CallToolRequest, input CheckPackageVersionInput) (*mcp.CallToolResult, PackageVersionResult, error) {
+	const tool = "check_package_version"
+
+	// Helper to send progress notifications to Claude
+	sendProgress := func(message string, current, total float64) {
+		if token := req.Params.GetProgressToken(); token != nil {
+			req.Session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
+				Message:       message,
+				ProgressToken: token,
+				Progress:      current,
+				Total:         total,
+			})
+		}
+		logProgress(tool, message)
+	}
+
+	sendProgress(fmt.Sprintf("Checking package %s@%s for vulnerabilities. ETA: 5-15 seconds", input.Package, input.Version), 0, 20)
+
 	if input.Package == "" || input.Version == "" {
 		return nil, PackageVersionResult{}, fmt.Errorf("package and version are required")
 	}
 
 	// Fetch all vulnerabilities
+	sendProgress("Fetching vulnerability index from Go database...", 1, 20)
 	client := http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Get(cg.VulnsURL + "/index/vulns.json")
 	if err != nil {
@@ -375,6 +420,8 @@ func CheckPackageVersion(ctx context.Context, req *mcp.CallToolRequest, input Ch
 		return nil, PackageVersionResult{}, fmt.Errorf("failed to parse vulnerabilities: %v", err)
 	}
 
+	sendProgress("Vulnerability index loaded. Checking first 20 vulnerabilities for matches...", 2, 20)
+
 	output := PackageVersionResult{
 		Package: input.Package,
 		Version: input.Version,
@@ -385,6 +432,11 @@ func CheckPackageVersion(ctx context.Context, req *mcp.CallToolRequest, input Ch
 	for _, vuln := range vulns {
 		if checked >= 20 {
 			break
+		}
+
+		// Send progress update every 2 checks
+		if checked%2 == 0 {
+			sendProgress(fmt.Sprintf("Checking vulnerability %d/20...", checked+1), float64(2+checked), 20)
 		}
 
 		// Fetch full details for each vulnerability
@@ -429,8 +481,10 @@ func CheckPackageVersion(ctx context.Context, req *mcp.CallToolRequest, input Ch
 	output.Count = len(output.Vulnerabilities)
 	if output.Count == 0 {
 		output.Status = "No known vulnerabilities found"
+		sendProgress(fmt.Sprintf("Check complete! No vulnerabilities found for %s@%s", input.Package, input.Version), 20, 20)
 	} else {
 		output.Status = fmt.Sprintf("Found %d potential vulnerabilities", output.Count)
+		sendProgress(fmt.Sprintf("Check complete! Found %d vulnerabilities for %s@%s", output.Count, input.Package, input.Version), 20, 20)
 	}
 
 	return nil, output, nil
@@ -443,6 +497,23 @@ type CallGraphResult struct {
 
 // GetCallGraph generates an SVG visualization of the call path
 func GetCallGraph(ctx context.Context, req *mcp.CallToolRequest, input GetCallGraphInput) (*mcp.CallToolResult, CallGraphResult, error) {
+	const tool = "get_call_graph"
+
+	// Helper to send progress notifications to Claude
+	sendProgress := func(message string, current, total float64) {
+		if token := req.Params.GetProgressToken(); token != nil {
+			req.Session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
+				Message:       message,
+				ProgressToken: token,
+				Progress:      current,
+				Total:         total,
+			})
+		}
+		logProgress(tool, message)
+	}
+
+	sendProgress(fmt.Sprintf("Generating call graph for CVE %s. ETA: 1-3 minutes", input.CVE), 0, 5)
+
 	if input.Repo == "" || input.CVE == "" {
 		return nil, CallGraphResult{}, fmt.Errorf("repo and cve are required")
 	}
@@ -453,6 +524,7 @@ func GetCallGraph(ctx context.Context, req *mcp.CallToolRequest, input GetCallGr
 	}
 
 	// Clone repository
+	sendProgress(fmt.Sprintf("Cloning repository (branch: %s)... This may take 10-30 seconds", branch), 1, 5)
 	cloneDir, err := os.MkdirTemp("", "gvs-mcp-graph-*")
 	if err != nil {
 		return nil, CallGraphResult{}, fmt.Errorf("failed to create temp dir: %v", err)
@@ -462,15 +534,19 @@ func GetCallGraph(ctx context.Context, req *mcp.CallToolRequest, input GetCallGr
 	if err := common.CloneRepo(input.Repo, branch, cloneDir); err != nil {
 		return nil, CallGraphResult{}, fmt.Errorf("failed to clone repository: %v", err)
 	}
+	sendProgress("Clone completed successfully", 2, 5)
 
 	// Set algorithm (defaults to rta)
-	setAlgorithm(input.Algorithm, "rta")
+	algo := setAlgorithm(input.Algorithm, "rta")
+	sendProgress(fmt.Sprintf("Initializing vulnerability analysis (algorithm: %s)...", algo), 2.5, 5)
 
 	// Initialize result to get affected symbols
 	result := cg.InitResult(input.CVE, cloneDir, false, "", "", "")
 
 	// Run analysis to find call paths
+	sendProgress("Building call graph and analyzing reachability... This may take 30 seconds to 2 minutes", 3, 5)
 	runVulnerabilityAnalysis(result)
+	sendProgress("Call graph analysis complete", 4, 5)
 
 	// Find the symbol to trace
 	symbol := input.Symbol
@@ -491,23 +567,40 @@ func GetCallGraph(ctx context.Context, req *mcp.CallToolRequest, input GetCallGr
 	}
 
 	// Generate SVG
+	sendProgress(fmt.Sprintf("Generating SVG visualization for symbol %s...", symbol), 4.5, 5)
 	svgData, err := generateCallGraphSVG(result, cloneDir, pkg, symbol)
 	if err != nil {
 		return nil, CallGraphResult{}, fmt.Errorf("failed to generate call graph: %v", err)
 	}
 
+	sendProgress("SVG call graph generated successfully!", 5, 5)
 	return nil, CallGraphResult{SVG: string(svgData)}, nil
 }
 
 // ScanAllVulnerabilities runs govulncheck to find all vulnerabilities
 func ScanAllVulnerabilities(ctx context.Context, req *mcp.CallToolRequest, input ScanAllVulnerabilitiesInput) (*mcp.CallToolResult, AllVulnerabilitiesResult, error) {
 	const tool = "scan_all_vulnerabilities"
-	logProgress(tool, fmt.Sprintf("Starting full scan for repo=%s", input.Repo))
+
+	// Helper to send progress notifications to Claude
+	sendProgress := func(message string, current, total float64) {
+		if token := req.Params.GetProgressToken(); token != nil {
+			req.Session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
+				Message:       message,
+				ProgressToken: token,
+				Progress:      current,
+				Total:         total,
+			})
+		}
+		logProgress(tool, message)
+	}
+
+	sendProgress(fmt.Sprintf("Starting full vulnerability scan for %s. ETA: 1-10 minutes", input.Repo), 0, 10)
 
 	if input.Repo == "" {
 		return nil, AllVulnerabilitiesResult{}, fmt.Errorf("repo is required")
 	}
 
+	sendProgress("Detecting repository default branch...", 1, 10)
 	branch := input.Branch
 	if branch == "" {
 		branch = detectDefaultBranch(input.Repo)
@@ -515,7 +608,7 @@ func ScanAllVulnerabilities(ctx context.Context, req *mcp.CallToolRequest, input
 	}
 
 	// Clone repository
-	logProgress(tool, fmt.Sprintf("Cloning repository (branch: %s)...", branch))
+	sendProgress(fmt.Sprintf("Cloning repository (branch: %s)... This may take 10-30 seconds", branch), 2, 10)
 	cloneDir, err := os.MkdirTemp("", "gvs-mcp-scan-*")
 	if err != nil {
 		return nil, AllVulnerabilitiesResult{}, fmt.Errorf("failed to create temp dir: %v", err)
@@ -526,16 +619,16 @@ func ScanAllVulnerabilities(ctx context.Context, req *mcp.CallToolRequest, input
 		logProgress(tool, fmt.Sprintf("Clone failed: %v", err))
 		return nil, AllVulnerabilitiesResult{}, fmt.Errorf("failed to clone repository: %v", err)
 	}
-	logProgress(tool, "Clone completed successfully")
+	sendProgress("Clone completed successfully", 3, 10)
 
 	// Find Go modules
-	logProgress(tool, "Finding Go modules...")
+	sendProgress("Finding Go modules...", 4, 10)
 	moduleDirs, err := common.FindGoModDirs(cloneDir)
 	if err != nil || len(moduleDirs) == 0 {
 		logProgress(tool, "No Go modules found")
 		return nil, AllVulnerabilitiesResult{}, fmt.Errorf("no Go modules found in repository")
 	}
-	logProgress(tool, fmt.Sprintf("Found %d Go module(s)", len(moduleDirs)))
+	sendProgress(fmt.Sprintf("Found %d Go module(s). Starting govulncheck scans...", len(moduleDirs)), 5, 10)
 
 	output := AllVulnerabilitiesResult{
 		Repo:           input.Repo,
@@ -543,8 +636,14 @@ func ScanAllVulnerabilities(ctx context.Context, req *mcp.CallToolRequest, input
 		ModulesScanned: len(moduleDirs),
 	}
 
+	// Calculate progress increments (reserve 5 steps for setup, use remaining for modules)
+	moduleSteps := 5.0
+	stepPerModule := moduleSteps / float64(len(moduleDirs))
+
 	for i, modDir := range moduleDirs {
-		logProgress(tool, fmt.Sprintf("Running govulncheck on module %d/%d...", i+1, len(moduleDirs)))
+		currentProgress := 5.0 + (float64(i) * stepPerModule)
+		sendProgress(fmt.Sprintf("Running govulncheck on module %d/%d... This may take 1-2 minutes per module", i+1, len(moduleDirs)), currentProgress, 10)
+
 		govulnOutput, exitCode, err := common.RunGovulncheck(modDir, "./...")
 		if err != nil && exitCode != 3 {
 			logProgress(tool, fmt.Sprintf("govulncheck failed for module %d: %v", i+1, err))
@@ -579,22 +678,37 @@ func ScanAllVulnerabilities(ctx context.Context, req *mcp.CallToolRequest, input
 			"results":   findings,
 		})
 		output.TotalVulnerabilities += len(findings)
-		logProgress(tool, fmt.Sprintf("Module %d: found %d vulnerabilities", i+1, len(findings)))
+		sendProgress(fmt.Sprintf("Module %d/%d complete: found %d vulnerabilities", i+1, len(moduleDirs), len(findings)), 5.0+((float64(i)+1)*stepPerModule), 10)
 	}
 
-	logProgress(tool, fmt.Sprintf("Scan complete. Total vulnerabilities: %d", output.TotalVulnerabilities))
+	sendProgress(fmt.Sprintf("Full scan complete! Total vulnerabilities found: %d", output.TotalVulnerabilities), 10, 10)
 	return nil, output, nil
 }
 
 // AnalyzeReflectionRisks analyzes code for reflection-based vulnerability risks
 func AnalyzeReflectionRisks(ctx context.Context, req *mcp.CallToolRequest, input AnalyzeReflectionRisksInput) (*mcp.CallToolResult, ReflectionAnalysisResult, error) {
 	const tool = "analyze_reflection_risks"
-	logProgress(tool, fmt.Sprintf("Starting reflection analysis for repo=%s", input.Repo))
+
+	// Helper to send progress notifications to Claude
+	sendProgress := func(message string, current, total float64) {
+		if token := req.Params.GetProgressToken(); token != nil {
+			req.Session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
+				Message:       message,
+				ProgressToken: token,
+				Progress:      current,
+				Total:         total,
+			})
+		}
+		logProgress(tool, message)
+	}
+
+	sendProgress(fmt.Sprintf("Starting reflection analysis for %s. ETA: 1-3 minutes", input.Repo), 0, 5)
 
 	if input.Repo == "" {
 		return nil, ReflectionAnalysisResult{}, fmt.Errorf("repo is required")
 	}
 
+	sendProgress("Detecting repository default branch...", 1, 5)
 	branch := input.Branch
 	if branch == "" {
 		branch = detectDefaultBranch(input.Repo)
@@ -602,7 +716,7 @@ func AnalyzeReflectionRisks(ctx context.Context, req *mcp.CallToolRequest, input
 	}
 
 	// Clone repository
-	logProgress(tool, fmt.Sprintf("Cloning repository (branch: %s)...", branch))
+	sendProgress(fmt.Sprintf("Cloning repository (branch: %s)... This may take 10-30 seconds", branch), 2, 5)
 	cloneDir, err := os.MkdirTemp("", "gvs-mcp-reflect-*")
 	if err != nil {
 		return nil, ReflectionAnalysisResult{}, fmt.Errorf("failed to create temp dir: %v", err)
@@ -613,12 +727,11 @@ func AnalyzeReflectionRisks(ctx context.Context, req *mcp.CallToolRequest, input
 		logProgress(tool, fmt.Sprintf("Clone failed: %v", err))
 		return nil, ReflectionAnalysisResult{}, fmt.Errorf("failed to clone repository: %v", err)
 	}
-	logProgress(tool, "Clone completed successfully")
+	sendProgress("Clone completed successfully", 3, 5)
 
 	// Set algorithm (defaults to rta - best for reflection tracking)
 	algo := setAlgorithm(input.Algorithm, "rta")
-	logProgress(tool, fmt.Sprintf("Using algorithm: %s", algo))
-	logProgress(tool, "Analyzing reflection patterns...")
+	sendProgress(fmt.Sprintf("Analyzing reflection patterns (algorithm: %s)... This may take 30 seconds to 2 minutes", algo), 4, 5)
 
 	// Initialize result
 	cve := input.CVE
@@ -683,18 +796,34 @@ func AnalyzeReflectionRisks(ctx context.Context, req *mcp.CallToolRequest, input
 		output.Summary = "No reflection-based risks detected"
 	}
 
+	sendProgress(fmt.Sprintf("Reflection analysis complete! Found %d total risks (%d high, %d medium, %d low confidence)", output.RiskCount, output.HighConfidenceRisks, output.MediumConfidenceRisks, output.LowConfidenceRisks), 5, 5)
 	return nil, output, nil
 }
 
 // CheckSymbolReachability checks if a specific symbol is reachable from entry points
 func CheckSymbolReachability(ctx context.Context, req *mcp.CallToolRequest, input CheckSymbolReachabilityInput) (*mcp.CallToolResult, SymbolReachabilityResult, error) {
 	const tool = "check_symbol_reachability"
-	logProgress(tool, fmt.Sprintf("Starting reachability check for repo=%s, package=%s, symbol=%s", input.Repo, input.Package, input.Symbol))
+
+	// Helper to send progress notifications to Claude
+	sendProgress := func(message string, current, total float64) {
+		if token := req.Params.GetProgressToken(); token != nil {
+			req.Session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
+				Message:       message,
+				ProgressToken: token,
+				Progress:      current,
+				Total:         total,
+			})
+		}
+		logProgress(tool, message)
+	}
+
+	sendProgress(fmt.Sprintf("Starting reachability check for %s.%s in %s. ETA: 1-3 minutes", input.Package, input.Symbol, input.Repo), 0, 6)
 
 	if input.Repo == "" || input.Package == "" || input.Symbol == "" {
 		return nil, SymbolReachabilityResult{}, fmt.Errorf("repo, package, and symbol are required")
 	}
 
+	sendProgress("Detecting repository default branch...", 1, 6)
 	branch := input.Branch
 	if branch == "" {
 		branch = detectDefaultBranch(input.Repo)
@@ -702,7 +831,7 @@ func CheckSymbolReachability(ctx context.Context, req *mcp.CallToolRequest, inpu
 	}
 
 	// Clone repository
-	logProgress(tool, fmt.Sprintf("Cloning repository (branch: %s)...", branch))
+	sendProgress(fmt.Sprintf("Cloning repository (branch: %s)... This may take 10-30 seconds", branch), 2, 6)
 	cloneDir, err := os.MkdirTemp("", "gvs-mcp-reach-*")
 	if err != nil {
 		return nil, SymbolReachabilityResult{}, fmt.Errorf("failed to create temp dir: %v", err)
@@ -713,11 +842,11 @@ func CheckSymbolReachability(ctx context.Context, req *mcp.CallToolRequest, inpu
 		logProgress(tool, fmt.Sprintf("Clone failed: %v", err))
 		return nil, SymbolReachabilityResult{}, fmt.Errorf("failed to clone repository: %v", err)
 	}
-	logProgress(tool, "Clone completed successfully")
+	sendProgress("Clone completed successfully", 3, 6)
 
 	// Set algorithm
 	algo := setAlgorithm(input.Algorithm, "rta")
-	logProgress(tool, fmt.Sprintf("Using algorithm: %s", algo))
+	sendProgress(fmt.Sprintf("Building call graph (algorithm: %s)... This may take 30 seconds to 2 minutes", algo), 4, 6)
 
 	output := SymbolReachabilityResult{
 		Repo:      input.Repo,
@@ -743,6 +872,8 @@ func CheckSymbolReachability(ctx context.Context, req *mcp.CallToolRequest, inpu
 	if len(tempResult.Files) == 0 {
 		return nil, SymbolReachabilityResult{}, fmt.Errorf("no main packages found in repository")
 	}
+
+	sendProgress(fmt.Sprintf("Searching for symbol reachability across %d module(s)...", len(tempResult.Files)), 5, 6)
 
 	// Try each module and file set
 	for modDir, fileSets := range tempResult.Files {
@@ -787,10 +918,11 @@ func CheckSymbolReachability(ctx context.Context, req *mcp.CallToolRequest, inpu
 						}
 					}
 
-					logProgress(tool, fmt.Sprintf("Symbol is reachable via %d-step call path", len(path)))
+					sendProgress(fmt.Sprintf("Symbol found! Reachable via %d-step call path", len(path)), 5.5, 6)
 
 					// Generate graph if requested
 					if input.GenerateGraph {
+						sendProgress("Generating SVG call graph visualization...", 5.7, 6)
 						dotOutput := pathToDOT(path)
 						sfdpCmd := exec.Command("sfdp", "-Tsvg", "-Goverlap=scale")
 						sfdpCmd.Stdin = strings.NewReader(dotOutput)
@@ -803,6 +935,7 @@ func CheckSymbolReachability(ctx context.Context, req *mcp.CallToolRequest, inpu
 					}
 
 					output.Summary = fmt.Sprintf("Symbol %s IS reachable from %s via %d function calls", fullSymbol, output.EntryPoint, len(path)-1)
+					sendProgress(fmt.Sprintf("Analysis complete! Symbol IS REACHABLE via %d function calls", len(path)-1), 6, 6)
 					return nil, output, nil
 				}
 			}
@@ -812,7 +945,7 @@ func CheckSymbolReachability(ctx context.Context, req *mcp.CallToolRequest, inpu
 	// Symbol not reachable
 	output.IsReachable = false
 	output.Summary = fmt.Sprintf("Symbol %s is NOT reachable from any entry point in the repository", fullSymbol)
-	logProgress(tool, "Symbol is not reachable")
+	sendProgress(fmt.Sprintf("Analysis complete! Symbol %s is NOT reachable", input.Symbol), 6, 6)
 
 	return nil, output, nil
 }
