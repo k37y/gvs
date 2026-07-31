@@ -18,7 +18,6 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/vertex"
-	"golang.org/x/mod/semver"
 	"golang.org/x/tools/go/callgraph"
 	"golang.org/x/tools/go/ssa"
 )
@@ -31,11 +30,10 @@ type claudeConfig struct {
 }
 
 type claudeResponse struct {
-	AgreesWithScanner bool     `json:"agrees_with_scanner"`
-	ClaudeAssessment  string   `json:"claude_assessment"`
-	Confidence        string   `json:"confidence"`
-	Reasoning         string   `json:"reasoning"`
-	Evidence          []string `json:"evidence"`
+	IsVulnerable string   `json:"IsVulnerable"`
+	Confidence   string   `json:"confidence"`
+	Reasoning    string   `json:"reasoning"`
+	Evidence     []string `json:"evidence"`
 }
 
 func VerifyAndSummarizeWithClaude(result *Result, repoDir string) {
@@ -174,18 +172,19 @@ func VerifyAndSummarizeWithClaude(result *Result, repoDir string) {
 	}
 
 	result.ClaudeVerification = &ClaudeVerification{
-		AgreesWithScanner: resp.AgreesWithScanner,
-		ClaudeAssessment:  resp.ClaudeAssessment,
-		Confidence:        resp.Confidence,
-		Reasoning:         resp.Reasoning,
-		Evidence:          resp.Evidence,
+		IsVulnerable: resp.IsVulnerable,
+		Confidence:   resp.Confidence,
+		Reasoning:    resp.Reasoning,
+		Evidence:     resp.Evidence,
 	}
 
-	if resp.AgreesWithScanner {
-		fmt.Fprintf(os.Stderr, "[claude] Result: agrees with scanner (confidence: %s)\n", resp.Confidence)
+	agrees := resp.IsVulnerable == result.IsVulnerable
+	if agrees {
+		fmt.Fprintf(os.Stderr, "[claude] Result: agrees with scanner (confidence: %s, IsVulnerable=%s)\n",
+			resp.Confidence, resp.IsVulnerable)
 	} else {
-		fmt.Fprintf(os.Stderr, "[claude] Result: disagrees with scanner (confidence: %s, claude=%s)\n",
-			resp.Confidence, resp.ClaudeAssessment)
+		fmt.Fprintf(os.Stderr, "[claude] Result: disagrees with scanner (confidence: %s, scanner=%s, claude=%s)\n",
+			resp.Confidence, result.IsVulnerable, resp.IsVulnerable)
 	}
 }
 
@@ -1001,12 +1000,7 @@ func (t *checkGoVersionTool) Execute(ctx context.Context, input json.RawMessage)
 			b.WriteString(fmt.Sprintf("  %s: no matching fix version for Go %s branch\n", pkg, goMod.Go))
 			continue
 		}
-		cmp := semver.Compare(goVersion, fixVer)
-		if cmp >= 0 {
-			b.WriteString(fmt.Sprintf("  %s: PATCHED (Go %s >= fix %s)\n", pkg, goMod.Go, fixVer))
-		} else {
-			b.WriteString(fmt.Sprintf("  %s: VULNERABLE (Go %s < fix %s)\n", pkg, goMod.Go, fixVer))
-		}
+		b.WriteString(fmt.Sprintf("  %s: current=%s, fix=%s\n", pkg, goMod.Go, fixVer))
 	}
 
 	if stdlibCount == 0 {
@@ -1507,8 +1501,26 @@ func loadSkillPrompt() (string, bool) {
 }
 
 func buildVerificationPrompt(result *Result, skillTemplate string, sourceSnippets map[string]string) (string, error) {
+	// Strip verdict-leaking fields (Symbols, FixCommands) from UsedImports
+	// to avoid anchoring Claude's independent assessment
+	type sanitizedUsedImports struct {
+		CurrentVersion string `json:"CurrentVersion,omitempty"`
+		ReplaceModule  string `json:"ReplaceModule,omitempty"`
+		ReplaceVersion string `json:"ReplaceVersion,omitempty"`
+		Dir            []string `json:"Dir,omitempty"`
+	}
+	sanitized := make(map[string]sanitizedUsedImports)
+	for pkg, details := range result.UsedImports {
+		sanitized[pkg] = sanitizedUsedImports{
+			CurrentVersion: details.CurrentVersion,
+			ReplaceModule:  details.ReplaceModule,
+			ReplaceVersion: details.ReplaceVersion,
+			Dir:            details.Dir,
+		}
+	}
+
 	promptResult := struct {
-		UsedImports     map[string]UsedImportsDetails     `json:"UsedImports,omitempty"`
+		UsedImports     map[string]sanitizedUsedImports   `json:"UsedImports,omitempty"`
 		AffectedImports map[string]AffectedImportsDetails `json:"AffectedImports,omitempty"`
 		GoCVE           string                            `json:"GoCVE"`
 		CVE             string                            `json:"CVE"`
@@ -1517,7 +1529,7 @@ func buildVerificationPrompt(result *Result, skillTemplate string, sourceSnippet
 		ReflectionRisks []ReflectionRisk                  `json:"ReflectionRisks,omitempty"`
 		Errors          []string                          `json:"Errors,omitempty"`
 	}{
-		UsedImports:     result.UsedImports,
+		UsedImports:     sanitized,
 		AffectedImports: result.AffectedImports,
 		GoCVE:           result.GoCVE,
 		CVE:             result.CVE,

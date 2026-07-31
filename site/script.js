@@ -154,10 +154,11 @@ function renderScanHistory() {
 		else if (vuln === 'false') label = '<span class="gvs-label gvs-label-success">false</span>';
 		const cv = item.output?.ClaudeVerification;
 		let aiLabel = '<span class="gvs-label gvs-label-warning">-</span>';
-		if (cv) {
-			aiLabel = cv.agrees_with_scanner
-				? '<span class="gvs-label gvs-label-success">Yes</span>'
-				: '<span class="gvs-label gvs-label-danger">No</span>';
+		if (cv && cv.IsVulnerable) {
+			const aiVuln = String(cv.IsVulnerable).toLowerCase();
+			if (aiVuln === 'true') aiLabel = '<span class="gvs-label gvs-label-danger">true</span>';
+			else if (aiVuln === 'false') aiLabel = '<span class="gvs-label gvs-label-success">false</span>';
+			else aiLabel = '<span class="gvs-label gvs-label-warning">unknown</span>';
 		}
 		const feedback = item.feedback || '-';
 		html += `<tr><td>${date}</td><td>${repo}</td><td>${branch}</td><td>${item.cve || '-'}</td><td>${algo}</td><td>${label}</td><td>${aiLabel}</td><td>${feedback}</td><td><button class="pf-v6-c-button pf-m-link pf-m-small" onclick="loadHistoryScan(${i})">View</button></td></tr>`;

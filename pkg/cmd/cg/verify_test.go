@@ -135,33 +135,33 @@ func TestCleanJSONResponse(t *testing.T) {
 	}{
 		{
 			name:  "plain JSON",
-			input: `{"agrees_with_scanner": true}`,
-			want:  `{"agrees_with_scanner": true}`,
+			input: `{"IsVulnerable": true}`,
+			want:  `{"IsVulnerable": true}`,
 		},
 		{
 			name:  "JSON in markdown code fence",
-			input: "```json\n{\"agrees_with_scanner\": true}\n```",
-			want:  `{"agrees_with_scanner": true}`,
+			input: "```json\n{\"IsVulnerable\": true}\n```",
+			want:  `{"IsVulnerable": true}`,
 		},
 		{
 			name:  "JSON in plain code fence",
-			input: "```\n{\"agrees_with_scanner\": false}\n```",
-			want:  `{"agrees_with_scanner": false}`,
+			input: "```\n{\"IsVulnerable\": false}\n```",
+			want:  `{"IsVulnerable": false}`,
 		},
 		{
 			name:  "JSON with leading whitespace",
-			input: "  \n{\"agrees_with_scanner\": true}  \n",
-			want:  `{"agrees_with_scanner": true}`,
+			input: "  \n{\"IsVulnerable\": true}  \n",
+			want:  `{"IsVulnerable": true}`,
 		},
 		{
 			name:  "JSON embedded in prose",
-			input: "The analysis shows the following:\n\n{\"agrees_with_scanner\": true}\n\nThat concludes my review.",
-			want:  `{"agrees_with_scanner": true}`,
+			input: "The analysis shows the following:\n\n{\"IsVulnerable\": true}\n\nThat concludes my review.",
+			want:  `{"IsVulnerable": true}`,
 		},
 		{
 			name:  "JSON in markdown fence mid-text",
-			input: "Here is my assessment:\n\n```json\n{\"agrees_with_scanner\": false}\n```\n\nDone.",
-			want:  `{"agrees_with_scanner": false}`,
+			input: "Here is my assessment:\n\n```json\n{\"IsVulnerable\": false}\n```\n\nDone.",
+			want:  `{"IsVulnerable": false}`,
 		},
 		{
 			name:  "nested braces in prose",
@@ -175,13 +175,13 @@ func TestCleanJSONResponse(t *testing.T) {
 		},
 		{
 			name:  "small JSON fragment before real answer",
-			input: "I found sshConfig{} struct and evidence.\n\n{\"agrees_with_scanner\": true, \"confidence\": \"high\"}",
-			want:  `{"agrees_with_scanner": true, "confidence": "high"}`,
+			input: "I found sshConfig{} struct and evidence.\n\n{\"IsVulnerable\": true, \"confidence\": \"high\"}",
+			want:  `{"IsVulnerable": true, "confidence": "high"}`,
 		},
 		{
 			name:  "multiple JSON objects picks last",
-			input: "{\"wrong\": true}\nSome analysis text\n{\"agrees_with_scanner\": false, \"confidence\": \"medium\"}",
-			want:  `{"agrees_with_scanner": false, "confidence": "medium"}`,
+			input: "{\"wrong\": true}\nSome analysis text\n{\"IsVulnerable\": false, \"confidence\": \"medium\"}",
+			want:  `{"IsVulnerable": false, "confidence": "medium"}`,
 		},
 	}
 

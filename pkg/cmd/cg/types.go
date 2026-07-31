@@ -46,11 +46,10 @@ type ReflectionRisk struct {
 
 // ClaudeVerification holds the independent AI audit of the scan result
 type ClaudeVerification struct {
-	AgreesWithScanner bool     `json:"agrees_with_scanner"`
-	ClaudeAssessment  string   `json:"claude_assessment"`
-	Confidence        string   `json:"confidence"`
-	Reasoning         string   `json:"reasoning"`
-	Evidence          []string `json:"evidence"`
+	IsVulnerable string   `json:"IsVulnerable"`
+	Confidence   string   `json:"confidence"`
+	Reasoning    string   `json:"reasoning"`
+	Evidence     []string `json:"evidence"`
 }
 
 type Result struct {

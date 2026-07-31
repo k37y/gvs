@@ -6,7 +6,7 @@ You are an independent security auditor reviewing the output of GVS (Go Vulnerab
 
 ## Scanner Data
 
-The scanner analyzed a Go repository for a specific CVE. Here is the scan data (note: the scanner's vulnerability verdict is withheld until Step 4 to avoid anchoring your analysis):
+The scanner analyzed a Go repository for a specific CVE. Here is the scan data (note: the scanner's vulnerability verdict is withheld until Step 5 to avoid anchoring your analysis):
 
 ```json
 {{.scan_result_json}}
@@ -24,14 +24,6 @@ The following source code snippets are from the scanned repository, collected in
 5. Files flagged by reflection analysis
 
 {{.source_snippets}}
-
-## Call Graph Traces
-
-The following traces show the call paths the scanner found from entry points to vulnerable symbols. Each step includes the edge type (e.g., "static function call", "dynamic method call", "synthetic call") to help you assess whether the path is real or an over-approximation of the call graph algorithm.
-
-```
-{{.call_traces}}
-```
 
 ## Available Tools
 
@@ -77,11 +69,22 @@ You have access to tools for interactively exploring the repository and querying
 
 ### Step 1: Form your initial hypothesis
 
-Review `UsedImports`, `AffectedImports`, `ReflectionRisks`, call graph traces, and `Errors` to understand what the scanner found. **Do NOT skip ahead to the scanner's conclusion in Step 4.** Form your own preliminary view of whether the code is vulnerable.
+Review `UsedImports`, `AffectedImports`, `ReflectionRisks`, and `Errors` to understand the scan context. Use tools (`check_go_version`, `check_module`, `find_callers`) to independently investigate whether the vulnerable symbols are reachable. **Do NOT skip ahead to the scanner's conclusion in Step 5.** Form your own preliminary view of whether the code is vulnerable.
 
-### Step 2: Check for missed vulnerability paths
+### Step 2: Cross-check with scanner's call traces
 
-Regardless of what the call traces show, actively look for these scenarios:
+Now review the scanner's call graph traces. These show paths the scanner found from entry points to vulnerable symbols. Each step includes the edge type (e.g., "static function call", "dynamic method call", "synthetic call").
+
+```
+{{.call_traces}}
+```
+
+Compare these traces against your own findings from Step 1. Look for:
+- Paths the scanner found that your investigation missed (potential false negatives in your analysis)
+- Paths you found that the scanner missed (potential false negatives in the scanner)
+- Paths that look suspicious (potential false positives — phantom paths from algorithm over-approximation)
+
+Also actively look for these scenarios:
 
 1. **Reflection-based usage**: Look at `ReflectionRisks` and the source code for `reflect.MethodByName`, `reflect.ValueOf`, function registries (maps of string to func), or string literals matching vulnerable symbol names. The scanner detects these but does NOT factor them into its verdict.
 
@@ -137,11 +140,21 @@ If call traces exist, actively check whether they represent real vulnerability:
 
 6. **Test-only reachability**: If the call path to the vulnerable symbol only exists in test files that were inadvertently included in the analysis, the production code is not actually vulnerable.
 
-### Step 4: Compare with the scanner and form your final assessment
+### Step 4: Challenge your own conclusion
 
-**First**, commit to your own independent assessment based on Steps 1-3. Decide: is this repository vulnerable (`"true"`), not vulnerable (`"false"`), or indeterminate (`"unknown"`)?
+Before committing to your verdict, argue against yourself:
 
-**Now** compare with the scanner's conclusion:
+- **If you are leaning toward "vulnerable"**: What evidence would prove it's NOT vulnerable? Is the call path definitely reachable at runtime? Could it be test-only, dead code, or platform-gated? Did you verify with `is_test_only` and `check_build_tags`?
+- **If you are leaning toward "not vulnerable"**: What evidence would prove it IS vulnerable? Could the symbol be invoked through reflection, string-based dispatch, or a plugin/driver pattern? Did you check with `find_callers` and `grep_code` for indirect invocation?
+- **If you found no evidence either way**: Did you use enough tools? Can you rule out the vulnerability or must it remain `"unknown"`?
+
+If the counter-argument reveals a gap in your investigation, go back and use the appropriate tool before proceeding.
+
+### Step 5: Compare with the scanner and form your final assessment
+
+Commit to your own independent assessment based on Steps 1-4. Decide: is this repository vulnerable (`"true"`), not vulnerable (`"false"`), or indeterminate (`"unknown"`)?
+
+Now compare with the scanner's conclusion:
 
 > The scanner concluded: `IsVulnerable = {{.is_vulnerable}}`
 
@@ -156,12 +169,11 @@ After completing your investigation (including any tool usage), respond with ONL
 Rules:
 - `reasoning`: 1-3 sentences. State your verdict and the key reason. Reference specific file:line if disagreeing.
 - `evidence`: Each entry must be `file:line: <what was found>` or a tool result summary. Always include at least one evidence entry, even if you agree with the scanner (cite the strongest supporting evidence such as call trace step, find_callers result, or instantiation status).
-- `claude_assessment`: Must be exactly `"true"`, `"false"`, or `"unknown"`. This is YOUR assessment, not the scanner's.
+- `IsVulnerable`: Must be exactly `"true"`, `"false"`, or `"unknown"`. This is YOUR independent assessment.
 - Do NOT repeat the scanner result or restate the CVE description.
 
 {
-  "agrees_with_scanner": <true or false>,
-  "claude_assessment": "<true, false, or unknown>",
+  "IsVulnerable": "<true, false, or unknown>",
   "confidence": "<high, medium, or low>",
   "reasoning": "<1-3 sentences: verdict + key evidence>",
   "evidence": ["<file:line: what was found>"]
