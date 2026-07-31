@@ -30,11 +30,10 @@ type claudeConfig struct {
 }
 
 type claudeResponse struct {
-	AgreesWithScanner bool     `json:"agrees_with_scanner"`
-	ClaudeAssessment  string   `json:"claude_assessment"`
-	Confidence        string   `json:"confidence"`
-	Reasoning         string   `json:"reasoning"`
-	Evidence          []string `json:"evidence"`
+	IsVulnerable string   `json:"IsVulnerable"`
+	Confidence   string   `json:"confidence"`
+	Reasoning    string   `json:"reasoning"`
+	Evidence     []string `json:"evidence"`
 }
 
 func VerifyAndSummarizeWithClaude(result *Result, repoDir string) {
@@ -71,6 +70,12 @@ func VerifyAndSummarizeWithClaude(result *Result, repoDir string) {
 		&grepCodeTool{repoDir: repoDir},
 		&readFileTool{repoDir: repoDir},
 		&listFilesTool{repoDir: repoDir},
+		&checkModuleTool{repoDir: repoDir},
+		&checkGoVersionTool{repoDir: repoDir, result: result},
+		&isTestOnlyTool{repoDir: repoDir},
+		&checkBuildTagsTool{repoDir: repoDir},
+		&listEntryPointsTool{repoDir: repoDir},
+		&checkTransitiveDepsTool{repoDir: repoDir},
 	}
 	if result.SsaProg != nil {
 		tools = append(tools, &findImplementationsTool{prog: result.SsaProg})
@@ -167,18 +172,19 @@ func VerifyAndSummarizeWithClaude(result *Result, repoDir string) {
 	}
 
 	result.ClaudeVerification = &ClaudeVerification{
-		AgreesWithScanner: resp.AgreesWithScanner,
-		ClaudeAssessment:  resp.ClaudeAssessment,
-		Confidence:        resp.Confidence,
-		Reasoning:         resp.Reasoning,
-		Evidence:          resp.Evidence,
+		IsVulnerable: resp.IsVulnerable,
+		Confidence:   resp.Confidence,
+		Reasoning:    resp.Reasoning,
+		Evidence:     resp.Evidence,
 	}
 
-	if resp.AgreesWithScanner {
-		fmt.Fprintf(os.Stderr, "[claude] Result: agrees with scanner (confidence: %s)\n", resp.Confidence)
+	agrees := resp.IsVulnerable == result.IsVulnerable
+	if agrees {
+		fmt.Fprintf(os.Stderr, "[claude] Result: agrees with scanner (confidence: %s, IsVulnerable=%s)\n",
+			resp.Confidence, resp.IsVulnerable)
 	} else {
-		fmt.Fprintf(os.Stderr, "[claude] Result: disagrees with scanner (confidence: %s, claude=%s)\n",
-			resp.Confidence, resp.ClaudeAssessment)
+		fmt.Fprintf(os.Stderr, "[claude] Result: disagrees with scanner (confidence: %s, scanner=%s, claude=%s)\n",
+			resp.Confidence, result.IsVulnerable, resp.IsVulnerable)
 	}
 }
 
@@ -763,6 +769,607 @@ func (t *findCallersTool) Execute(ctx context.Context, input json.RawMessage) ([
 	return textResult(b.String())
 }
 
+// check_module tool
+type checkModuleTool struct{ repoDir string }
+
+func (t *checkModuleTool) Name() string { return "check_module" }
+func (t *checkModuleTool) Description() string {
+	return "Check how a Go package is resolved (go.mod replace directives, vendor), verify symbol definitions in vendor, and find actual symbol calls in repo code. Use instead of grep_code for checking vulnerable symbol usage."
+}
+func (t *checkModuleTool) InputSchema() anthropic.BetaToolInputSchemaParam {
+	return anthropic.BetaToolInputSchemaParam{
+		Properties: map[string]any{
+			"package": map[string]any{"type": "string", "description": "Full package import path, e.g. golang.org/x/net/html"},
+			"symbols": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Vulnerable symbol names to check, e.g. [\"Parse\", \"ParseFragment\"]"},
+		},
+		Required: []string{"package", "symbols"},
+	}
+}
+
+func (t *checkModuleTool) Execute(ctx context.Context, input json.RawMessage) ([]anthropic.BetaToolResultBlockParamContentUnion, error) {
+	var params struct {
+		Package string   `json:"package"`
+		Symbols []string `json:"symbols"`
+	}
+	if err := json.Unmarshal(input, &params); err != nil {
+		return textResult(fmt.Sprintf("error: %v", err))
+	}
+
+	var b strings.Builder
+
+	// 1. Parse go.mod for replace directives
+	cmd := exec.CommandContext(ctx, "go", "mod", "edit", "-json")
+	cmd.Dir = t.repoDir
+	cmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off")
+	out, err := cmd.Output()
+
+	b.WriteString("## Module Resolution\n\n")
+	if err != nil {
+		b.WriteString(fmt.Sprintf("Failed to parse go.mod: %v\n", err))
+	} else {
+		var goMod GoModEdit
+		json.Unmarshal(out, &goMod)
+
+		replaced := false
+		for _, r := range goMod.Replace {
+			if r.Old.Path == params.Package || strings.HasPrefix(params.Package, r.Old.Path+"/") {
+				b.WriteString(fmt.Sprintf("Replace: %s %s => %s %s\n", r.Old.Path, r.Old.Version, r.New.Path, r.New.Version))
+				replaced = true
+			}
+		}
+		if !replaced {
+			b.WriteString("Replace: none\n")
+		}
+
+		// Find version in Require
+		for _, req := range goMod.Require {
+			if req.Path == params.Package || strings.HasPrefix(params.Package, req.Path+"/") {
+				dep := "direct"
+				if req.Indirect {
+					dep = "indirect"
+				}
+				b.WriteString(fmt.Sprintf("Require: %s %s (%s)\n", req.Path, req.Version, dep))
+			}
+		}
+	}
+
+	// 2. Check vendor directory
+	b.WriteString("\n## Vendor Status\n\n")
+	vendorPath := filepath.Join(t.repoDir, "vendor", params.Package)
+	if info, err := os.Stat(vendorPath); err == nil && info.IsDir() {
+		b.WriteString(fmt.Sprintf("Vendored: yes (%s)\n", filepath.Join("vendor", params.Package)))
+
+		entries, _ := os.ReadDir(vendorPath)
+		var goFiles []string
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".go") && !strings.HasSuffix(e.Name(), "_test.go") {
+				goFiles = append(goFiles, e.Name())
+			}
+		}
+		if len(goFiles) > 50 {
+			b.WriteString(fmt.Sprintf("Files: %d .go files (showing first 50)\n", len(goFiles)))
+			goFiles = goFiles[:50]
+		} else {
+			b.WriteString(fmt.Sprintf("Files: %s\n", strings.Join(goFiles, ", ")))
+		}
+
+		// 3. Check symbol definitions in vendor
+		b.WriteString("\n## Symbol Definitions in Vendor\n\n")
+		for _, sym := range params.Symbols {
+			pattern := fmt.Sprintf("func %s(\\||func .* %s(", sym, sym)
+			grepCmd := exec.CommandContext(ctx, "grep", "-rn", "-E", pattern)
+			grepCmd.Dir = vendorPath
+			grepOut, _ := grepCmd.Output()
+			if len(grepOut) > 0 {
+				lines := strings.Split(strings.TrimSpace(string(grepOut)), "\n")
+				if len(lines) > 5 {
+					lines = lines[:5]
+				}
+				for _, l := range lines {
+					b.WriteString(fmt.Sprintf("  %s: %s\n", sym, l))
+				}
+			} else {
+				b.WriteString(fmt.Sprintf("  %s: not defined in vendor\n", sym))
+			}
+		}
+	} else {
+		b.WriteString("Vendored: no\n")
+	}
+
+	// 4. Find imports of the package in repo code (exclude vendor)
+	b.WriteString("\n## Symbol Usage in Repo Code\n\n")
+	importPattern := fmt.Sprintf(`"%s"`, params.Package)
+	importCmd := exec.CommandContext(ctx, "grep", "-rn", "--include=*.go", importPattern, ".")
+	importCmd.Dir = t.repoDir
+	importOut, _ := importCmd.Output()
+
+	var importingFiles []string
+	for _, line := range strings.Split(strings.TrimSpace(string(importOut)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) < 1 {
+			continue
+		}
+		file := parts[0]
+		if strings.Contains(file, "/vendor/") {
+			continue
+		}
+		found := false
+		for _, f := range importingFiles {
+			if f == file {
+				found = true
+				break
+			}
+		}
+		if !found {
+			importingFiles = append(importingFiles, file)
+		}
+	}
+
+	if len(importingFiles) == 0 {
+		b.WriteString("No repo code imports this package.\n")
+	} else {
+		b.WriteString(fmt.Sprintf("Files importing %s:\n", params.Package))
+		for _, f := range importingFiles {
+			b.WriteString(fmt.Sprintf("  %s\n", f))
+		}
+
+		// 5. For each symbol, grep importing files for calls
+		lastSegment := params.Package[strings.LastIndex(params.Package, "/")+1:]
+		for _, sym := range params.Symbols {
+			b.WriteString(fmt.Sprintf("\nCalls to %s:\n", sym))
+			callPattern := fmt.Sprintf(`\.%s(`, sym)
+			found := 0
+			for _, file := range importingFiles {
+				fullPath := filepath.Join(t.repoDir, file)
+				callCmd := exec.CommandContext(ctx, "grep", "-n", callPattern, fullPath)
+				callOut, _ := callCmd.Output()
+				for _, l := range strings.Split(strings.TrimSpace(string(callOut)), "\n") {
+					if l == "" {
+						continue
+					}
+					b.WriteString(fmt.Sprintf("  %s:%s\n", file, l))
+					found++
+					if found >= 20 {
+						b.WriteString("  ... (truncated at 20 matches)\n")
+						break
+					}
+				}
+				if found >= 20 {
+					break
+				}
+			}
+			if found == 0 {
+				b.WriteString(fmt.Sprintf("  %s.%s() not called in repo code\n", lastSegment, sym))
+			}
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "[claude] check_module result: pkg=%s symbols=%v imports=%d\n", params.Package, params.Symbols, len(importingFiles))
+	return textResult(b.String())
+}
+
+// check_go_version tool
+type checkGoVersionTool struct {
+	repoDir string
+	result  *Result
+}
+
+func (t *checkGoVersionTool) Name() string { return "check_go_version" }
+func (t *checkGoVersionTool) Description() string {
+	return "Check the Go toolchain version from go.mod and compare against fixed versions for stdlib CVE packages. For stdlib CVEs, this may be the complete answer."
+}
+func (t *checkGoVersionTool) InputSchema() anthropic.BetaToolInputSchemaParam {
+	return anthropic.BetaToolInputSchemaParam{
+		Properties: map[string]any{},
+	}
+}
+
+func (t *checkGoVersionTool) Execute(ctx context.Context, input json.RawMessage) ([]anthropic.BetaToolResultBlockParamContentUnion, error) {
+	cmd := exec.CommandContext(ctx, "go", "mod", "edit", "-json")
+	cmd.Dir = t.repoDir
+	cmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off")
+	out, err := cmd.Output()
+	if err != nil {
+		return textResult(fmt.Sprintf("error reading go.mod: %v", err))
+	}
+
+	var goMod GoModEdit
+	if err := json.Unmarshal(out, &goMod); err != nil {
+		return textResult(fmt.Sprintf("error parsing go.mod: %v", err))
+	}
+
+	goVersion := goMod.Go
+	if !strings.HasPrefix(goVersion, "v") {
+		goVersion = "v" + goVersion
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Go version: %s\n\n", goMod.Go))
+
+	stdlibCount := 0
+	for pkg, details := range t.result.AffectedImports {
+		if details.Type != "stdlib" {
+			continue
+		}
+		stdlibCount++
+		fixVer := findAppropriateFixVersion(goVersion, details.FixedVersion)
+		if fixVer == "" {
+			b.WriteString(fmt.Sprintf("  %s: no matching fix version for Go %s branch\n", pkg, goMod.Go))
+			continue
+		}
+		b.WriteString(fmt.Sprintf("  %s: current=%s, fix=%s\n", pkg, goMod.Go, fixVer))
+	}
+
+	if stdlibCount == 0 {
+		b.WriteString("No stdlib packages in AffectedImports.\n")
+	}
+
+	fmt.Fprintf(os.Stderr, "[claude] check_go_version result: Go %s, %d stdlib packages checked\n", goMod.Go, stdlibCount)
+	return textResult(b.String())
+}
+
+// is_test_only tool
+type isTestOnlyTool struct{ repoDir string }
+
+func (t *isTestOnlyTool) Name() string { return "is_test_only" }
+func (t *isTestOnlyTool) Description() string {
+	return "Check if a Go file is test-only (test file or test package). Vulnerable code only in tests does not affect production."
+}
+func (t *isTestOnlyTool) InputSchema() anthropic.BetaToolInputSchemaParam {
+	return anthropic.BetaToolInputSchemaParam{
+		Properties: map[string]any{
+			"file": map[string]any{"type": "string", "description": "File path relative to repo root"},
+		},
+		Required: []string{"file"},
+	}
+}
+
+func (t *isTestOnlyTool) Execute(ctx context.Context, input json.RawMessage) ([]anthropic.BetaToolResultBlockParamContentUnion, error) {
+	var params struct {
+		File string `json:"file"`
+	}
+	if err := json.Unmarshal(input, &params); err != nil {
+		return textResult(fmt.Sprintf("error: %v", err))
+	}
+
+	fullPath, err := safePath(t.repoDir, params.File)
+	if err != nil {
+		return textResult(err.Error())
+	}
+
+	baseName := filepath.Base(params.File)
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("File: %s\n", params.File))
+
+	if strings.HasSuffix(baseName, "_test.go") {
+		b.WriteString("Test-only: YES (filename ends with _test.go)\n")
+		fmt.Fprintf(os.Stderr, "[claude] is_test_only result: %s -> yes (test file)\n", params.File)
+		return textResult(b.String())
+	}
+
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, fullPath, nil, parser.PackageClauseOnly)
+	if err != nil {
+		b.WriteString(fmt.Sprintf("Test-only: UNKNOWN (parse error: %v)\n", err))
+		fmt.Fprintf(os.Stderr, "[claude] is_test_only result: %s -> unknown\n", params.File)
+		return textResult(b.String())
+	}
+
+	pkgName := f.Name.Name
+	b.WriteString(fmt.Sprintf("Package: %s\n", pkgName))
+
+	if strings.HasSuffix(pkgName, "_test") {
+		b.WriteString("Test-only: YES (external test package)\n")
+		fmt.Fprintf(os.Stderr, "[claude] is_test_only result: %s -> yes (test package)\n", params.File)
+		return textResult(b.String())
+	}
+
+	// Check if the directory has any non-test .go files
+	dir := filepath.Dir(fullPath)
+	entries, _ := os.ReadDir(dir)
+	hasNonTest := false
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".go") && !strings.HasSuffix(e.Name(), "_test.go") {
+			hasNonTest = true
+			break
+		}
+	}
+	if !hasNonTest {
+		b.WriteString("Test-only: YES (directory contains only test files)\n")
+	} else {
+		b.WriteString("Test-only: NO (production code)\n")
+	}
+
+	fmt.Fprintf(os.Stderr, "[claude] is_test_only result: %s -> %v\n", params.File, !hasNonTest)
+	return textResult(b.String())
+}
+
+// check_build_tags tool
+type checkBuildTagsTool struct{ repoDir string }
+
+func (t *checkBuildTagsTool) Name() string { return "check_build_tags" }
+func (t *checkBuildTagsTool) Description() string {
+	return "Check for build constraints (//go:build and // +build tags) in a Go file. Helps determine if vulnerable code is conditionally compiled for specific platforms."
+}
+func (t *checkBuildTagsTool) InputSchema() anthropic.BetaToolInputSchemaParam {
+	return anthropic.BetaToolInputSchemaParam{
+		Properties: map[string]any{
+			"file": map[string]any{"type": "string", "description": "File path relative to repo root"},
+		},
+		Required: []string{"file"},
+	}
+}
+
+func (t *checkBuildTagsTool) Execute(ctx context.Context, input json.RawMessage) ([]anthropic.BetaToolResultBlockParamContentUnion, error) {
+	var params struct {
+		File string `json:"file"`
+	}
+	if err := json.Unmarshal(input, &params); err != nil {
+		return textResult(fmt.Sprintf("error: %v", err))
+	}
+
+	fullPath, err := safePath(t.repoDir, params.File)
+	if err != nil {
+		return textResult(err.Error())
+	}
+
+	file, err := os.Open(fullPath)
+	if err != nil {
+		return textResult(fmt.Sprintf("error: %v", err))
+	}
+	defer file.Close()
+
+	var constraints []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "package ") {
+			break
+		}
+		if strings.HasPrefix(line, "//go:build ") {
+			constraints = append(constraints, line)
+		} else if strings.HasPrefix(line, "// +build ") {
+			constraints = append(constraints, line)
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("File: %s\n", params.File))
+	if len(constraints) == 0 {
+		b.WriteString("Build constraints: none\n")
+	} else {
+		b.WriteString("Build constraints:\n")
+		for _, c := range constraints {
+			b.WriteString(fmt.Sprintf("  %s\n", c))
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "[claude] check_build_tags result: %s -> %d constraints\n", params.File, len(constraints))
+	return textResult(b.String())
+}
+
+// list_entry_points tool
+type listEntryPointsTool struct{ repoDir string }
+
+func (t *listEntryPointsTool) Name() string { return "list_entry_points" }
+func (t *listEntryPointsTool) Description() string {
+	return "List all entry points: main() and init() functions across the repository. Helps verify which code paths are reachable at runtime."
+}
+func (t *listEntryPointsTool) InputSchema() anthropic.BetaToolInputSchemaParam {
+	return anthropic.BetaToolInputSchemaParam{
+		Properties: map[string]any{},
+	}
+}
+
+func (t *listEntryPointsTool) Execute(ctx context.Context, input json.RawMessage) ([]anthropic.BetaToolResultBlockParamContentUnion, error) {
+	var b strings.Builder
+	totalEntries := 0
+
+	// Find main packages
+	cmd := exec.CommandContext(ctx, "go", "list", "-f", `{{if eq .Name "main"}}{{.Dir}}{{end}}`, "./...")
+	cmd.Dir = t.repoDir
+	cmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off")
+	out, _ := cmd.Output()
+
+	var mainDirs []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line != "" {
+			mainDirs = append(mainDirs, line)
+		}
+	}
+
+	b.WriteString("## Main Packages\n\n")
+	for _, dir := range mainDirs {
+		if totalEntries >= 50 {
+			b.WriteString("... (truncated at 50 entry points)\n")
+			break
+		}
+		relDir, _ := filepath.Rel(t.repoDir, dir)
+		b.WriteString(fmt.Sprintf("%s:\n", relDir))
+
+		entries, _ := os.ReadDir(dir)
+		fset := token.NewFileSet()
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+				continue
+			}
+			filePath := filepath.Join(dir, e.Name())
+			f, err := parser.ParseFile(fset, filePath, nil, 0)
+			if err != nil {
+				continue
+			}
+			for _, decl := range f.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok || fn.Recv != nil {
+					continue
+				}
+				if fn.Name.Name == "main" || fn.Name.Name == "init" {
+					pos := fset.Position(fn.Pos())
+					relFile, _ := filepath.Rel(t.repoDir, pos.Filename)
+					b.WriteString(fmt.Sprintf("  %s() at %s:%d\n", fn.Name.Name, relFile, pos.Line))
+					totalEntries++
+				}
+			}
+		}
+	}
+
+	// Find init() in non-main packages
+	b.WriteString("\n## init() in Non-Main Packages\n\n")
+	initCount := 0
+	filepath.WalkDir(t.repoDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if name == "vendor" || name == ".git" || name == "node_modules" || strings.HasPrefix(name, ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(d.Name(), ".go") || strings.HasSuffix(d.Name(), "_test.go") {
+			return nil
+		}
+		if initCount >= 100 {
+			return nil
+		}
+
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil || f.Name.Name == "main" {
+			return nil
+		}
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil || fn.Name.Name != "init" {
+				continue
+			}
+			pos := fset.Position(fn.Pos())
+			relFile, _ := filepath.Rel(t.repoDir, pos.Filename)
+			b.WriteString(fmt.Sprintf("  init() at %s:%d (package %s)\n", relFile, pos.Line, f.Name.Name))
+			initCount++
+			totalEntries++
+		}
+		return nil
+	})
+
+	if initCount == 0 {
+		b.WriteString("  (none)\n")
+	}
+
+	fmt.Fprintf(os.Stderr, "[claude] list_entry_points result: %d main dirs, %d total entries\n", len(mainDirs), totalEntries)
+	return textResult(b.String())
+}
+
+// check_transitive_deps tool
+type checkTransitiveDepsTool struct{ repoDir string }
+
+func (t *checkTransitiveDepsTool) Name() string { return "check_transitive_deps" }
+func (t *checkTransitiveDepsTool) Description() string {
+	return "Check if a package is a direct or transitive dependency, show its version, and trace the import chain that brings it in."
+}
+func (t *checkTransitiveDepsTool) InputSchema() anthropic.BetaToolInputSchemaParam {
+	return anthropic.BetaToolInputSchemaParam{
+		Properties: map[string]any{
+			"package": map[string]any{"type": "string", "description": "Package or module path, e.g. golang.org/x/net/html"},
+		},
+		Required: []string{"package"},
+	}
+}
+
+func (t *checkTransitiveDepsTool) Execute(ctx context.Context, input json.RawMessage) ([]anthropic.BetaToolResultBlockParamContentUnion, error) {
+	var params struct {
+		Package string `json:"package"`
+	}
+	if err := json.Unmarshal(input, &params); err != nil {
+		return textResult(fmt.Sprintf("error: %v", err))
+	}
+
+	var b strings.Builder
+
+	// 1. Check go.mod for direct/indirect status
+	cmd := exec.CommandContext(ctx, "go", "mod", "edit", "-json")
+	cmd.Dir = t.repoDir
+	cmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off")
+	out, err := cmd.Output()
+
+	b.WriteString("## Dependency Status\n\n")
+	if err != nil {
+		b.WriteString(fmt.Sprintf("Failed to parse go.mod: %v\n", err))
+	} else {
+		var goMod GoModEdit
+		json.Unmarshal(out, &goMod)
+
+		found := false
+		for _, req := range goMod.Require {
+			if req.Path == params.Package || strings.HasPrefix(params.Package, req.Path+"/") {
+				dep := "DIRECT"
+				if req.Indirect {
+					dep = "INDIRECT (transitive)"
+				}
+				b.WriteString(fmt.Sprintf("Package: %s\nModule: %s\nVersion: %s\nType: %s\n", params.Package, req.Path, req.Version, dep))
+				found = true
+
+				// Check for replace
+				for _, r := range goMod.Replace {
+					if r.Old.Path == req.Path {
+						b.WriteString(fmt.Sprintf("Replaced: %s %s => %s %s\n", r.Old.Path, r.Old.Version, r.New.Path, r.New.Version))
+					}
+				}
+				break
+			}
+		}
+		if !found {
+			b.WriteString(fmt.Sprintf("Package %s not found in go.mod require directives.\n", params.Package))
+		}
+	}
+
+	// 2. Check vendor/modules.txt if vendor exists
+	modulesPath := filepath.Join(t.repoDir, "vendor", "modules.txt")
+	if data, err := os.ReadFile(modulesPath); err == nil {
+		b.WriteString("\n## Vendor Info\n\n")
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.Contains(line, params.Package) {
+				b.WriteString(fmt.Sprintf("  %s\n", line))
+			}
+		}
+	}
+
+	// 3. Run go mod why to get the import chain
+	b.WriteString("\n## Import Chain (go mod why)\n\n")
+	modPath := params.Package
+	// Try to find the module path for the package
+	listCmd := exec.CommandContext(ctx, "go", "list", "-m", "-f", "{{.Path}}", params.Package)
+	listCmd.Dir = t.repoDir
+	listCmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off")
+	if listOut, err := listCmd.Output(); err == nil {
+		modPath = strings.TrimSpace(string(listOut))
+	}
+
+	whyCmd := exec.CommandContext(ctx, "go", "mod", "why", "-m", modPath)
+	whyCmd.Dir = t.repoDir
+	whyCmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off")
+	whyOut, err := whyCmd.Output()
+	if err != nil {
+		b.WriteString(fmt.Sprintf("go mod why failed: %v\n", err))
+	} else {
+		lines := strings.Split(strings.TrimSpace(string(whyOut)), "\n")
+		if len(lines) > 50 {
+			lines = lines[:50]
+			lines = append(lines, "... (truncated)")
+		}
+		for _, l := range lines {
+			b.WriteString(fmt.Sprintf("  %s\n", l))
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "[claude] check_transitive_deps result: %s\n", params.Package)
+	return textResult(b.String())
+}
+
 func isEntryPointLike(node *callgraph.Node, repoModulePath string) bool {
 	if node.Func == nil || node.Func.Pkg == nil {
 		return false
@@ -894,8 +1501,26 @@ func loadSkillPrompt() (string, bool) {
 }
 
 func buildVerificationPrompt(result *Result, skillTemplate string, sourceSnippets map[string]string) (string, error) {
+	// Strip verdict-leaking fields (Symbols, FixCommands) from UsedImports
+	// to avoid anchoring Claude's independent assessment
+	type sanitizedUsedImports struct {
+		CurrentVersion string `json:"CurrentVersion,omitempty"`
+		ReplaceModule  string `json:"ReplaceModule,omitempty"`
+		ReplaceVersion string `json:"ReplaceVersion,omitempty"`
+		Dir            []string `json:"Dir,omitempty"`
+	}
+	sanitized := make(map[string]sanitizedUsedImports)
+	for pkg, details := range result.UsedImports {
+		sanitized[pkg] = sanitizedUsedImports{
+			CurrentVersion: details.CurrentVersion,
+			ReplaceModule:  details.ReplaceModule,
+			ReplaceVersion: details.ReplaceVersion,
+			Dir:            details.Dir,
+		}
+	}
+
 	promptResult := struct {
-		UsedImports     map[string]UsedImportsDetails     `json:"UsedImports,omitempty"`
+		UsedImports     map[string]sanitizedUsedImports   `json:"UsedImports,omitempty"`
 		AffectedImports map[string]AffectedImportsDetails `json:"AffectedImports,omitempty"`
 		GoCVE           string                            `json:"GoCVE"`
 		CVE             string                            `json:"CVE"`
@@ -904,7 +1529,7 @@ func buildVerificationPrompt(result *Result, skillTemplate string, sourceSnippet
 		ReflectionRisks []ReflectionRisk                  `json:"ReflectionRisks,omitempty"`
 		Errors          []string                          `json:"Errors,omitempty"`
 	}{
-		UsedImports:     result.UsedImports,
+		UsedImports:     sanitized,
 		AffectedImports: result.AffectedImports,
 		GoCVE:           result.GoCVE,
 		CVE:             result.CVE,

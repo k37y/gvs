@@ -46,11 +46,10 @@ type ReflectionRisk struct {
 
 // ClaudeVerification holds the independent AI audit of the scan result
 type ClaudeVerification struct {
-	AgreesWithScanner bool     `json:"agrees_with_scanner"`
-	ClaudeAssessment  string   `json:"claude_assessment"`
-	Confidence        string   `json:"confidence"`
-	Reasoning         string   `json:"reasoning"`
-	Evidence          []string `json:"evidence"`
+	IsVulnerable string   `json:"IsVulnerable"`
+	Confidence   string   `json:"confidence"`
+	Reasoning    string   `json:"reasoning"`
+	Evidence     []string `json:"evidence"`
 }
 
 type Result struct {
@@ -121,7 +120,15 @@ type Replace struct {
 	New PathVersion
 }
 
+type Require struct {
+	Path     string `json:"Path"`
+	Version  string `json:"Version"`
+	Indirect bool   `json:"Indirect"`
+}
+
 type GoModEdit struct {
-	Go      string    `json:"Go"`
-	Replace []Replace `json:"Replace"`
+	Module  struct{ Path string } `json:"Module"`
+	Go      string               `json:"Go"`
+	Require []Require            `json:"Require"`
+	Replace []Replace            `json:"Replace"`
 }
