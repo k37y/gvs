@@ -50,13 +50,16 @@ func main() {
 	// Custom usage function
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options] <CVE ID> <directory>\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "       %s [options] -library <pkg> -symbols <syms> -fixversion <ver> [CVE ID] <directory>\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "\nOptions:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nSupported algorithms: vta (default), cha, rta, static\n")
-		fmt.Fprintf(os.Stderr, "\nLibrary/Symbol Override:\n")
-		fmt.Fprintf(os.Stderr, "  When -library and -symbols are provided, they take precedence over CVE-based symbol lookup.\n")
-		fmt.Fprintf(os.Stderr, "  Optionally use -fixversion to specify the fixed version for version comparison.\n")
-		fmt.Fprintf(os.Stderr, "  This allows scanning for specific library/symbol combinations directly.\n")
+		fmt.Fprintf(os.Stderr, "\nManual Scan Mode:\n")
+		fmt.Fprintf(os.Stderr, "  When -library, -symbols, and -fixversion are provided, CVE ID becomes optional.\n")
+		fmt.Fprintf(os.Stderr, "  All three flags are required together for manual scan mode.\n")
+		fmt.Fprintf(os.Stderr, "  -fixversion supports version ranges as introduced:fixed pairs (comma-separated):\n")
+		fmt.Fprintf(os.Stderr, "    -fixversion v1.9.4                              (single fix version)\n")
+		fmt.Fprintf(os.Stderr, "    -fixversion \"0:2.7.26,2.9.13:2.11.14\"           (version ranges)\n")
 		fmt.Fprintf(os.Stderr, "\nCall Graph Visualization:\n")
 		fmt.Fprintf(os.Stderr, "  Use -graph to generate an SVG visualization of the call graph.\n")
 		fmt.Fprintf(os.Stderr, "  -graph          : Saves to ./site/callgraph-<random>.svg (default)\n")
@@ -67,16 +70,6 @@ func main() {
 
 	// Parse flags
 	flag.Parse()
-
-	// Get positional arguments
-	args := flag.Args()
-	if len(args) != 2 {
-		flag.Usage()
-		os.Exit(1)
-	}
-
-	cveID := args[0]
-	directory := args[1]
 
 	// Validate that library, symbols, and fixversion are all provided together
 	libraryProvided := *library != ""
@@ -93,6 +86,31 @@ func main() {
 			fmt.Fprintf(os.Stderr, "\nPlease provide all three fields or none.\n")
 			os.Exit(1)
 		}
+	}
+
+	// Get positional arguments
+	// Manual scan mode: CVE is optional, only directory required
+	// Normal mode: both CVE and directory required
+	args := flag.Args()
+	var cveID, directory string
+	if anyManualScanFieldProvided {
+		switch len(args) {
+		case 1:
+			directory = args[0]
+		case 2:
+			cveID = args[0]
+			directory = args[1]
+		default:
+			fmt.Fprintf(os.Stderr, "Usage: %s [options] -library <pkg> -symbols <syms> -fixversion <ver> [CVE ID] <directory>\n", os.Args[0])
+			os.Exit(1)
+		}
+	} else {
+		if len(args) != 2 {
+			flag.Usage()
+			os.Exit(1)
+		}
+		cveID = args[0]
+		directory = args[1]
 	}
 
 	if info, err := os.Stat(directory); err != nil || !info.IsDir() {
