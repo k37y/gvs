@@ -37,27 +37,39 @@ The following traces show the call paths the scanner found from entry points to 
 
 You have access to tools for interactively exploring the repository and querying the call graph. Use them to gather additional evidence before forming your final assessment. All file paths are relative to the repository root.
 
-- **grep_code**: Search for a regex pattern across the codebase. Useful for finding symbol usage, reflection patterns, build tags, or framework handler registrations.
-- **read_file**: Read a specific file (or a line range within it). Use to inspect code around call sites, verify dead-code conditions, or check build constraints.
-- **list_files**: List files in a directory. Use to understand project structure or find test files vs production files.
-- **find_implementations**: Given an interface type name (e.g., `"io.Writer"`), returns all concrete types in the program that implement it and whether each is instantiated (used as an interface value). Use to verify interface dispatch edges in call traces. One call replaces many grep searches for type instantiations.
-- **find_callers**: Given a function/method name, performs reverse BFS on the call graph to find all callers up to N hops backward. Returns caller chains with edge types and highlights entry points. Use when you suspect a missed path -- the reverse traversal may reveal callers the forward BFS missed due to unrecognized entry points.
+- **check_module**: Check how a package is resolved (go.mod replace, vendor) and find actual symbol calls in repo code. Use BEFORE `grep_code` when checking if a vulnerable symbol is used — it follows Go module resolution instead of blind text search.
+- **check_go_version**: Check Go toolchain version and compare against stdlib fix versions. For stdlib CVEs, call this FIRST — it may be the complete answer.
+- **is_test_only**: Check if a file is test-only (_test.go or test package). Use when grep results include test files to confirm they don't affect production.
+- **check_build_tags**: Check build constraints (//go:build) on a file. Use when code might be platform-specific and not compiled on the target.
+- **list_entry_points**: List all main() and init() entry points across the repository. Use when verifying reachability from entry points.
+- **check_transitive_deps**: Check if a package is a direct or transitive dependency, with version and import chain. Use to understand how a vulnerable package enters the dependency tree.
+- **grep_code**: Search for a regex pattern across the codebase. Use for reflection patterns, string-literal symbol references, or plugin/driver registration patterns. Prefer `check_module` over `grep_code` for checking vulnerable symbol usage.
+- **read_file**: Read a specific file (or a line range within it). Use to inspect code around call sites or verify dead-code conditions.
+- **list_files**: List files in a directory. Use to understand project structure.
+- **find_implementations**: Given an interface type name (e.g., `"io.Writer"`), returns all concrete types in the program that implement it and whether each is instantiated (used as an interface value). Use to verify interface dispatch edges in call traces.
+- **find_callers**: Given a function/method name, performs reverse BFS on the call graph to find all callers up to N hops backward. Returns caller chains with edge types and highlights entry points. Use when you suspect a missed path.
 
-**You have a limited number of tool calls. Prioritize `find_implementations` and `find_callers` over manual `grep_code` searches when investigating interface dispatch or call reachability.**
+**You have a limited number of tool calls. Prioritize specialized tools (`check_module`, `check_go_version`, `find_implementations`, `find_callers`) over generic tools (`grep_code`, `read_file`). Use `is_test_only` and `check_build_tags` to rule out false positives.**
+
+**Do NOT read non-Go files. Only read `.go`, `go.mod`, and `go.sum` files. Skip LICENSE, README, CHANGELOG, Makefile, YAML, JSON, and any other non-Go files — they are irrelevant to vulnerability analysis.**
 
 **Investigation checklist: could the code be vulnerable?**
-1. Call `find_callers` for the vulnerable symbol to check if a path exists from entry points
-2. If `find_callers` shows callers chaining back to an entry point, there IS a vulnerability path
-3. If `find_callers` shows callers reaching framework-pattern functions (gin, gRPC, echo, fiber, chi), there may be an unrecognized entry point
-4. Call `find_implementations` for the vulnerable interface (if applicable) to check if a concrete type IS instantiated
-5. Use `grep_code` for reflection, string-literal symbol references, or plugin/driver registration patterns
+1. For stdlib CVEs: call `check_go_version` first — if Go version is patched, stop here
+2. Call `check_module` with the vulnerable package and symbols to trace actual usage in repo code
+3. Call `find_callers` for the vulnerable symbol to check if a path exists from entry points
+4. If `find_callers` shows callers chaining back to an entry point, there IS a vulnerability path
+5. If `find_callers` shows callers reaching framework-pattern functions (gin, gRPC, echo, fiber, chi), there may be an unrecognized entry point
+6. Call `find_implementations` for the vulnerable interface (if applicable) to check if a concrete type IS instantiated
+7. Use `grep_code` for reflection, string-literal symbol references, or plugin/driver registration patterns
 
 **Investigation checklist: could a vulnerability path be unreachable?**
-1. Check call traces for edges marked `"dynamic method call via interface X.Y"`
-2. Call `find_implementations` for interface X
-3. If the callee's receiver type shows `"instantiated: NO"`, the path is phantom (over-approximation)
-4. If instantiated, use `find_callers` to verify the caller chain is real
-5. Fall back to `grep_code` / `read_file` only if the above tools are unavailable
+1. Call `is_test_only` on files containing the vulnerable call — test-only code does not affect production
+2. Call `check_build_tags` on files in the call path — platform-specific code may not compile
+3. Check call traces for edges marked `"dynamic method call via interface X.Y"`
+4. Call `find_implementations` for interface X
+5. If the callee's receiver type shows `"instantiated: NO"`, the path is phantom (over-approximation)
+6. If instantiated, use `find_callers` to verify the caller chain is real
+7. Fall back to `grep_code` / `read_file` only if the above tools are unavailable
 
 **Important: You MUST respond with the final JSON after you finish using tools. Do not end with a tool call.**
 

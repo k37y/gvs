@@ -121,7 +121,15 @@ type Replace struct {
 	New PathVersion
 }
 
+type Require struct {
+	Path     string `json:"Path"`
+	Version  string `json:"Version"`
+	Indirect bool   `json:"Indirect"`
+}
+
 type GoModEdit struct {
-	Go      string    `json:"Go"`
-	Replace []Replace `json:"Replace"`
+	Module  struct{ Path string } `json:"Module"`
+	Go      string               `json:"Go"`
+	Require []Require            `json:"Require"`
+	Replace []Replace            `json:"Replace"`
 }
