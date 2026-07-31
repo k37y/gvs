@@ -30,10 +30,23 @@ type claudeConfig struct {
 }
 
 type claudeResponse struct {
-	IsVulnerable string   `json:"IsVulnerable"`
-	Confidence   string   `json:"confidence"`
-	Reasoning    string   `json:"reasoning"`
-	Evidence     []string `json:"evidence"`
+	IsVulnerableRaw json.RawMessage `json:"IsVulnerable"`
+	Confidence      string          `json:"confidence"`
+	Reasoning       string          `json:"reasoning"`
+	Evidence        []string        `json:"evidence"`
+}
+
+func (r *claudeResponse) GetIsVulnerable() string {
+	raw := strings.TrimSpace(string(r.IsVulnerableRaw))
+	raw = strings.Trim(raw, `"`)
+	switch strings.ToLower(raw) {
+	case "true":
+		return "true"
+	case "false":
+		return "false"
+	default:
+		return "unknown"
+	}
 }
 
 func VerifyAndSummarizeWithClaude(result *Result, repoDir string) {
@@ -171,20 +184,20 @@ func VerifyAndSummarizeWithClaude(result *Result, repoDir string) {
 		return
 	}
 
+	isVuln := resp.GetIsVulnerable()
 	result.ClaudeVerification = &ClaudeVerification{
-		IsVulnerable: resp.IsVulnerable,
+		IsVulnerable: isVuln,
 		Confidence:   resp.Confidence,
 		Reasoning:    resp.Reasoning,
 		Evidence:     resp.Evidence,
 	}
 
-	agrees := resp.IsVulnerable == result.IsVulnerable
-	if agrees {
+	if isVuln == result.IsVulnerable {
 		fmt.Fprintf(os.Stderr, "[claude] Result: agrees with scanner (confidence: %s, IsVulnerable=%s)\n",
-			resp.Confidence, resp.IsVulnerable)
+			resp.Confidence, isVuln)
 	} else {
 		fmt.Fprintf(os.Stderr, "[claude] Result: disagrees with scanner (confidence: %s, scanner=%s, claude=%s)\n",
-			resp.Confidence, result.IsVulnerable, resp.IsVulnerable)
+			resp.Confidence, result.IsVulnerable, isVuln)
 	}
 }
 
