@@ -268,12 +268,50 @@ type VulnerabilityResult struct {
 	DirVulnerable   bool
 	Status          string // "true", "false", or "unknown"
 	NeedsReplaceFix bool
+	FixVersion      string // the matched fix version from range check
+}
+
+// parseVersionRanges extracts (introduced, fixed) pairs from formatted fix version strings.
+// Input format: "Introduced in X and fixed in Y" or plain version strings.
+func parseVersionRanges(rawFixVer []string) [][2]string {
+	var ranges [][2]string
+	for _, entry := range rawFixVer {
+		var introduced, fixed string
+		if strings.Contains(entry, "Introduced in") && strings.Contains(entry, "fixed in") {
+			parts := strings.Split(entry, "and fixed in")
+			if len(parts) == 2 {
+				introduced = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(parts[0]), "Introduced in"))
+				fixed = strings.TrimSpace(parts[1])
+			}
+		} else {
+			fixed = strings.TrimSpace(entry)
+		}
+		if fixed != "" {
+			introduced = common.SemVersion(introduced)
+			fixed = common.SemVersion(fixed)
+			ranges = append(ranges, [2]string{introduced, fixed})
+		}
+	}
+	return ranges
+}
+
+// isVersionInVulnerableRange checks if a version falls within any introduced→fixed range.
+func isVersionInVulnerableRange(version string, rawFixVer []string) (bool, string) {
+	version = common.SemVersion(version)
+	ranges := parseVersionRanges(rawFixVer)
+	for _, r := range ranges {
+		introduced, fixed := r[0], r[1]
+		if semver.Compare(version, introduced) >= 0 && semver.Compare(version, fixed) < 0 {
+			return true, fixed
+		}
+	}
+	return false, ""
 }
 
 // checkDirVulnerability determines whether a directory is vulnerable based on
 // version comparisons. It returns the vulnerability status and whether a
 // replace-directive fix is needed.
-func checkDirVulnerability(curVer, repVer, fv string, used, unknown, isStdlib bool, goToolchainVersion string, fixVer []string) VulnerabilityResult {
+func checkDirVulnerability(curVer, repVer string, used, unknown, isStdlib bool, goToolchainVersion string, rawFixVer []string) VulnerabilityResult {
 	vr := VulnerabilityResult{Status: "false"}
 
 	if used {
@@ -282,45 +320,56 @@ func checkDirVulnerability(curVer, repVer, fv string, used, unknown, isStdlib bo
 			compareVer = repVer
 		}
 
-		if !isStdlib {
-			if semver.Compare(compareVer, fv) < 0 {
+		if isStdlib {
+			compareVer = goToolchainVersion
+		}
+
+		if compareVer == "" {
+			vr.Status = "unknown"
+			vr.DirVulnerable = true
+		} else if len(rawFixVer) > 0 {
+			vuln, matchedFix := isVersionInVulnerableRange(compareVer, rawFixVer)
+			if vuln {
 				vr.Status = "true"
 				vr.DirVulnerable = true
-			}
-		} else {
-			if len(fixVer) > 0 {
-				isVuln := false
-				if goToolchainVersion != "" {
-					appropriateFixVersion := findAppropriateFixVersion(goToolchainVersion, fixVer)
-					if appropriateFixVersion != "" {
-						if semver.Compare(goToolchainVersion, appropriateFixVersion) < 0 {
-							isVuln = true
-						}
-					} else {
-						isVuln = true
-					}
+				vr.FixVersion = matchedFix
+			} else if isStdlib {
+				// For stdlib, also check with findAppropriateFixVersion as fallback
+				// since Go uses branch-based versioning
+				fixVer := common.ExtractFormattedFixedVersions(rawFixVer)
+				if len(fixVer) == 0 {
+					fixVer = rawFixVer
 				}
-
-				if goToolchainVersion == "" {
-					vr.Status = "unknown"
-					vr.DirVulnerable = true
-				} else if isVuln {
+				appropriateFixVersion := findAppropriateFixVersion(compareVer, fixVer)
+				if appropriateFixVersion != "" {
+					if semver.Compare(compareVer, appropriateFixVersion) < 0 {
+						vr.Status = "true"
+						vr.DirVulnerable = true
+						vr.FixVersion = appropriateFixVersion
+					}
+				} else {
 					vr.Status = "true"
 					vr.DirVulnerable = true
 				}
-			} else {
-				vr.Status = "unknown"
-				vr.DirVulnerable = true
 			}
+		} else {
+			vr.Status = "unknown"
+			vr.DirVulnerable = true
 		}
 	} else if unknown {
 		vr.Status = "unknown"
 		vr.DirVulnerable = true
 	}
 
-	if repVer != "" && semver.Compare(curVer, repVer) <= 0 && semver.Compare(repVer, fv) < 0 {
-		vr.DirVulnerable = true
-		vr.NeedsReplaceFix = true
+	if repVer != "" {
+		vuln, matchedFix := isVersionInVulnerableRange(repVer, rawFixVer)
+		if vuln && semver.Compare(curVer, repVer) <= 0 {
+			vr.DirVulnerable = true
+			vr.NeedsReplaceFix = true
+			if vr.FixVersion == "" {
+				vr.FixVersion = matchedFix
+			}
+		}
 	}
 
 	return vr
@@ -331,17 +380,20 @@ func (j Job) isVulnerable(result *Result) *Result {
 	modPath := getModPath(j.Package, filepath.Join(result.Directory, j.Dir), result)
 	repPath, repVer := getReplaceVersion(modPath, filepath.Join(result.Directory, j.Dir), result)
 
-	// Check if fixed version is already set (from manual scan), otherwise fetch it
-	var fixVer []string
+	// Get raw fix versions with introduced/fixed range info
+	var rawFixVer []string
 	result.Mu.Lock()
 	if existing, ok := result.AffectedImports[j.Package]; ok && len(existing.FixedVersion) > 0 {
-		fixVer = existing.FixedVersion
+		rawFixVer = existing.FixedVersion
 	} else {
-		fixVer = getFixedVersion(result.GoCVE, modPath, result)
-		fixVer = common.ExtractFormattedFixedVersions(fixVer)
+		rawFixVer = getFixedVersion(result.GoCVE, modPath, result)
 	}
 	result.Mu.Unlock()
 
+	fixVer := common.ExtractFormattedFixedVersions(rawFixVer)
+	if len(fixVer) == 0 {
+		fixVer = rawFixVer
+	}
 	fv := common.SemVersion(strings.Join(fixVer, " "))
 
 	used := false
@@ -386,20 +438,20 @@ func (j Job) isVulnerable(result *Result) *Result {
 		goToolchainVersion = getGoToolchainVersion(filepath.Join(result.Directory, j.Dir), result)
 	}
 
-	vr := checkDirVulnerability(curVer, repVer, fv, used, unknown,
-		result.AffectedImports[j.Package].Type == "stdlib", goToolchainVersion, fixVer)
+	vr := checkDirVulnerability(curVer, repVer, used, unknown,
+		result.AffectedImports[j.Package].Type == "stdlib", goToolchainVersion, rawFixVer)
 
 	result.IsVulnerable = vr.Status
 	if vr.DirVulnerable {
 		uentry.Dir = append(uentry.Dir, j.Dir)
 	}
-	if vr.NeedsReplaceFix {
+	if vr.NeedsReplaceFix && vr.FixVersion != "" {
 		uentry.FixCommands = []string{
-			fmt.Sprintf("go mod edit -replace=%s=%s@%s", modPath, modPath, fv),
+			fmt.Sprintf("go mod edit -replace=%s=%s@%s", modPath, modPath, vr.FixVersion),
 			"go mod tidy",
 			"go mod vendor",
 		}
-	} else if vr.Status == "true" {
+	} else if vr.Status == "true" && vr.FixVersion != "" {
 		if result.AffectedImports[j.Package].Type == "stdlib" {
 			selectedFixVersion := selectFixVersionForCurrentGoVersion(goToolchainVersion, fixVer)
 			uentry.FixCommands = []string{
@@ -409,7 +461,7 @@ func (j Job) isVulnerable(result *Result) *Result {
 			}
 		} else {
 			uentry.FixCommands = []string{
-				fmt.Sprintf("go get %s@%s", modPath, fv),
+				fmt.Sprintf("go get %s@%s", modPath, vr.FixVersion),
 				"go mod tidy",
 				"go mod vendor",
 			}

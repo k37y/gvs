@@ -774,8 +774,18 @@ func initResultWithProgress(cve, dir string, fix bool, library, symbols, fixvers
 			Type:    "non-stdlib",
 		}
 
-		// Add fixed version (now guaranteed to be non-empty)
-		details.FixedVersion = []string{fixversion}
+		// Parse fix version — supports single version or introduced:fixed range pairs
+		if strings.Contains(fixversion, ":") {
+			for _, pair := range strings.Split(fixversion, ",") {
+				parts := strings.SplitN(strings.TrimSpace(pair), ":", 2)
+				if len(parts) == 2 {
+					details.FixedVersion = append(details.FixedVersion,
+						fmt.Sprintf("Introduced in %s and fixed in %s", parts[0], parts[1]))
+				}
+			}
+		} else {
+			details.FixedVersion = []string{fixversion}
+		}
 		fmt.Fprintf(os.Stderr, "  Using fixed version: %s\n", fixversion)
 
 		r.AffectedImports = map[string]cg.AffectedImportsDetails{
