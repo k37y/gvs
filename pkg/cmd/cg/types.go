@@ -57,16 +57,24 @@ type ClaudeVerification struct {
 	Evidence     []string `json:"evidence"`
 }
 
+// ScanConfig holds the input configuration for a scan.
+type ScanConfig struct {
+	CVE          string       `json:"CVE,omitempty"`
+	Directory    string       `json:"Directory,omitempty"`
+	ProgressFunc func(string) `json:"-"`
+	Runner       cli.CommandRunner `json:"-"`
+	HTTP         HTTPClient       `json:"-"`
+}
+
 type Result struct {
+	ScanConfig
 	IsVulnerable       string
 	UsedImports        map[string]UsedImportsDetails
 	Files              map[string][][]string
 	AffectedImports    map[string]AffectedImportsDetails
 	GoCVE              string
-	CVE                string
 	Repository         string
 	Branch             string
-	Directory          string
 	Errors             []string            `json:"Errors"`
 	Unsafe             bool                `json:"unsafe"`
 	Reflect            bool                `json:"reflect"`
@@ -75,11 +83,8 @@ type Result struct {
 	ClaudeVerification *ClaudeVerification `json:"ClaudeVerification,omitempty"`
 	Mu                 sync.Mutex          `json:"-"`
 	Progress           bool                `json:"-"`
-	ProgressFunc       func(string)        `json:"-"`
 	SsaProg            *ssa.Program        `json:"-"`
 	CgGraph            *callgraph.Graph    `json:"-"`
-	Runner             cli.CommandRunner   `json:"-"`
-	HTTP               HTTPClient          `json:"-"`
 }
 
 type VulnReport struct {

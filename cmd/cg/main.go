@@ -125,15 +125,29 @@ func main() {
 	}
 
 	// Initialize result
-	var opts []func(*cg.Result)
-	if *progress {
-		opts = append(opts, func(r *cg.Result) {
-			r.ProgressFunc = func(msg string) {
-				fmt.Fprintf(os.Stderr, "%s\n", msg)
-			}
-		})
+	result := &cg.Result{
+		ScanConfig: cg.ScanConfig{
+			CVE:       cveID,
+			Directory: directory,
+		},
+		IsVulnerable: "unknown",
 	}
-	result, done := cg.InitResult(cveID, directory, *library, *symbols, *fixversion, opts...)
+	if *progress {
+		result.ProgressFunc = func(msg string) {
+			fmt.Fprintf(os.Stderr, "%s\n", msg)
+		}
+	}
+
+	// Setup: library mode or CVE mode
+	var done bool
+	if anyManualScanFieldProvided {
+		done = cg.SetupLibraryMode(result, *library, *symbols, *fixversion)
+	} else {
+		done = cg.SetupCVEMode(result)
+	}
+	if !done {
+		done = cg.Prepare(result)
+	}
 	if done {
 		jsonOutput, _ := json.MarshalIndent(result, "", "  ")
 		fmt.Println(string(jsonOutput))
@@ -513,8 +527,8 @@ func generateCallGraphSVGForSymbol(result *cg.Result, directory, pkg, symbol, ou
 
 	// Generate call graph using the scanner's function
 	tempResult := &cg.Result{
-		Directory: directory,
-		Errors:    []string{},
+		ScanConfig: cg.ScanConfig{Directory: directory},
+		Errors:     []string{},
 	}
 
 	if showProgress {

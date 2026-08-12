@@ -74,111 +74,101 @@ func (r *Result) progress(msg string) {
 	}
 }
 
-func InitResult(cve, dir string, library, symbols, fixversion string, opts ...func(*Result)) (*Result, bool) {
-	r := &Result{
-		CVE:          cve,
-		Directory:    dir,
-		IsVulnerable: "unknown",
-	}
-	for _, opt := range opts {
-		opt(r)
+// SetupLibraryMode configures a Result for direct library/symbol scanning.
+// Returns true if the result has a terminal error and scanning should stop.
+func SetupLibraryMode(r *Result, library, symbols, fixversion string) bool {
+	if library == "" || symbols == "" || fixversion == "" {
+		r.Errors = append(r.Errors, "When using library mode, all three flags are required: -library, -symbols, and -fixversion")
+		return true
 	}
 
-	// Check if library and symbols are provided for direct scanning (takes precedence)
-	if library != "" || symbols != "" || fixversion != "" {
-		// Validate that all three parameters are provided together
-		if library == "" || symbols == "" || fixversion == "" {
-			r.Errors = append(r.Errors, "When using library mode, all three flags are required: -library, -symbols, and -fixversion")
-			return r, true
-		}
+	if strings.TrimSpace(library) == "" || strings.TrimSpace(symbols) == "" || strings.TrimSpace(fixversion) == "" {
+		r.Errors = append(r.Errors, "Library mode parameters cannot be empty or whitespace only")
+		return true
+	}
 
-		// Validate that values are not just whitespace
-		if strings.TrimSpace(library) == "" || strings.TrimSpace(symbols) == "" || strings.TrimSpace(fixversion) == "" {
-			r.Errors = append(r.Errors, "Library mode parameters cannot be empty or whitespace only")
-			return r, true
-		}
+	r.progress("Phase 1/6: Using provided library and symbol override...")
+	r.progress(fmt.Sprintf("  Library: %s", library))
+	r.progress(fmt.Sprintf("  Symbol(s): %s", symbols))
 
-		r.progress("Phase 1/6: Using provided library and symbol override...")
-		r.progress(fmt.Sprintf("  Library: %s", library))
-		r.progress(fmt.Sprintf("  Symbol(s): %s", symbols))
-
-		// Set a placeholder GoCVE if no CVE provided, or fetch it if provided
-		if cve != "" {
-			if common.IsGOCVEID(cve) {
-				r.GoCVE = cve
-			} else if common.IsCVEID(cve) {
-				fetchGoVulnID(r)
-			}
-		} else {
-			r.GoCVE = "MANUAL-SCAN"
-		}
-
-		// Use provided library and symbols instead of fetching from vulnerability database
-		r.progress("Phase 2/6: Using provided library and symbols...")
-		symbolList := strings.Split(symbols, ",")
-		for i := range symbolList {
-			symbolList[i] = strings.TrimSpace(symbolList[i])
-		}
-
-		// Validate that at least one non-empty symbol exists after trimming
-		hasValidSymbol := false
-		for _, sym := range symbolList {
-			if sym != "" {
-				hasValidSymbol = true
-				break
-			}
-		}
-		if !hasValidSymbol {
-			r.Errors = append(r.Errors, "At least one non-empty symbol is required")
-			return r, true
-		}
-
-		details := AffectedImportsDetails{
-			Symbols: symbolList,
-			Type:    "non-stdlib",
-		}
-
-		// Add fixed version (now guaranteed to be non-empty)
-		details.FixedVersion = []string{fixversion}
-		r.progress(fmt.Sprintf("  Using fixed version: %s", fixversion))
-
-		r.AffectedImports = map[string]AffectedImportsDetails{
-			library: details,
-		}
-
-		// Check if it's a stdlib package
-		if strings.HasPrefix(library, "crypto/") || strings.HasPrefix(library, "net/") ||
-			strings.HasPrefix(library, "encoding/") || strings.HasPrefix(library, "os/") ||
-			!strings.Contains(library, ".") {
-			entry := r.AffectedImports[library]
-			entry.Type = "stdlib"
-			r.AffectedImports[library] = entry
-		}
-		r.progress(fmt.Sprintf("  ✓ Using %d symbol(s) for library %s", len(symbolList), library))
-	} else {
-		// Check if input is already a GOCVE ID or needs conversion from CVE ID
-		r.progress("Phase 1/6: Processing vulnerability identifier...")
-		if common.IsGOCVEID(cve) {
-			r.GoCVE = cve
-			r.progress(fmt.Sprintf("  ✓ Using provided GOCVE ID: %s", cve))
-		} else if common.IsCVEID(cve) {
-			r.progress("  Converting CVE ID to GOCVE ID...")
+	if r.CVE != "" {
+		if common.IsGOCVEID(r.CVE) {
+			r.GoCVE = r.CVE
+		} else if common.IsCVEID(r.CVE) {
 			fetchGoVulnID(r)
-		} else {
-			r.GoCVE = "Invalid input format"
-			r.Errors = append(r.Errors, "Invalid input format. Please provide either a CVE ID (CVE-YYYY-NNNN) or GOCVE ID (GO-YYYY-NNNN)")
-			return r, true
 		}
-
-		r.progress("Phase 2/6: Fetching affected symbols...")
-		fetchAffectedSymbols(r)
+	} else {
+		r.GoCVE = "MANUAL-SCAN"
 	}
 
-	// Early exit if no vulnerable symbols found
+	r.progress("Phase 2/6: Using provided library and symbols...")
+	symbolList := strings.Split(symbols, ",")
+	for i := range symbolList {
+		symbolList[i] = strings.TrimSpace(symbolList[i])
+	}
+
+	hasValidSymbol := false
+	for _, sym := range symbolList {
+		if sym != "" {
+			hasValidSymbol = true
+			break
+		}
+	}
+	if !hasValidSymbol {
+		r.Errors = append(r.Errors, "At least one non-empty symbol is required")
+		return true
+	}
+
+	details := AffectedImportsDetails{
+		Symbols:      symbolList,
+		Type:         "non-stdlib",
+		FixedVersion: []string{fixversion},
+	}
+	r.progress(fmt.Sprintf("  Using fixed version: %s", fixversion))
+
+	r.AffectedImports = map[string]AffectedImportsDetails{
+		library: details,
+	}
+
+	if strings.HasPrefix(library, "crypto/") || strings.HasPrefix(library, "net/") ||
+		strings.HasPrefix(library, "encoding/") || strings.HasPrefix(library, "os/") ||
+		!strings.Contains(library, ".") {
+		entry := r.AffectedImports[library]
+		entry.Type = "stdlib"
+		r.AffectedImports[library] = entry
+	}
+	r.progress(fmt.Sprintf("  ✓ Using %d symbol(s) for library %s", len(symbolList), library))
+	return false
+}
+
+// SetupCVEMode configures a Result by fetching vulnerability data from vuln.go.dev.
+// Returns true if the result has a terminal error and scanning should stop.
+func SetupCVEMode(r *Result) bool {
+	r.progress("Phase 1/6: Processing vulnerability identifier...")
+	if common.IsGOCVEID(r.CVE) {
+		r.GoCVE = r.CVE
+		r.progress(fmt.Sprintf("  ✓ Using provided GOCVE ID: %s", r.CVE))
+	} else if common.IsCVEID(r.CVE) {
+		r.progress("  Converting CVE ID to GOCVE ID...")
+		fetchGoVulnID(r)
+	} else {
+		r.GoCVE = "Invalid input format"
+		r.Errors = append(r.Errors, "Invalid input format. Please provide either a CVE ID (CVE-YYYY-NNNN) or GOCVE ID (GO-YYYY-NNNN)")
+		return true
+	}
+
+	r.progress("Phase 2/6: Fetching affected symbols...")
+	fetchAffectedSymbols(r)
+	return false
+}
+
+// Prepare runs the discovery and detection phases on a fully configured Result.
+// Call after SetupLibraryMode or SetupCVEMode. Returns true if scanning should stop.
+func Prepare(r *Result) bool {
 	if len(r.AffectedImports) == 0 {
 		r.progress("Scan aborted: No vulnerable symbols to analyze.")
 		r.IsVulnerable = "unknown"
-		return r, true
+		return true
 	}
 
 	r.progress("Phase 3/6: Discovering Go modules and main files...")
@@ -192,10 +182,10 @@ func InitResult(cve, dir string, library, symbols, fixversion string, opts ...fu
 
 	if r.GoCVE == "" {
 		r.Errors = append(r.Errors, "No Go CVE ID found")
-		return r, true
+		return true
 	}
 	r.progress("Initialization complete. Starting vulnerability analysis...")
-	return r, false
+	return false
 }
 
 func Worker(jobs <-chan Job, results chan<- *Result, wg *sync.WaitGroup, result *Result) {

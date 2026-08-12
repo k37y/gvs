@@ -198,9 +198,9 @@ func TestCleanJSONResponse(t *testing.T) {
 
 func TestBuildVerificationPrompt(t *testing.T) {
 	result := &Result{
+		ScanConfig:   ScanConfig{CVE: "CVE-2024-45338"},
 		IsVulnerable: "false",
 		GoCVE:        "GO-2024-3333",
-		CVE:          "CVE-2024-45338",
 		Repository:   "https://github.com/example/repo",
 		Branch:       "main",
 		AffectedImports: map[string]AffectedImportsDetails{
@@ -272,7 +272,7 @@ func main() {
 `), 0644)
 
 	result := &Result{
-		Directory: tmpDir,
+		ScanConfig: ScanConfig{Directory: tmpDir},
 		AffectedImports: map[string]AffectedImportsDetails{
 			"golang.org/x/net/html": {
 				Symbols: []string{"Parse"},
@@ -317,7 +317,7 @@ func main() { parser.WrapParse() }
 `), 0644)
 
 	result := &Result{
-		Directory: tmpDir,
+		ScanConfig: ScanConfig{Directory: tmpDir},
 		AffectedImports: map[string]AffectedImportsDetails{
 			"golang.org/x/net/html": {
 				Symbols: []string{"Parse"},
@@ -340,7 +340,7 @@ func TestCollectRelevantSourceBudget(t *testing.T) {
 
 	os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte("module example.com/test\ngo 1.21\n"), 0644)
 
-	result := &Result{Directory: tmpDir}
+	result := &Result{ScanConfig: ScanConfig{Directory: tmpDir}}
 
 	snippets := collectRelevantSource(result, tmpDir)
 

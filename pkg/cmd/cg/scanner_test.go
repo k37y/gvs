@@ -885,7 +885,7 @@ func TestGetCurrentVersion_NonStdlib(t *testing.T) {
 	fr := newFakeRunner()
 	fr.stdout["go list -f {{if .Module}}{{.Module.Version}}{{end}} golang.org/x/net"] = []byte("v0.23.0\n")
 
-	r := &Result{Runner: fr}
+	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
 	got := getCurrentVersion("golang.org/x/net", "/some/dir", r)
 	if got != "v0.23.0" {
 		t.Errorf("getCurrentVersion = %q, want %q", got, "v0.23.0")
@@ -901,7 +901,7 @@ func TestGetCurrentVersion_Stdlib(t *testing.T) {
 	fr.stdout["go mod edit -json"] = []byte(goModJSON)
 
 	r := &Result{
-		Runner: fr,
+		ScanConfig: ScanConfig{Runner: fr},
 		AffectedImports: map[string]AffectedImportsDetails{
 			"net/http": {Type: "stdlib"},
 		},
@@ -917,7 +917,7 @@ func TestGetCurrentVersion_Error(t *testing.T) {
 	fr.err["go list -f {{if .Module}}{{.Module.Version}}{{end}} golang.org/x/net"] = fmt.Errorf("exit 1")
 	fr.stdout["go list -f {{if .Module}}{{.Module.Version}}{{end}} golang.org/x/net"] = []byte("some error")
 
-	r := &Result{Runner: fr}
+	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
 	got := getCurrentVersion("golang.org/x/net", "/some/dir", r)
 	if got != "" {
 		t.Errorf("getCurrentVersion = %q, want empty", got)
@@ -964,7 +964,7 @@ func TestGetGoToolchainVersion(t *testing.T) {
 			fr := newFakeRunner()
 			fr.stdout["go mod edit -json"] = []byte(tt.json)
 
-			r := &Result{Runner: fr}
+			r := &Result{ScanConfig: ScanConfig{Runner: fr}}
 			got := getGoToolchainVersion("/some/dir", r)
 			if got != tt.want {
 				t.Errorf("getGoToolchainVersion = %q, want %q", got, tt.want)
@@ -980,7 +980,7 @@ func TestGetGoToolchainVersion_CmdError(t *testing.T) {
 	fr := newFakeRunner()
 	fr.err["go mod edit -json"] = fmt.Errorf("exit 1")
 
-	r := &Result{Runner: fr}
+	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
 	got := getGoToolchainVersion("/some/dir", r)
 	if got != "" {
 		t.Errorf("getGoToolchainVersion = %q, want empty", got)
@@ -1006,7 +1006,7 @@ func TestGetReplaceVersion(t *testing.T) {
 	fr := newFakeRunner()
 	fr.stdout["go mod edit -json"] = goModJSON
 
-	r := &Result{Runner: fr}
+	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
 	path, ver := getReplaceVersion("golang.org/x/net", "/some/dir", r)
 	if path != "golang.org/x/net" || ver != "v0.33.0" {
 		t.Errorf("getReplaceVersion = (%q, %q), want (%q, %q)", path, ver, "golang.org/x/net", "v0.33.0")
@@ -1027,7 +1027,7 @@ func TestGetReplaceVersion_NoMatch(t *testing.T) {
 	fr := newFakeRunner()
 	fr.stdout["go mod edit -json"] = goModJSON
 
-	r := &Result{Runner: fr}
+	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
 	path, ver := getReplaceVersion("golang.org/x/net", "/some/dir", r)
 	if path != "" || ver != "" {
 		t.Errorf("getReplaceVersion = (%q, %q), want empty", path, ver)
@@ -1038,7 +1038,7 @@ func TestGetReplaceVersion_CmdError(t *testing.T) {
 	fr := newFakeRunner()
 	fr.err["go mod edit -json"] = fmt.Errorf("exit 1")
 
-	r := &Result{Runner: fr}
+	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
 	path, ver := getReplaceVersion("golang.org/x/net", "/some/dir", r)
 	if path != "" || ver != "" {
 		t.Errorf("getReplaceVersion = (%q, %q), want empty", path, ver)
@@ -1051,7 +1051,7 @@ func TestGetModPath(t *testing.T) {
 	fr := newFakeRunner()
 	fr.stdout["go list -f {{if .Module}}{{.Module.Path}}{{end}} golang.org/x/net/html"] = []byte("golang.org/x/net\n")
 
-	r := &Result{Runner: fr}
+	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
 	got := getModPath("golang.org/x/net/html", "/some/dir", r)
 	if got != "golang.org/x/net" {
 		t.Errorf("getModPath = %q, want %q", got, "golang.org/x/net")
@@ -1062,7 +1062,7 @@ func TestGetModPath_Error(t *testing.T) {
 	fr := newFakeRunner()
 	fr.err["go list -f {{if .Module}}{{.Module.Path}}{{end}} golang.org/x/net"] = fmt.Errorf("exit 1")
 
-	r := &Result{Runner: fr}
+	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
 	got := getModPath("golang.org/x/net", "/some/dir", r)
 	if got != "" {
 		t.Errorf("getModPath = %q, want empty", got)
@@ -1078,7 +1078,7 @@ func TestGetRepoModulePath(t *testing.T) {
 	fr := newFakeRunner()
 	fr.stdout["go mod edit -json"] = []byte(`{"Module":{"Path":"github.com/foo/bar"}}`)
 
-	r := &Result{Runner: fr}
+	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
 	got := getRepoModulePath("/some/dir", r)
 	if got != "github.com/foo/bar" {
 		t.Errorf("getRepoModulePath = %q, want %q", got, "github.com/foo/bar")
@@ -1089,7 +1089,7 @@ func TestGetRepoModulePath_Error(t *testing.T) {
 	fr := newFakeRunner()
 	fr.err["go mod edit -json"] = fmt.Errorf("exit 1")
 
-	r := &Result{Runner: fr}
+	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
 	got := getRepoModulePath("/some/dir", r)
 	if got != "" {
 		t.Errorf("getRepoModulePath = %q, want empty", got)
@@ -1102,7 +1102,7 @@ func TestGetGitBranch(t *testing.T) {
 	fr := newFakeRunner()
 	fr.stdout["git rev-parse --abbrev-ref HEAD"] = []byte("main\n")
 
-	r := &Result{Runner: fr, Directory: "/repo"}
+	r := &Result{ScanConfig: ScanConfig{Runner: fr, Directory: "/repo"}}
 	getGitBranch(r)
 	if r.Branch != "main" {
 		t.Errorf("Branch = %q, want %q", r.Branch, "main")
@@ -1114,7 +1114,7 @@ func TestGetGitBranch_DetachedHEAD(t *testing.T) {
 	fr.stdout["git rev-parse --abbrev-ref HEAD"] = []byte("HEAD\n")
 	fr.stdout["git rev-parse HEAD"] = []byte("abc123def456\n")
 
-	r := &Result{Runner: fr, Directory: "/repo"}
+	r := &Result{ScanConfig: ScanConfig{Runner: fr, Directory: "/repo"}}
 	getGitBranch(r)
 	if r.Branch != "abc123def456" {
 		t.Errorf("Branch = %q, want %q", r.Branch, "abc123def456")
@@ -1125,7 +1125,7 @@ func TestGetGitBranch_Error(t *testing.T) {
 	fr := newFakeRunner()
 	fr.err["git rev-parse --abbrev-ref HEAD"] = fmt.Errorf("exit 1")
 
-	r := &Result{Runner: fr, Directory: "/repo"}
+	r := &Result{ScanConfig: ScanConfig{Runner: fr, Directory: "/repo"}}
 	getGitBranch(r)
 	if len(r.Errors) != 1 {
 		t.Errorf("expected 1 error, got %d", len(r.Errors))
@@ -1137,7 +1137,7 @@ func TestGetGitBranch_DetachedHEAD_Error(t *testing.T) {
 	fr.stdout["git rev-parse --abbrev-ref HEAD"] = []byte("HEAD\n")
 	fr.err["git rev-parse HEAD"] = fmt.Errorf("exit 1")
 
-	r := &Result{Runner: fr, Directory: "/repo"}
+	r := &Result{ScanConfig: ScanConfig{Runner: fr, Directory: "/repo"}}
 	getGitBranch(r)
 	if r.Branch != "HEAD" {
 		t.Errorf("Branch = %q, want %q", r.Branch, "HEAD")
@@ -1150,7 +1150,7 @@ func TestGetGitURL(t *testing.T) {
 	fr := newFakeRunner()
 	fr.stdout["git remote get-url origin"] = []byte("https://github.com/foo/bar.git\n")
 
-	r := &Result{Runner: fr, Directory: "/repo"}
+	r := &Result{ScanConfig: ScanConfig{Runner: fr, Directory: "/repo"}}
 	getGitURL(r)
 	if r.Repository != "https://github.com/foo/bar.git" {
 		t.Errorf("Repository = %q, want %q", r.Repository, "https://github.com/foo/bar.git")
@@ -1161,7 +1161,7 @@ func TestGetGitURL_Error(t *testing.T) {
 	fr := newFakeRunner()
 	fr.err["git remote get-url origin"] = fmt.Errorf("exit 1")
 
-	r := &Result{Runner: fr, Directory: "/repo"}
+	r := &Result{ScanConfig: ScanConfig{Runner: fr, Directory: "/repo"}}
 	getGitURL(r)
 	if len(r.Errors) != 1 {
 		t.Errorf("expected 1 error, got %d", len(r.Errors))
@@ -1183,7 +1183,7 @@ func TestFindMainGoFiles(t *testing.T) {
 		fmt.Sprintf("main: %s\n", filepath.Join(tmpDir, "cmd", "app")),
 	)
 
-	r := &Result{Runner: fr, Directory: tmpDir}
+	r := &Result{ScanConfig: ScanConfig{Runner: fr, Directory: tmpDir}}
 	findMainGoFiles(r)
 
 	if r.Files == nil {
@@ -1197,7 +1197,7 @@ func TestFindMainGoFiles(t *testing.T) {
 func TestFindMainGoFiles_NoGoMod(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	r := &Result{Directory: tmpDir}
+	r := &Result{ScanConfig: ScanConfig{Directory: tmpDir}}
 	findMainGoFiles(r)
 
 	if len(r.Files) != 0 {
@@ -1220,8 +1220,7 @@ func TestFetchGoVulnID(t *testing.T) {
 	defer ts.Close()
 
 	r := &Result{
-		CVE:  "CVE-2024-45338",
-		HTTP: ts.Client(),
+		ScanConfig: ScanConfig{CVE: "CVE-2024-45338", HTTP: ts.Client()},
 	}
 
 	origURL := VulnsURL
@@ -1246,8 +1245,7 @@ func TestFetchGoVulnID_NoMatch(t *testing.T) {
 	defer ts.Close()
 
 	r := &Result{
-		CVE:  "CVE-2024-99999",
-		HTTP: ts.Client(),
+		ScanConfig: ScanConfig{CVE: "CVE-2024-99999", HTTP: ts.Client()},
 	}
 
 	origURL := VulnsURL
@@ -1285,8 +1283,8 @@ func TestFetchAffectedSymbols(t *testing.T) {
 	defer ts.Close()
 
 	r := &Result{
-		GoCVE: "GO-2024-3333",
-		HTTP:  ts.Client(),
+		ScanConfig: ScanConfig{HTTP: ts.Client()},
+		GoCVE:      "GO-2024-3333",
 	}
 
 	origURL := VulnsURL
@@ -1316,8 +1314,8 @@ func TestFetchAffectedSymbols_EmptyAffected(t *testing.T) {
 	defer ts.Close()
 
 	r := &Result{
-		GoCVE: "GO-2024-3333",
-		HTTP:  ts.Client(),
+		ScanConfig: ScanConfig{HTTP: ts.Client()},
+		GoCVE:      "GO-2024-3333",
 	}
 
 	origURL := VulnsURL
@@ -1348,8 +1346,8 @@ func TestFetchAffectedSymbols_NoSymbols(t *testing.T) {
 	defer ts.Close()
 
 	r := &Result{
-		GoCVE: "GO-2024-3333",
-		HTTP:  ts.Client(),
+		ScanConfig: ScanConfig{HTTP: ts.Client()},
+		GoCVE:      "GO-2024-3333",
 	}
 
 	origURL := VulnsURL
@@ -1381,7 +1379,7 @@ func TestGetFixedVersion(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	r := &Result{HTTP: ts.Client()}
+	r := &Result{ScanConfig: ScanConfig{HTTP: ts.Client()}}
 
 	origURL := VulnsURL
 	defer func() { VulnsURL = origURL }()
@@ -1415,7 +1413,7 @@ func TestGetFixedVersion_Stdlib(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	r := &Result{HTTP: ts.Client()}
+	r := &Result{ScanConfig: ScanConfig{HTTP: ts.Client()}}
 
 	origURL := VulnsURL
 	defer func() { VulnsURL = origURL }()
@@ -1444,7 +1442,7 @@ func TestGetFixedVersion_NoMatch(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	r := &Result{HTTP: ts.Client()}
+	r := &Result{ScanConfig: ScanConfig{HTTP: ts.Client()}}
 
 	origURL := VulnsURL
 	defer func() { VulnsURL = origURL }()
@@ -1456,10 +1454,11 @@ func TestGetFixedVersion_NoMatch(t *testing.T) {
 	}
 }
 
-// --- InitResult tests ---
+// --- SetupLibraryMode / SetupCVEMode / Prepare tests ---
 
-func TestInitResult_InvalidCVEFormat(t *testing.T) {
-	r, done := InitResult("not-a-cve", t.TempDir(), "", "", "")
+func TestSetupCVEMode_InvalidFormat(t *testing.T) {
+	r := &Result{ScanConfig: ScanConfig{CVE: "not-a-cve", Directory: t.TempDir()}, IsVulnerable: "unknown"}
+	done := SetupCVEMode(r)
 	if !done {
 		t.Error("expected done=true for invalid CVE format")
 	}
@@ -1468,8 +1467,9 @@ func TestInitResult_InvalidCVEFormat(t *testing.T) {
 	}
 }
 
-func TestInitResult_LibraryModeMissingFields(t *testing.T) {
-	r, done := InitResult("", t.TempDir(), "golang.org/x/net", "", "")
+func TestSetupLibraryMode_MissingFields(t *testing.T) {
+	r := &Result{ScanConfig: ScanConfig{Directory: t.TempDir()}, IsVulnerable: "unknown"}
+	done := SetupLibraryMode(r, "golang.org/x/net", "", "")
 	if !done {
 		t.Error("expected done=true for missing library mode fields")
 	}
@@ -1478,8 +1478,9 @@ func TestInitResult_LibraryModeMissingFields(t *testing.T) {
 	}
 }
 
-func TestInitResult_LibraryModeWhitespace(t *testing.T) {
-	r, done := InitResult("", t.TempDir(), "  ", "Parse", "v0.33.0")
+func TestSetupLibraryMode_Whitespace(t *testing.T) {
+	r := &Result{ScanConfig: ScanConfig{Directory: t.TempDir()}, IsVulnerable: "unknown"}
+	done := SetupLibraryMode(r, "  ", "Parse", "v0.33.0")
 	if !done {
 		t.Error("expected done=true for whitespace library")
 	}
@@ -1488,8 +1489,9 @@ func TestInitResult_LibraryModeWhitespace(t *testing.T) {
 	}
 }
 
-func TestInitResult_LibraryModeEmptySymbols(t *testing.T) {
-	r, done := InitResult("", t.TempDir(), "golang.org/x/net", " , , ", "v0.33.0")
+func TestSetupLibraryMode_EmptySymbols(t *testing.T) {
+	r := &Result{ScanConfig: ScanConfig{Directory: t.TempDir()}, IsVulnerable: "unknown"}
+	done := SetupLibraryMode(r, "golang.org/x/net", " , , ", "v0.33.0")
 	if !done {
 		t.Error("expected done=true for all-empty symbols")
 	}
@@ -1498,15 +1500,9 @@ func TestInitResult_LibraryModeEmptySymbols(t *testing.T) {
 	}
 }
 
-func TestInitResult_LibraryModeValid(t *testing.T) {
-	dir := t.TempDir()
-	// Create minimal go.mod and main.go so findMainGoFiles works
-	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/test\ngo 1.21\n"), 0644)
-	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\nfunc main() {}\n"), 0644)
-
-	// Need to init a git repo for getGitBranch/getGitURL
-	r, done := InitResult("", dir, "golang.org/x/net/html", "Parse,ParseFragment", "v0.33.0")
-	// done depends on whether GoCVE is set — in manual mode with no CVE, GoCVE="MANUAL-SCAN"
+func TestSetupLibraryMode_Valid(t *testing.T) {
+	r := &Result{ScanConfig: ScanConfig{Directory: t.TempDir()}, IsVulnerable: "unknown"}
+	done := SetupLibraryMode(r, "golang.org/x/net/html", "Parse,ParseFragment", "v0.33.0")
 	if done {
 		t.Errorf("expected done=false for valid library mode, errors: %v", r.Errors)
 	}
@@ -1521,12 +1517,9 @@ func TestInitResult_LibraryModeValid(t *testing.T) {
 	}
 }
 
-func TestInitResult_LibraryModeStdlib(t *testing.T) {
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/test\ngo 1.21\n"), 0644)
-	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\nfunc main() {}\n"), 0644)
-
-	r, _ := InitResult("", dir, "net/http", "Get", "1.21.8")
+func TestSetupLibraryMode_Stdlib(t *testing.T) {
+	r := &Result{ScanConfig: ScanConfig{Directory: t.TempDir()}, IsVulnerable: "unknown"}
+	SetupLibraryMode(r, "net/http", "Get", "1.21.8")
 	entry, ok := r.AffectedImports["net/http"]
 	if !ok {
 		t.Fatal("expected net/http in AffectedImports")
@@ -1536,9 +1529,7 @@ func TestInitResult_LibraryModeStdlib(t *testing.T) {
 	}
 }
 
-func TestInitResult_GoCVEDirect(t *testing.T) {
-	// Provide a valid GOCVE but fetchAffectedSymbols will fail (no real server)
-	// This tests the GOCVE direct path
+func TestSetupCVEMode_GoCVEDirect(t *testing.T) {
 	vulnReport := VulnReport{
 		ID: "GO-2024-3333",
 		Affected: []Affected{
@@ -1562,11 +1553,8 @@ func TestInitResult_GoCVEDirect(t *testing.T) {
 	defer func() { VulnsURL = origURL }()
 	VulnsURL = ts.URL
 
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/test\ngo 1.21\n"), 0644)
-	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\nfunc main() {}\n"), 0644)
-
-	r, done := InitResult("GO-2024-3333", dir, "", "", "")
+	r := &Result{ScanConfig: ScanConfig{CVE: "GO-2024-3333", Directory: t.TempDir()}, IsVulnerable: "unknown"}
+	done := SetupCVEMode(r)
 	if done {
 		t.Errorf("expected done=false, errors: %v", r.Errors)
 	}
@@ -1575,19 +1563,9 @@ func TestInitResult_GoCVEDirect(t *testing.T) {
 	}
 }
 
-func TestInitResult_NoAffectedImports(t *testing.T) {
-	vulnReport := VulnReport{ID: "GO-2024-3333"}
-	body, _ := json.Marshal(vulnReport)
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		w.Write(body)
-	}))
-	defer ts.Close()
-
-	origURL := VulnsURL
-	defer func() { VulnsURL = origURL }()
-	VulnsURL = ts.URL
-
-	r, done := InitResult("GO-2024-3333", t.TempDir(), "", "", "")
+func TestPrepare_NoAffectedImports(t *testing.T) {
+	r := &Result{IsVulnerable: "unknown"}
+	done := Prepare(r)
 	if !done {
 		t.Error("expected done=true when no affected imports")
 	}
@@ -1606,7 +1584,7 @@ var _ = unsafe.Sizeof(0)
 func main() {}
 `), 0644)
 
-	r := &Result{Directory: dir}
+	r := &Result{ScanConfig: ScanConfig{Directory: dir}}
 	DetectUnsafeReflectUsage(r, nil)
 
 	if !r.Unsafe {
@@ -1625,7 +1603,7 @@ var _ = reflect.TypeOf(0)
 func main() {}
 `), 0644)
 
-	r := &Result{Directory: dir}
+	r := &Result{ScanConfig: ScanConfig{Directory: dir}}
 	DetectUnsafeReflectUsage(r, nil)
 
 	if r.Unsafe {
@@ -1647,7 +1625,7 @@ import "reflect"
 var _ = reflect.TypeOf(0)
 `), 0644)
 
-	r := &Result{Directory: dir}
+	r := &Result{ScanConfig: ScanConfig{Directory: dir}}
 	DetectUnsafeReflectUsage(r, nil)
 
 	if !r.Unsafe {
@@ -1665,7 +1643,7 @@ import "fmt"
 func main() { fmt.Println("hello") }
 `), 0644)
 
-	r := &Result{Directory: dir}
+	r := &Result{ScanConfig: ScanConfig{Directory: dir}}
 	DetectUnsafeReflectUsage(r, nil)
 
 	if r.Unsafe {
@@ -1691,7 +1669,7 @@ var _ = reflect.TypeOf(0)
 func main() {}
 `), 0644)
 
-	r := &Result{Directory: dir}
+	r := &Result{ScanConfig: ScanConfig{Directory: dir}}
 	DetectUnsafeReflectUsage(r, nil)
 
 	if r.Unsafe {
@@ -1711,7 +1689,7 @@ func main() {}
 `), 0644)
 
 	var messages []string
-	r := &Result{Directory: dir}
+	r := &Result{ScanConfig: ScanConfig{Directory: dir}}
 	DetectUnsafeReflectUsage(r, func(msg string) {
 		messages = append(messages, msg)
 	})
@@ -1842,7 +1820,7 @@ func TestFindPathToSymbol_NotFound(t *testing.T) {
 
 func TestCheckDirectUsage_Found(t *testing.T) {
 	dir := filepath.Join("testdata", "simple")
-	r := &Result{Directory: dir}
+	r := &Result{ScanConfig: ScanConfig{Directory: dir}}
 	t.Setenv("ALGO", "rta")
 
 	result := r.checkDirectUsage("fmt", dir, []string{"fmt.Println"}, nil)
@@ -1853,7 +1831,7 @@ func TestCheckDirectUsage_Found(t *testing.T) {
 
 func TestCheckDirectUsage_NotFound(t *testing.T) {
 	dir := filepath.Join("testdata", "simple")
-	r := &Result{Directory: dir}
+	r := &Result{ScanConfig: ScanConfig{Directory: dir}}
 	t.Setenv("ALGO", "rta")
 
 	result := r.checkDirectUsage("crypto/tls", dir, []string{"crypto/tls.Dial"}, nil)
@@ -1906,18 +1884,19 @@ func TestMatchesSymbol_WithSSA(t *testing.T) {
 	}
 }
 
-func TestInitResult_WithProgressFunc(t *testing.T) {
+func TestSetupLibraryMode_WithProgressFunc(t *testing.T) {
 	var messages []string
-	r, _ := InitResult("GO-2024-0001", "testdata/simple", "fmt", "Println", "v1.22.0",
-		func(r *Result) {
-			r.ProgressFunc = func(msg string) {
+	r := &Result{
+		ScanConfig: ScanConfig{
+			CVE:       "GO-2024-0001",
+			Directory: "testdata/simple",
+			ProgressFunc: func(msg string) {
 				messages = append(messages, msg)
-			}
+			},
 		},
-	)
-	if r == nil {
-		t.Fatal("expected non-nil result")
+		IsVulnerable: "unknown",
 	}
+	SetupLibraryMode(r, "fmt", "Println", "v1.22.0")
 	if len(messages) == 0 {
 		t.Error("expected progress messages to be emitted")
 	}
@@ -1969,7 +1948,7 @@ func TestFindPathToSymbolExported(t *testing.T) {
 
 func TestIsSymbolUsed(t *testing.T) {
 	dir := filepath.Join("testdata", "simple")
-	r := &Result{Directory: dir}
+	r := &Result{ScanConfig: ScanConfig{Directory: dir}}
 	t.Setenv("ALGO", "rta")
 
 	result := r.isSymbolUsed("fmt", dir, []string{"Println"}, []string{"main.go"})
@@ -1980,7 +1959,7 @@ func TestIsSymbolUsed(t *testing.T) {
 
 func TestDetectReflectionVulnerabilities_WithReflection(t *testing.T) {
 	dir := filepath.Join("testdata", "simple")
-	r := &Result{Directory: dir}
+	r := &Result{ScanConfig: ScanConfig{Directory: dir}}
 
 	risks := r.detectReflectionVulnerabilities("fmt", dir, []string{"Println"}, []string{"reflect.go"})
 	if len(risks) == 0 {
@@ -1990,7 +1969,7 @@ func TestDetectReflectionVulnerabilities_WithReflection(t *testing.T) {
 
 func TestDetectReflectionVulnerabilities_NoReflection(t *testing.T) {
 	dir := filepath.Join("testdata", "simple")
-	r := &Result{Directory: dir}
+	r := &Result{ScanConfig: ScanConfig{Directory: dir}}
 
 	risks := r.detectReflectionVulnerabilities("fmt", dir, []string{"Println"}, []string{"main.go"})
 	if len(risks) != 0 {
@@ -2000,7 +1979,7 @@ func TestDetectReflectionVulnerabilities_NoReflection(t *testing.T) {
 
 func TestDetectReflectionVulnerabilities_BadFile(t *testing.T) {
 	dir := filepath.Join("testdata", "simple")
-	r := &Result{Directory: dir}
+	r := &Result{ScanConfig: ScanConfig{Directory: dir}}
 
 	risks := r.detectReflectionVulnerabilities("fmt", dir, []string{"Println"}, []string{"nonexistent.go"})
 	if len(risks) != 0 {
@@ -2020,8 +1999,11 @@ func TestWorker(t *testing.T) {
 	runner.stdout[absDir+"|go|mod|edit|-json"] = []byte(`{"Module":{"Path":"example.com/simple"},"Go":"1.21","Require":[],"Replace":[]}`)
 
 	result := &Result{
-		Directory: absDir,
-		GoCVE:     "GO-2024-0001",
+		ScanConfig: ScanConfig{
+			Directory: absDir,
+			Runner:    runner,
+		},
+		GoCVE: "GO-2024-0001",
 		AffectedImports: map[string]AffectedImportsDetails{
 			"fmt": {
 				Symbols:      []string{"Println"},
@@ -2029,7 +2011,6 @@ func TestWorker(t *testing.T) {
 				FixedVersion: []string{"v1.21.9"},
 			},
 		},
-		Runner: runner,
 	}
 
 	jobs := make(chan Job, 1)
