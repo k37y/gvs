@@ -217,3 +217,60 @@ func TestProgressHandler_MissingTaskID(t *testing.T) {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
 }
+
+func TestProgressHandler_NotFound(t *testing.T) {
+	req := httptest.NewRequest("GET", "/progress/nonexistent-task", nil)
+	rec := httptest.NewRecorder()
+
+	ProgressHandler(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestGetGraphCacheDir_Env(t *testing.T) {
+	t.Setenv("GVS_GRAPH_CACHE", "/custom/graph")
+	got := getGraphCacheDir()
+	if got != "/custom/graph" {
+		t.Errorf("getGraphCacheDir() = %q, want /custom/graph", got)
+	}
+}
+
+func TestGetGraphCacheDir_Default(t *testing.T) {
+	t.Setenv("GVS_GRAPH_CACHE", "")
+	got := getGraphCacheDir()
+	if got != "/tmp/gvs-cache/graph" {
+		t.Errorf("getGraphCacheDir() = %q, want /tmp/gvs-cache/graph", got)
+	}
+}
+
+func TestProgressHandler_Stream(t *testing.T) {
+	taskID := "test-progress-stream"
+	ch := make(chan string, 2)
+	ch <- "step 1"
+	ch <- "step 2"
+	close(ch)
+
+	progressMutex.Lock()
+	progressStreams[taskID] = ch
+	progressMutex.Unlock()
+	defer func() {
+		progressMutex.Lock()
+		delete(progressStreams, taskID)
+		progressMutex.Unlock()
+	}()
+
+	req := httptest.NewRequest("GET", "/progress/"+taskID, nil)
+	rec := httptest.NewRecorder()
+
+	ProgressHandler(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "data: step 1") {
+		t.Errorf("expected 'data: step 1' in body, got: %s", body)
+	}
+	if !strings.Contains(body, "data: step 2") {
+		t.Errorf("expected 'data: step 2' in body, got: %s", body)
+	}
+}
