@@ -1454,3 +1454,143 @@ func TestGetFixedVersion_NoMatch(t *testing.T) {
 		t.Errorf("expected nil, got %v", got)
 	}
 }
+
+// --- InitResult tests ---
+
+func TestInitResult_InvalidCVEFormat(t *testing.T) {
+	r, done := InitResult("not-a-cve", t.TempDir(), "", "", "")
+	if !done {
+		t.Error("expected done=true for invalid CVE format")
+	}
+	if len(r.Errors) == 0 {
+		t.Error("expected errors for invalid CVE format")
+	}
+}
+
+func TestInitResult_LibraryModeMissingFields(t *testing.T) {
+	r, done := InitResult("", t.TempDir(), "golang.org/x/net", "", "")
+	if !done {
+		t.Error("expected done=true for missing library mode fields")
+	}
+	if len(r.Errors) == 0 || r.Errors[0] != "When using library mode, all three flags are required: -library, -symbols, and -fixversion" {
+		t.Errorf("unexpected errors: %v", r.Errors)
+	}
+}
+
+func TestInitResult_LibraryModeWhitespace(t *testing.T) {
+	r, done := InitResult("", t.TempDir(), "  ", "Parse", "v0.33.0")
+	if !done {
+		t.Error("expected done=true for whitespace library")
+	}
+	if len(r.Errors) == 0 || r.Errors[0] != "Library mode parameters cannot be empty or whitespace only" {
+		t.Errorf("unexpected errors: %v", r.Errors)
+	}
+}
+
+func TestInitResult_LibraryModeEmptySymbols(t *testing.T) {
+	r, done := InitResult("", t.TempDir(), "golang.org/x/net", " , , ", "v0.33.0")
+	if !done {
+		t.Error("expected done=true for all-empty symbols")
+	}
+	if len(r.Errors) == 0 || r.Errors[0] != "At least one non-empty symbol is required" {
+		t.Errorf("unexpected errors: %v", r.Errors)
+	}
+}
+
+func TestInitResult_LibraryModeValid(t *testing.T) {
+	dir := t.TempDir()
+	// Create minimal go.mod and main.go so findMainGoFiles works
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/test\ngo 1.21\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\nfunc main() {}\n"), 0644)
+
+	// Need to init a git repo for getGitBranch/getGitURL
+	r, done := InitResult("", dir, "golang.org/x/net/html", "Parse,ParseFragment", "v0.33.0")
+	// done depends on whether GoCVE is set — in manual mode with no CVE, GoCVE="MANUAL-SCAN"
+	if done {
+		t.Errorf("expected done=false for valid library mode, errors: %v", r.Errors)
+	}
+	if r.GoCVE != "MANUAL-SCAN" {
+		t.Errorf("GoCVE = %q, want %q", r.GoCVE, "MANUAL-SCAN")
+	}
+	if _, ok := r.AffectedImports["golang.org/x/net/html"]; !ok {
+		t.Error("expected golang.org/x/net/html in AffectedImports")
+	}
+	if len(r.AffectedImports["golang.org/x/net/html"].Symbols) != 2 {
+		t.Errorf("expected 2 symbols, got %d", len(r.AffectedImports["golang.org/x/net/html"].Symbols))
+	}
+}
+
+func TestInitResult_LibraryModeStdlib(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/test\ngo 1.21\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\nfunc main() {}\n"), 0644)
+
+	r, _ := InitResult("", dir, "net/http", "Get", "1.21.8")
+	entry, ok := r.AffectedImports["net/http"]
+	if !ok {
+		t.Fatal("expected net/http in AffectedImports")
+	}
+	if entry.Type != "stdlib" {
+		t.Errorf("Type = %q, want %q", entry.Type, "stdlib")
+	}
+}
+
+func TestInitResult_GoCVEDirect(t *testing.T) {
+	// Provide a valid GOCVE but fetchAffectedSymbols will fail (no real server)
+	// This tests the GOCVE direct path
+	vulnReport := VulnReport{
+		ID: "GO-2024-3333",
+		Affected: []Affected{
+			{
+				Package: Package{Name: "golang.org/x/net"},
+				EcosystemSpecific: EcosystemSpecific{
+					Imports: []Import{
+						{Path: "golang.org/x/net/html", Symbols: []string{"Parse"}},
+					},
+				},
+			},
+		},
+	}
+	body, _ := json.Marshal(vulnReport)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Write(body)
+	}))
+	defer ts.Close()
+
+	origURL := VulnsURL
+	defer func() { VulnsURL = origURL }()
+	VulnsURL = ts.URL
+
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/test\ngo 1.21\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\nfunc main() {}\n"), 0644)
+
+	r, done := InitResult("GO-2024-3333", dir, "", "", "")
+	if done {
+		t.Errorf("expected done=false, errors: %v", r.Errors)
+	}
+	if r.GoCVE != "GO-2024-3333" {
+		t.Errorf("GoCVE = %q, want %q", r.GoCVE, "GO-2024-3333")
+	}
+}
+
+func TestInitResult_NoAffectedImports(t *testing.T) {
+	vulnReport := VulnReport{ID: "GO-2024-3333"}
+	body, _ := json.Marshal(vulnReport)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Write(body)
+	}))
+	defer ts.Close()
+
+	origURL := VulnsURL
+	defer func() { VulnsURL = origURL }()
+	VulnsURL = ts.URL
+
+	r, done := InitResult("GO-2024-3333", t.TempDir(), "", "", "")
+	if !done {
+		t.Error("expected done=true when no affected imports")
+	}
+	if r.IsVulnerable != "unknown" {
+		t.Errorf("IsVulnerable = %q, want %q", r.IsVulnerable, "unknown")
+	}
+}

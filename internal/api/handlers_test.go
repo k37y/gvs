@@ -2,6 +2,9 @@ package api
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -78,5 +81,139 @@ func TestConvertGraphPathsToURLs_InvalidJSON(t *testing.T) {
 	output := convertGraphPathsToURLs(input, "http://localhost:8082")
 	if string(output) != "not json" {
 		t.Errorf("expected unchanged input for invalid JSON")
+	}
+}
+
+func TestHealthHandler(t *testing.T) {
+	req := httptest.NewRequest("GET", "/health", nil)
+	rec := httptest.NewRecorder()
+
+	HealthHandler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if rec.Body.String() != "OK" {
+		t.Errorf("body = %q, want %q", rec.Body.String(), "OK")
+	}
+}
+
+func TestWriteJSONError(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeJSONError(rec, http.StatusBadRequest, "bad input")
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want %q", ct, "application/json")
+	}
+
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	if body["error"] != "bad input" {
+		t.Errorf("error = %q, want %q", body["error"], "bad input")
+	}
+}
+
+func TestStatusHandler_MissingTaskID(t *testing.T) {
+	req := httptest.NewRequest("POST", "/status", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+
+	StatusHandler(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestStatusHandler_InvalidJSON(t *testing.T) {
+	req := httptest.NewRequest("POST", "/status", strings.NewReader("not json"))
+	rec := httptest.NewRecorder()
+
+	StatusHandler(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestStatusHandler_UnknownTask(t *testing.T) {
+	req := httptest.NewRequest("POST", "/status", strings.NewReader(`{"taskId":"unknown-123"}`))
+	rec := httptest.NewRecorder()
+
+	StatusHandler(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestStatusHandler_KnownTask(t *testing.T) {
+	taskMutex.Lock()
+	taskStore["test-task-1"] = &TaskResult{
+		Status: StatusCompleted,
+		Output: `{"IsVulnerable":"true"}`,
+	}
+	taskMutex.Unlock()
+	defer func() {
+		taskMutex.Lock()
+		delete(taskStore, "test-task-1")
+		taskMutex.Unlock()
+	}()
+
+	req := httptest.NewRequest("POST", "/status", strings.NewReader(`{"taskId":"test-task-1"}`))
+	rec := httptest.NewRecorder()
+
+	StatusHandler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	if body["status"] != string(StatusCompleted) {
+		t.Errorf("status = %v, want %v", body["status"], StatusCompleted)
+	}
+	if body["output"] == nil {
+		t.Error("expected output in response")
+	}
+}
+
+func TestScanHandler_InvalidJSON(t *testing.T) {
+	req := httptest.NewRequest("POST", "/scan", strings.NewReader("not json"))
+	rec := httptest.NewRecorder()
+
+	ScanHandler(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestCallgraphHandler_InvalidJSON(t *testing.T) {
+	req := httptest.NewRequest("POST", "/callgraph", strings.NewReader("not json"))
+	rec := httptest.NewRecorder()
+
+	CallgraphHandler(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestProgressHandler_MissingTaskID(t *testing.T) {
+	req := httptest.NewRequest("GET", "/progress/", nil)
+	rec := httptest.NewRecorder()
+
+	ProgressHandler(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
 }

@@ -136,7 +136,13 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Initializing vulnerability scan...\n")
 		result = initResultWithProgress(cveID, directory, *library, *symbols, *fixversion)
 	} else {
-		result = cg.InitResult(cveID, directory, *library, *symbols, *fixversion)
+		var done bool
+		result, done = cg.InitResult(cveID, directory, *library, *symbols, *fixversion)
+		if done {
+			jsonOutput, _ := json.MarshalIndent(result, "", "  ")
+			fmt.Println(string(jsonOutput))
+			os.Exit(0)
+		}
 	}
 
 	// Set progress flag on result for scanner to use

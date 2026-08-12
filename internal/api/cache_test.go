@@ -1,6 +1,9 @@
 package api
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 func TestKeyToFilename(t *testing.T) {
 	tests := []struct {
@@ -38,5 +41,58 @@ func TestKeyToLogFilename(t *testing.T) {
 				t.Errorf("keyToLogFilename(%q) = %q, want %q", tt.key, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCacheRoundtrip(t *testing.T) {
+	origCacheDir := cacheDir
+	cacheDir = t.TempDir()
+	defer func() { cacheDir = origCacheDir }()
+
+	key := "test-repo@main:CVE-2024-1234"
+	data := []byte(`{"IsVulnerable":"true"}`)
+
+	if err := SaveCacheToDisk(key, data); err != nil {
+		t.Fatalf("SaveCacheToDisk failed: %v", err)
+	}
+
+	got, err := RetrieveCacheFromDisk(key)
+	if err != nil {
+		t.Fatalf("RetrieveCacheFromDisk failed: %v", err)
+	}
+	if string(got) != string(data) {
+		t.Errorf("got %q, want %q", string(got), string(data))
+	}
+}
+
+func TestCacheLogRoundtrip(t *testing.T) {
+	origCacheDir := cacheDir
+	cacheDir = t.TempDir()
+	defer func() { cacheDir = origCacheDir }()
+
+	key := "test-repo@main:CVE-2024-1234"
+	data := []byte("scan log output here")
+
+	if err := SaveCacheLogsToDisk(key, data); err != nil {
+		t.Fatalf("SaveCacheLogsToDisk failed: %v", err)
+	}
+
+	got, err := RetrieveCacheLogFromDisk(key)
+	if err != nil {
+		t.Fatalf("RetrieveCacheLogFromDisk failed: %v", err)
+	}
+	if string(got) != string(data) {
+		t.Errorf("got %q, want %q", string(got), string(data))
+	}
+}
+
+func TestRetrieveCacheFromDisk_Missing(t *testing.T) {
+	origCacheDir := cacheDir
+	cacheDir = t.TempDir()
+	defer func() { cacheDir = origCacheDir }()
+
+	_, err := RetrieveCacheFromDisk("nonexistent")
+	if !os.IsNotExist(err) {
+		t.Errorf("expected os.ErrNotExist, got %v", err)
 	}
 }

@@ -68,7 +68,7 @@ func (r *Result) httpClient() HTTPClient {
 	return &http.Client{Timeout: 10 * time.Second}
 }
 
-func InitResult(cve, dir string, library, symbols, fixversion string) *Result {
+func InitResult(cve, dir string, library, symbols, fixversion string) (*Result, bool) {
 	r := &Result{
 		CVE:          cve,
 		Directory:    dir,
@@ -79,38 +79,14 @@ func InitResult(cve, dir string, library, symbols, fixversion string) *Result {
 	if library != "" || symbols != "" || fixversion != "" {
 		// Validate that all three parameters are provided together
 		if library == "" || symbols == "" || fixversion == "" {
-			r = &Result{
-				GoCVE:        "",
-				IsVulnerable: "unknown",
-				CVE:          r.CVE,
-				Directory:    r.Directory,
-				Errors:       []string{"When using library mode, all three flags are required: -library, -symbols, and -fixversion"},
-			}
-			jsonOutput, err := json.MarshalIndent(r, "", "  ")
-			if err != nil {
-				errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
-				r.Errors = append(r.Errors, errMsg)
-			}
-			fmt.Println(string(jsonOutput))
-			os.Exit(0)
+			r.Errors = append(r.Errors, "When using library mode, all three flags are required: -library, -symbols, and -fixversion")
+			return r, true
 		}
 
 		// Validate that values are not just whitespace
 		if strings.TrimSpace(library) == "" || strings.TrimSpace(symbols) == "" || strings.TrimSpace(fixversion) == "" {
-			r = &Result{
-				GoCVE:        "",
-				IsVulnerable: "unknown",
-				CVE:          r.CVE,
-				Directory:    r.Directory,
-				Errors:       []string{"Library mode parameters cannot be empty or whitespace only"},
-			}
-			jsonOutput, err := json.MarshalIndent(r, "", "  ")
-			if err != nil {
-				errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
-				r.Errors = append(r.Errors, errMsg)
-			}
-			fmt.Println(string(jsonOutput))
-			os.Exit(0)
+			r.Errors = append(r.Errors, "Library mode parameters cannot be empty or whitespace only")
+			return r, true
 		}
 
 		// Set a placeholder GoCVE if no CVE provided, or fetch it if provided
@@ -139,20 +115,8 @@ func InitResult(cve, dir string, library, symbols, fixversion string) *Result {
 			}
 		}
 		if !hasValidSymbol {
-			r = &Result{
-				GoCVE:        "",
-				IsVulnerable: "unknown",
-				CVE:          r.CVE,
-				Directory:    r.Directory,
-				Errors:       []string{"At least one non-empty symbol is required"},
-			}
-			jsonOutput, err := json.MarshalIndent(r, "", "  ")
-			if err != nil {
-				errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
-				r.Errors = append(r.Errors, errMsg)
-			}
-			fmt.Println(string(jsonOutput))
-			os.Exit(0)
+			r.Errors = append(r.Errors, "At least one non-empty symbol is required")
+			return r, true
 		}
 
 		details := AffectedImportsDetails{
@@ -178,31 +142,13 @@ func InitResult(cve, dir string, library, symbols, fixversion string) *Result {
 	} else {
 		// Check if input is already a GOCVE ID or needs conversion from CVE ID
 		if common.IsGOCVEID(cve) {
-			// Input is already a GOCVE ID, use it directly
 			r.GoCVE = cve
 		} else if common.IsCVEID(cve) {
-			// Input is a CVE ID, convert to GOCVE ID
 			fetchGoVulnID(r)
 		} else {
-			// Invalid input format
-			r = &Result{
-				GoCVE:        "Invalid input format",
-				IsVulnerable: "unknown",
-				CVE:          r.CVE,
-				Directory:    r.Directory,
-				Branch:       r.Branch,
-				Repository:   r.Repository,
-				Unsafe:       r.Unsafe,
-				Reflect:      r.Reflect,
-				Errors:       []string{"Invalid input format. Please provide either a CVE ID (CVE-YYYY-NNNN) or GOCVE ID (GO-YYYY-NNNN)"},
-			}
-			jsonOutput, err := json.MarshalIndent(r, "", "  ")
-			if err != nil {
-				errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
-				r.Errors = append(r.Errors, errMsg)
-			}
-			fmt.Println(string(jsonOutput))
-			os.Exit(0)
+			r.GoCVE = "Invalid input format"
+			r.Errors = append(r.Errors, "Invalid input format. Please provide either a CVE ID (CVE-YYYY-NNNN) or GOCVE ID (GO-YYYY-NNNN)")
+			return r, true
 		}
 
 		fetchAffectedSymbols(r)
@@ -211,13 +157,7 @@ func InitResult(cve, dir string, library, symbols, fixversion string) *Result {
 	// Early exit if no vulnerable symbols found
 	if len(r.AffectedImports) == 0 {
 		r.IsVulnerable = "unknown"
-		jsonOutput, err := json.MarshalIndent(r, "", "  ")
-		if err != nil {
-			errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
-			r.Errors = append(r.Errors, errMsg)
-		}
-		fmt.Println(string(jsonOutput))
-		os.Exit(0)
+		return r, true
 	}
 
 	findMainGoFiles(r)
@@ -226,26 +166,10 @@ func InitResult(cve, dir string, library, symbols, fixversion string) *Result {
 	DetectUnsafeReflectUsage(r, nil)
 
 	if r.GoCVE == "" {
-		r = &Result{
-			GoCVE:        "",
-			IsVulnerable: "unknown",
-			CVE:          r.CVE,
-			Directory:    r.Directory,
-			Branch:       r.Branch,
-			Repository:   r.Repository,
-			Unsafe:       r.Unsafe,
-			Reflect:      r.Reflect,
-			Errors:       []string{"No Go CVE ID found"},
-		}
-		jsonOutput, err := json.MarshalIndent(r, "", "  ")
-		if err != nil {
-			errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
-			r.Errors = append(r.Errors, errMsg)
-		}
-		fmt.Println(string(jsonOutput))
-		os.Exit(0)
+		r.Errors = append(r.Errors, "No Go CVE ID found")
+		return r, true
 	}
-	return r
+	return r, false
 }
 
 func Worker(jobs <-chan Job, results chan<- *Result, wg *sync.WaitGroup, result *Result) {
