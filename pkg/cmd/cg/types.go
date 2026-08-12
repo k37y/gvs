@@ -1,15 +1,20 @@
 package cg
 
 import (
+	"net/http"
 	"sync"
 
 	"golang.org/x/tools/go/callgraph"
 	"golang.org/x/tools/go/ssa"
+
+	"github.com/k37y/gvs/internal/cli"
 )
 
-const (
-	VulnsURL = "https://vuln.go.dev"
-)
+type HTTPClient interface {
+	Get(url string) (*http.Response, error)
+}
+
+var VulnsURL = "https://vuln.go.dev"
 
 type Job struct {
 	Package string
@@ -72,6 +77,8 @@ type Result struct {
 	Progress           bool                `json:"-"`
 	SsaProg            *ssa.Program        `json:"-"`
 	CgGraph            *callgraph.Graph    `json:"-"`
+	Runner             cli.CommandRunner   `json:"-"`
+	HTTP               HTTPClient          `json:"-"`
 }
 
 type VulnReport struct {

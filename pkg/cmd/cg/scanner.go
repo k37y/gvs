@@ -54,6 +54,20 @@ import (
 	"github.com/k37y/gvs/internal/common"
 )
 
+func (r *Result) runner() cli.CommandRunner {
+	if r.Runner != nil {
+		return r.Runner
+	}
+	return cli.DefaultRunner{}
+}
+
+func (r *Result) httpClient() HTTPClient {
+	if r.HTTP != nil {
+		return r.HTTP
+	}
+	return &http.Client{Timeout: 10 * time.Second}
+}
+
 func InitResult(cve, dir string, library, symbols, fixversion string) *Result {
 	r := &Result{
 		CVE:          cve,
@@ -400,10 +414,9 @@ func (j Job) isVulnerable(result *Result) *Result {
 }
 
 func fetchGoVulnID(result *Result) string {
-	client := http.Client{Timeout: 10 * time.Second}
-	url := fmt.Sprintf(VulnsURL + "/index/vulns.json")
+	url := VulnsURL + "/index/vulns.json"
 
-	resp, err := client.Get(url)
+	resp, err := result.httpClient().Get(url)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to get response from %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
@@ -458,7 +471,7 @@ func findMainGoFiles(res *Result) {
 	for _, modDir := range modDirs {
 		cmd := "go"
 		args := []string{"list", "-f", `{{if eq .Name "main"}}{{.Name}}: {{.Dir}}{{end}}`, "./..."}
-		out, err := cli.RunCommand(modDir, cmd, args...)
+		out, err := res.runner().RunCommand(modDir, cmd, args...)
 		if err != nil {
 			errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), modDir, strings.TrimSpace(string(out)))
 			res.Errors = append(res.Errors, errMsg)
@@ -506,10 +519,9 @@ func findMainGoFiles(res *Result) {
 }
 
 func fetchAffectedSymbols(result *Result) {
-	client := http.Client{Timeout: 10 * time.Second}
 	url := fmt.Sprintf(VulnsURL+"/ID/%s.json", result.GoCVE)
 
-	resp, err := client.Get(url)
+	resp, err := result.httpClient().Get(url)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed HTTP request to %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
@@ -702,7 +714,7 @@ func (r *Result) checkDirectUsage(pkg, dir string, symbols []string, files []str
 func getRepoModulePath(dir string, result *Result) string {
 	cmd := "go"
 	args := []string{"mod", "edit", "-json"}
-	out, err := cli.RunCommandStdout(dir, cmd, args...)
+	out, err := result.runner().RunCommandStdout(dir, cmd, args...)
 	if err != nil {
 		return "" // Return empty string to skip filtering
 	}
@@ -1096,7 +1108,7 @@ func getCurrentVersion(pkg string, dir string, result *Result) string {
 
 	cmd := "go"
 	args := []string{"list", "-f", "{{if .Module}}{{.Module.Version}}{{end}}", pkg}
-	out, err := cli.RunCommandStdout(dir, cmd, args...)
+	out, err := result.runner().RunCommandStdout(dir, cmd, args...)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
 		result.Errors = append(result.Errors, errMsg)
@@ -1108,7 +1120,7 @@ func getCurrentVersion(pkg string, dir string, result *Result) string {
 func getGoToolchainVersion(dir string, result *Result) string {
 	cmd := "go"
 	args := []string{"mod", "edit", "-json"}
-	out, err := cli.RunCommandStdout(dir, cmd, args...)
+	out, err := result.runner().RunCommandStdout(dir, cmd, args...)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
 		result.Errors = append(result.Errors, errMsg)
@@ -1139,7 +1151,7 @@ func getGoToolchainVersion(dir string, result *Result) string {
 func getReplaceVersion(pkg string, dir string, result *Result) (string, string) {
 	cmd := "go"
 	args := []string{"mod", "edit", "-json"}
-	out, err := cli.RunCommandStdout(dir, cmd, args...)
+	out, err := result.runner().RunCommandStdout(dir, cmd, args...)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
 		result.Errors = append(result.Errors, errMsg)
@@ -1165,7 +1177,7 @@ func getReplaceVersion(pkg string, dir string, result *Result) (string, string) 
 
 func getFixedVersion(id, pkg string, result *Result) []string {
 	url := fmt.Sprintf(VulnsURL+"/ID/%s.json", id)
-	resp, err := http.Get(url)
+	resp, err := result.httpClient().Get(url)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to get response from %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
@@ -1208,7 +1220,7 @@ func getFixedVersion(id, pkg string, result *Result) []string {
 func getModPath(pkg, dir string, result *Result) string {
 	cmd := "go"
 	args := []string{"list", "-f", "{{if .Module}}{{.Module.Path}}{{end}}", pkg}
-	out, err := cli.RunCommandStdout(dir, cmd, args...)
+	out, err := result.runner().RunCommandStdout(dir, cmd, args...)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
 		result.Errors = append(result.Errors, errMsg)
@@ -1220,7 +1232,7 @@ func getModPath(pkg, dir string, result *Result) string {
 func getGitBranch(result *Result) {
 	cmd := "git"
 	args := []string{"rev-parse", "--abbrev-ref", "HEAD"}
-	out, err := cli.RunCommandStdout(result.Directory, cmd, args...)
+	out, err := result.runner().RunCommandStdout(result.Directory, cmd, args...)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), result.Directory, strings.TrimSpace(string(out)))
 		result.Errors = append(result.Errors, errMsg)
@@ -1234,7 +1246,7 @@ func getGitBranch(result *Result) {
 	if branchName == "HEAD" {
 		commitCmd := "git"
 		commitArgs := []string{"rev-parse", "HEAD"}
-		commitOut, err := cli.RunCommandStdout(result.Directory, commitCmd, commitArgs...)
+		commitOut, err := result.runner().RunCommandStdout(result.Directory, commitCmd, commitArgs...)
 		if err != nil {
 			errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", commitCmd, strings.Join(commitArgs, " "), result.Directory, strings.TrimSpace(string(commitOut)))
 			result.Errors = append(result.Errors, errMsg)
@@ -1250,7 +1262,7 @@ func getGitBranch(result *Result) {
 func getGitURL(result *Result) {
 	cmd := "git"
 	args := []string{"remote", "get-url", "origin"}
-	out, err := cli.RunCommandStdout(result.Directory, cmd, args...)
+	out, err := result.runner().RunCommandStdout(result.Directory, cmd, args...)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), result.Directory, strings.TrimSpace(string(out)))
 		result.Errors = append(result.Errors, errMsg)
