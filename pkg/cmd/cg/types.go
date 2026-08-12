@@ -75,6 +75,7 @@ type Result struct {
 	ClaudeVerification *ClaudeVerification `json:"ClaudeVerification,omitempty"`
 	Mu                 sync.Mutex          `json:"-"`
 	Progress           bool                `json:"-"`
+	ProgressFunc       func(string)        `json:"-"`
 	SsaProg            *ssa.Program        `json:"-"`
 	CgGraph            *callgraph.Graph    `json:"-"`
 	Runner             cli.CommandRunner   `json:"-"`

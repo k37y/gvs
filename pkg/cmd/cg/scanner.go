@@ -68,11 +68,20 @@ func (r *Result) httpClient() HTTPClient {
 	return &http.Client{Timeout: 10 * time.Second}
 }
 
-func InitResult(cve, dir string, library, symbols, fixversion string) (*Result, bool) {
+func (r *Result) progress(msg string) {
+	if r.ProgressFunc != nil {
+		r.ProgressFunc(msg)
+	}
+}
+
+func InitResult(cve, dir string, library, symbols, fixversion string, opts ...func(*Result)) (*Result, bool) {
 	r := &Result{
 		CVE:          cve,
 		Directory:    dir,
 		IsVulnerable: "unknown",
+	}
+	for _, opt := range opts {
+		opt(r)
 	}
 
 	// Check if library and symbols are provided for direct scanning (takes precedence)
@@ -89,6 +98,10 @@ func InitResult(cve, dir string, library, symbols, fixversion string) (*Result, 
 			return r, true
 		}
 
+		r.progress("Phase 1/6: Using provided library and symbol override...")
+		r.progress(fmt.Sprintf("  Library: %s", library))
+		r.progress(fmt.Sprintf("  Symbol(s): %s", symbols))
+
 		// Set a placeholder GoCVE if no CVE provided, or fetch it if provided
 		if cve != "" {
 			if common.IsGOCVEID(cve) {
@@ -101,6 +114,7 @@ func InitResult(cve, dir string, library, symbols, fixversion string) (*Result, 
 		}
 
 		// Use provided library and symbols instead of fetching from vulnerability database
+		r.progress("Phase 2/6: Using provided library and symbols...")
 		symbolList := strings.Split(symbols, ",")
 		for i := range symbolList {
 			symbolList[i] = strings.TrimSpace(symbolList[i])
@@ -126,6 +140,7 @@ func InitResult(cve, dir string, library, symbols, fixversion string) (*Result, 
 
 		// Add fixed version (now guaranteed to be non-empty)
 		details.FixedVersion = []string{fixversion}
+		r.progress(fmt.Sprintf("  Using fixed version: %s", fixversion))
 
 		r.AffectedImports = map[string]AffectedImportsDetails{
 			library: details,
@@ -139,11 +154,15 @@ func InitResult(cve, dir string, library, symbols, fixversion string) (*Result, 
 			entry.Type = "stdlib"
 			r.AffectedImports[library] = entry
 		}
+		r.progress(fmt.Sprintf("  ✓ Using %d symbol(s) for library %s", len(symbolList), library))
 	} else {
 		// Check if input is already a GOCVE ID or needs conversion from CVE ID
+		r.progress("Phase 1/6: Processing vulnerability identifier...")
 		if common.IsGOCVEID(cve) {
 			r.GoCVE = cve
+			r.progress(fmt.Sprintf("  ✓ Using provided GOCVE ID: %s", cve))
 		} else if common.IsCVEID(cve) {
+			r.progress("  Converting CVE ID to GOCVE ID...")
 			fetchGoVulnID(r)
 		} else {
 			r.GoCVE = "Invalid input format"
@@ -151,24 +170,31 @@ func InitResult(cve, dir string, library, symbols, fixversion string) (*Result, 
 			return r, true
 		}
 
+		r.progress("Phase 2/6: Fetching affected symbols...")
 		fetchAffectedSymbols(r)
 	}
 
 	// Early exit if no vulnerable symbols found
 	if len(r.AffectedImports) == 0 {
+		r.progress("Scan aborted: No vulnerable symbols to analyze.")
 		r.IsVulnerable = "unknown"
 		return r, true
 	}
 
+	r.progress("Phase 3/6: Discovering Go modules and main files...")
 	findMainGoFiles(r)
+	r.progress("Phase 4/6: Getting git branch information...")
 	getGitBranch(r)
+	r.progress("Phase 5/6: Getting git repository URL...")
 	getGitURL(r)
-	DetectUnsafeReflectUsage(r, nil)
+	r.progress("Phase 6/6: Detecting unsafe and reflect package usage...")
+	DetectUnsafeReflectUsage(r, r.ProgressFunc)
 
 	if r.GoCVE == "" {
 		r.Errors = append(r.Errors, "No Go CVE ID found")
 		return r, true
 	}
+	r.progress("Initialization complete. Starting vulnerability analysis...")
 	return r, false
 }
 
@@ -365,6 +391,7 @@ func fetchGoVulnID(result *Result) string {
 		}
 	}
 
+	result.progress(fmt.Sprintf("  ✓ Go vulnerability ID fetched: %s", result.GoCVE))
 	return ""
 }
 
@@ -440,6 +467,7 @@ func findMainGoFiles(res *Result) {
 
 	res.Files = make(map[string][][]string)
 	res.Files = result
+	res.progress("  ✓ Directory and fileset discovery complete")
 }
 
 func fetchAffectedSymbols(result *Result) {
@@ -506,8 +534,15 @@ func fetchAffectedSymbols(result *Result) {
 	// Validate that we found at least one valid import with symbols
 	if !hasValidImports {
 		result.Errors = append(result.Errors, "No imports or symbols found in vulnerability data")
+		result.progress("  ✗ Error: No imports or symbols found in vulnerability data")
 		return
 	}
+
+	symbolCount := 0
+	for _, imp := range imports {
+		symbolCount += len(imp.Symbols)
+	}
+	result.progress(fmt.Sprintf("  ✓ Affected symbols fetched: %d symbols across %d packages", symbolCount, len(imports)))
 }
 
 func (r *Result) isSymbolUsed(pkg, dir string, symbols, files []string) string {
@@ -1181,6 +1216,7 @@ func getGitBranch(result *Result) {
 	} else {
 		result.Branch = branchName
 	}
+	result.progress(fmt.Sprintf("  ✓ Git branch information retrieved: %s", result.Branch))
 }
 
 func getGitURL(result *Result) {
@@ -1192,6 +1228,7 @@ func getGitURL(result *Result) {
 		result.Errors = append(result.Errors, errMsg)
 	}
 	result.Repository = strings.TrimSpace(string(out))
+	result.progress(fmt.Sprintf("  ✓ Git repository URL retrieved: %s", result.Repository))
 }
 
 func formatIntroducedFixed(events []Event) []string {
