@@ -1722,3 +1722,202 @@ func main() {}
 		t.Error("expected progress messages")
 	}
 }
+
+// Call graph integration tests using testdata fixtures
+
+func TestGenerateCallGraphWithLibInternal_Simple(t *testing.T) {
+	dir := filepath.Join("testdata", "simple")
+	r := &Result{}
+	t.Setenv("ALGO", "rta")
+
+	output, prog, cg, err := r.generateCallGraphWithLibInternal(dir, nil)
+	if err != nil {
+		t.Fatalf("generateCallGraphWithLibInternal failed: %v", err)
+	}
+	if output == "" {
+		t.Error("expected non-empty call graph output")
+	}
+	if prog == nil {
+		t.Error("expected non-nil SSA program")
+	}
+	if cg == nil {
+		t.Error("expected non-nil call graph")
+	}
+}
+
+func TestGenerateCallGraphObject_Simple(t *testing.T) {
+	dir := filepath.Join("testdata", "simple")
+	r := &Result{}
+	t.Setenv("ALGO", "static")
+
+	graph, err := r.GenerateCallGraphObject(dir, nil)
+	if err != nil {
+		t.Fatalf("GenerateCallGraphObject failed: %v", err)
+	}
+	if graph == nil {
+		t.Fatal("expected non-nil call graph")
+	}
+	if len(graph.Nodes) == 0 {
+		t.Error("expected call graph nodes")
+	}
+}
+
+func TestBuildCallGraph_AllAlgorithms(t *testing.T) {
+	dir := filepath.Join("testdata", "simple")
+	r := &Result{}
+
+	for _, algo := range []string{"vta", "rta", "cha", "static"} {
+		t.Run(algo, func(t *testing.T) {
+			t.Setenv("ALGO", algo)
+			_, _, cg, err := r.generateCallGraphWithLibInternal(dir, nil)
+			if err != nil {
+				t.Fatalf("failed with algo %s: %v", algo, err)
+			}
+			if cg == nil {
+				t.Errorf("expected non-nil call graph for algo %s", algo)
+			}
+		})
+	}
+}
+
+func TestFindPathToSymbol_Found(t *testing.T) {
+	dir := filepath.Join("testdata", "simple")
+	r := &Result{}
+	t.Setenv("ALGO", "rta")
+
+	_, _, graph, err := r.generateCallGraphWithLibInternal(dir, nil)
+	if err != nil {
+		t.Fatalf("failed to generate call graph: %v", err)
+	}
+
+	// Find an entry node (main function)
+	var mainNode *callgraph.Node
+	for _, node := range graph.Nodes {
+		if node.Func != nil && node.Func.Name() == "main" && node.Func.Pkg != nil && node.Func.Pkg.Pkg.Name() == "main" {
+			mainNode = node
+			break
+		}
+	}
+	if mainNode == nil {
+		t.Fatal("could not find main node in call graph")
+	}
+
+	// Search for "helper" which is called from main
+	path, found := findPathToSymbol(mainNode, "example.com/simple", "helper", false)
+	if !found {
+		t.Error("expected to find path to helper()")
+	}
+	if len(path) < 2 {
+		t.Errorf("expected path with at least 2 nodes, got %d", len(path))
+	}
+}
+
+func TestFindPathToSymbol_NotFound(t *testing.T) {
+	dir := filepath.Join("testdata", "simple")
+	r := &Result{}
+	t.Setenv("ALGO", "rta")
+
+	_, _, graph, err := r.generateCallGraphWithLibInternal(dir, nil)
+	if err != nil {
+		t.Fatalf("failed to generate call graph: %v", err)
+	}
+
+	var mainNode *callgraph.Node
+	for _, node := range graph.Nodes {
+		if node.Func != nil && node.Func.Name() == "main" && node.Func.Pkg != nil && node.Func.Pkg.Pkg.Name() == "main" {
+			mainNode = node
+			break
+		}
+	}
+	if mainNode == nil {
+		t.Fatal("could not find main node in call graph")
+	}
+
+	_, found := findPathToSymbol(mainNode, "example.com/simple", "nonexistent", false)
+	if found {
+		t.Error("expected not to find nonexistent symbol")
+	}
+}
+
+func TestCheckDirectUsage_Found(t *testing.T) {
+	dir := filepath.Join("testdata", "simple")
+	r := &Result{Directory: dir}
+	t.Setenv("ALGO", "rta")
+
+	result := r.checkDirectUsage("fmt", dir, []string{"fmt.Println"}, nil)
+	if result != "true" {
+		t.Errorf("expected 'true' for fmt.Println usage, got %q", result)
+	}
+}
+
+func TestCheckDirectUsage_NotFound(t *testing.T) {
+	dir := filepath.Join("testdata", "simple")
+	r := &Result{Directory: dir}
+	t.Setenv("ALGO", "rta")
+
+	result := r.checkDirectUsage("crypto/tls", dir, []string{"crypto/tls.Dial"}, nil)
+	if result == "true" {
+		t.Error("expected non-true for unused symbol")
+	}
+}
+
+func TestGenerateCallGraphWithLibInternal_NoMain(t *testing.T) {
+	dir := filepath.Join("testdata", "libonly")
+	r := &Result{}
+	t.Setenv("ALGO", "rta")
+
+	_, _, cg, err := r.generateCallGraphWithLibInternal(dir, nil)
+	if err != nil {
+		t.Fatalf("expected no error for lib-only, got: %v", err)
+	}
+	if cg == nil {
+		t.Error("expected non-nil call graph even for lib-only")
+	}
+}
+
+func TestMatchesSymbol_WithSSA(t *testing.T) {
+	dir := filepath.Join("testdata", "simple")
+	r := &Result{}
+	t.Setenv("ALGO", "static")
+
+	_, _, graph, err := r.generateCallGraphWithLibInternal(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Find the helper node
+	var helperNode *callgraph.Node
+	for _, node := range graph.Nodes {
+		if node.Func != nil && node.Func.Name() == "helper" {
+			helperNode = node
+			break
+		}
+	}
+	if helperNode == nil {
+		t.Fatal("could not find helper node")
+	}
+
+	if !matchesSymbol(helperNode, "example.com/simple", "helper") {
+		t.Error("expected matchesSymbol to match helper")
+	}
+	if matchesSymbol(helperNode, "other/pkg", "helper") {
+		t.Error("expected matchesSymbol to not match wrong package")
+	}
+}
+
+func TestInitResult_WithProgressFunc(t *testing.T) {
+	var messages []string
+	r, _ := InitResult("GO-2024-0001", "testdata/simple", "fmt", "Println", "v1.22.0",
+		func(r *Result) {
+			r.ProgressFunc = func(msg string) {
+				messages = append(messages, msg)
+			}
+		},
+	)
+	if r == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if len(messages) == 0 {
+		t.Error("expected progress messages to be emitted")
+	}
+}
