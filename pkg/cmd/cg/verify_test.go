@@ -120,6 +120,7 @@ func TestLoadSkillPrompt(t *testing.T) {
 
 	t.Run("not found", func(t *testing.T) {
 		t.Setenv("GVS_SKILLS_DIR", "/nonexistent/path")
+		t.Setenv("HOME", t.TempDir())
 		_, found := loadSkillPrompt()
 		if found {
 			t.Error("expected skill prompt to not be found from nonexistent path")
