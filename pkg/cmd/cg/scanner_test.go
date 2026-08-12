@@ -1921,3 +1921,88 @@ func TestInitResult_WithProgressFunc(t *testing.T) {
 		t.Error("expected progress messages to be emitted")
 	}
 }
+
+func TestGenerateCallGraphForVisualization(t *testing.T) {
+	dir := filepath.Join("testdata", "simple")
+	r := &Result{}
+	t.Setenv("ALGO", "static")
+
+	output, err := r.GenerateCallGraphForVisualization(dir, nil)
+	if err != nil {
+		t.Fatalf("GenerateCallGraphForVisualization failed: %v", err)
+	}
+	if output == "" {
+		t.Error("expected non-empty output")
+	}
+}
+
+func TestFindPathToSymbolExported(t *testing.T) {
+	dir := filepath.Join("testdata", "simple")
+	r := &Result{}
+	t.Setenv("ALGO", "rta")
+
+	_, _, graph, err := r.generateCallGraphWithLibInternal(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mainNode *callgraph.Node
+	for _, node := range graph.Nodes {
+		if node.Func != nil && node.Func.Name() == "main" && node.Func.Pkg != nil && node.Func.Pkg.Pkg.Name() == "main" {
+			mainNode = node
+			break
+		}
+	}
+	if mainNode == nil {
+		t.Fatal("could not find main node")
+	}
+
+	path, found := FindPathToSymbolExported(mainNode, "example.com/simple", "helper", false)
+	if !found {
+		t.Error("expected to find path via exported wrapper")
+	}
+	if len(path) < 2 {
+		t.Errorf("expected path with at least 2 nodes, got %d", len(path))
+	}
+}
+
+func TestIsSymbolUsed(t *testing.T) {
+	dir := filepath.Join("testdata", "simple")
+	r := &Result{Directory: dir}
+	t.Setenv("ALGO", "rta")
+
+	result := r.isSymbolUsed("fmt", dir, []string{"Println"}, []string{"main.go"})
+	if result != "true" {
+		t.Errorf("expected 'true' for fmt.Println usage, got %q", result)
+	}
+}
+
+func TestDetectReflectionVulnerabilities_WithReflection(t *testing.T) {
+	dir := filepath.Join("testdata", "simple")
+	r := &Result{Directory: dir}
+
+	risks := r.detectReflectionVulnerabilities("fmt", dir, []string{"Println"}, []string{"reflect.go"})
+	if len(risks) == 0 {
+		t.Error("expected reflection risks for file with reflect usage")
+	}
+}
+
+func TestDetectReflectionVulnerabilities_NoReflection(t *testing.T) {
+	dir := filepath.Join("testdata", "simple")
+	r := &Result{Directory: dir}
+
+	risks := r.detectReflectionVulnerabilities("fmt", dir, []string{"Println"}, []string{"main.go"})
+	if len(risks) != 0 {
+		t.Errorf("expected no reflection risks for plain main.go, got %d", len(risks))
+	}
+}
+
+func TestDetectReflectionVulnerabilities_BadFile(t *testing.T) {
+	dir := filepath.Join("testdata", "simple")
+	r := &Result{Directory: dir}
+
+	risks := r.detectReflectionVulnerabilities("fmt", dir, []string{"Println"}, []string{"nonexistent.go"})
+	if len(risks) != 0 {
+		t.Errorf("expected no risks for missing file, got %d", len(risks))
+	}
+}
