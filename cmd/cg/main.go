@@ -28,7 +28,7 @@ func main() {
 	// Note: sfdp is checked conditionally when -graph flag is used
 	// digraph is no longer required - we use the callgraph.Graph directly with BFS
 	tools := []string{"go", "git"}
-	if !utils.ValidateTools(tools) {
+	if !utils.ValidateTools(tools, os.Stderr) {
 		os.Exit(1)
 	}
 
@@ -339,7 +339,7 @@ func main() {
 	// Generate call graph visualizations if requested (one per affected symbol)
 	if *graph != "" || isFlagPassed("graph") {
 		// Validate that sfdp is available
-		if !utils.ValidateTools([]string{"sfdp"}) {
+		if !utils.ValidateTools([]string{"sfdp"}, os.Stderr) {
 			errMsg := "sfdp tool not found. Please install graphviz (provides sfdp) to generate call graph visualizations"
 			result.Errors = append(result.Errors, errMsg)
 			if *progress {
