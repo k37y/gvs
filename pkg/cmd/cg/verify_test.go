@@ -651,6 +651,265 @@ func TestIsEntryPointLike(t *testing.T) {
 	}
 }
 
+func TestIsTestOnlyTool_TestFile(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "foo_test.go"), []byte("package foo\n"), 0644)
+
+	tool := &isTestOnlyTool{repoDir: dir}
+	result, err := tool.Execute(context.Background(), []byte(`{"file":"foo_test.go"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := result[0].OfText.Text
+	if !strings.Contains(text, "YES") {
+		t.Errorf("expected YES for test file, got: %s", text)
+	}
+}
+
+func TestIsTestOnlyTool_ProductionFile(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "foo.go"), []byte("package foo\n"), 0644)
+
+	tool := &isTestOnlyTool{repoDir: dir}
+	result, err := tool.Execute(context.Background(), []byte(`{"file":"foo.go"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := result[0].OfText.Text
+	if !strings.Contains(text, "NO") {
+		t.Errorf("expected NO for production file, got: %s", text)
+	}
+}
+
+func TestIsTestOnlyTool_ExternalTestPackage(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "foo.go"), []byte("package foo_test\n"), 0644)
+
+	tool := &isTestOnlyTool{repoDir: dir}
+	result, err := tool.Execute(context.Background(), []byte(`{"file":"foo.go"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := result[0].OfText.Text
+	if !strings.Contains(text, "YES") {
+		t.Errorf("expected YES for external test package, got: %s", text)
+	}
+}
+
+func TestCheckBuildTagsTool_NoTags(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\nfunc main() {}\n"), 0644)
+
+	tool := &checkBuildTagsTool{repoDir: dir}
+	result, err := tool.Execute(context.Background(), []byte(`{"file":"main.go"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := result[0].OfText.Text
+	if !strings.Contains(text, "none") {
+		t.Errorf("expected 'none', got: %s", text)
+	}
+}
+
+func TestCheckBuildTagsTool_WithTags(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "linux.go"), []byte("//go:build linux\n\npackage main\n"), 0644)
+
+	tool := &checkBuildTagsTool{repoDir: dir}
+	result, err := tool.Execute(context.Background(), []byte(`{"file":"linux.go"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := result[0].OfText.Text
+	if !strings.Contains(text, "//go:build linux") {
+		t.Errorf("expected build tag, got: %s", text)
+	}
+}
+
+func TestCheckBuildTagsTool_PathEscape(t *testing.T) {
+	dir := t.TempDir()
+	tool := &checkBuildTagsTool{repoDir: dir}
+	result, err := tool.Execute(context.Background(), []byte(`{"file":"../../etc/passwd"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := result[0].OfText.Text
+	if !strings.Contains(text, "escapes") {
+		t.Errorf("expected path escape error, got: %s", text)
+	}
+}
+
+func TestCheckBuildTagsTool_LegacyBuildTag(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "old.go"), []byte("// +build darwin\n\npackage main\n"), 0644)
+
+	tool := &checkBuildTagsTool{repoDir: dir}
+	result, err := tool.Execute(context.Background(), []byte(`{"file":"old.go"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := result[0].OfText.Text
+	if !strings.Contains(text, "+build darwin") {
+		t.Errorf("expected legacy build tag, got: %s", text)
+	}
+}
+
+func TestListEntryPointsTool(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a Go file with main and init
+	os.MkdirAll(filepath.Join(dir, "cmd", "app"), 0755)
+	os.WriteFile(filepath.Join(dir, "cmd", "app", "main.go"), []byte(`package main
+
+func init() {}
+func main() {}
+`), 0644)
+
+	// Create a non-main package with init
+	os.MkdirAll(filepath.Join(dir, "pkg", "lib"), 0755)
+	os.WriteFile(filepath.Join(dir, "pkg", "lib", "lib.go"), []byte(`package lib
+
+func init() {}
+func Helper() {}
+`), 0644)
+
+	// Create go.mod so go list works
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/test\n\ngo 1.21\n"), 0644)
+
+	tool := &listEntryPointsTool{repoDir: dir}
+	result, err := tool.Execute(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	text := result[0].OfText.Text
+	if !strings.Contains(text, "init()") {
+		t.Errorf("expected init() entry point, got: %s", text)
+	}
+}
+
+func TestCheckModuleTool(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte(`module example.com/test
+
+go 1.21
+
+require golang.org/x/net v0.20.0
+`), 0644)
+
+	tool := &checkModuleTool{repoDir: dir}
+	result, err := tool.Execute(context.Background(), []byte(`{"package":"golang.org/x/net/html","symbols":["Parse"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	text := result[0].OfText.Text
+	if !strings.Contains(text, "Module Resolution") {
+		t.Errorf("expected Module Resolution header, got: %s", text)
+	}
+}
+
+func TestCheckModuleTool_InvalidJSON(t *testing.T) {
+	dir := t.TempDir()
+	tool := &checkModuleTool{repoDir: dir}
+	result, err := tool.Execute(context.Background(), []byte(`not json`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	text := result[0].OfText.Text
+	if !strings.Contains(text, "error") {
+		t.Errorf("expected error message, got: %s", text)
+	}
+}
+
+func TestCheckGoVersionTool(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/test\n\ngo 1.21\n"), 0644)
+
+	r := &Result{
+		AffectedImports: map[string]AffectedImportsDetails{
+			"net/http": {
+				Type:         "stdlib",
+				FixedVersion: []string{"v1.21.9", "v1.22.2"},
+			},
+		},
+	}
+
+	tool := &checkGoVersionTool{repoDir: dir, result: r}
+	result, err := tool.Execute(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	text := result[0].OfText.Text
+	if !strings.Contains(text, "Go version") {
+		t.Errorf("expected Go version info, got: %s", text)
+	}
+	if !strings.Contains(text, "net/http") {
+		t.Errorf("expected net/http in output, got: %s", text)
+	}
+}
+
+func TestCheckGoVersionTool_NoStdlib(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/test\n\ngo 1.21\n"), 0644)
+
+	r := &Result{
+		AffectedImports: map[string]AffectedImportsDetails{
+			"golang.org/x/net/html": {
+				Type: "module",
+			},
+		},
+	}
+
+	tool := &checkGoVersionTool{repoDir: dir, result: r}
+	result, err := tool.Execute(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	text := result[0].OfText.Text
+	if !strings.Contains(text, "No stdlib") {
+		t.Errorf("expected no stdlib message, got: %s", text)
+	}
+}
+
+func TestCheckTransitiveDepsTool(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte(`module example.com/test
+
+go 1.21
+
+require golang.org/x/net v0.20.0
+`), 0644)
+
+	tool := &checkTransitiveDepsTool{repoDir: dir}
+	result, err := tool.Execute(context.Background(), []byte(`{"package":"golang.org/x/net/html"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	text := result[0].OfText.Text
+	if !strings.Contains(text, "Dependency Status") {
+		t.Errorf("expected Dependency Status header, got: %s", text)
+	}
+}
+
+func TestCheckTransitiveDepsTool_InvalidJSON(t *testing.T) {
+	dir := t.TempDir()
+	tool := &checkTransitiveDepsTool{repoDir: dir}
+	result, err := tool.Execute(context.Background(), []byte(`not json`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	text := result[0].OfText.Text
+	if !strings.Contains(text, "error") {
+		t.Errorf("expected error, got: %s", text)
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) > 0 && len(substr) > 0 && findSubstring(s, substr)
 }

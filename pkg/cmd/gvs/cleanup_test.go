@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestFormatBytes(t *testing.T) {
@@ -57,5 +58,36 @@ func TestGetDirSize_Empty(t *testing.T) {
 	}
 	if size != 0 {
 		t.Errorf("getDirSize() = %d, want 0", size)
+	}
+}
+
+func TestCleanupOldDirectories(t *testing.T) {
+	tempDir := os.TempDir()
+
+	// Create a cg- dir with old timestamp
+	oldDir, err := os.MkdirTemp(tempDir, "cg-testcleanup-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Set mod time to 2 hours ago
+	twoHoursAgo := time.Now().Add(-2 * time.Hour)
+	os.Chtimes(oldDir, twoHoursAgo, twoHoursAgo)
+
+	// Create a cg- dir with recent timestamp (should NOT be deleted)
+	newDir, err := os.MkdirTemp(tempDir, "cg-testcleanup-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(newDir)
+
+	cleanupOldDirectories()
+
+	if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
+		os.RemoveAll(oldDir) // cleanup on failure
+		t.Error("expected old cg- directory to be removed")
+	}
+
+	if _, err := os.Stat(newDir); os.IsNotExist(err) {
+		t.Error("expected recent cg- directory to be kept")
 	}
 }

@@ -1594,3 +1594,131 @@ func TestInitResult_NoAffectedImports(t *testing.T) {
 		t.Errorf("IsVulnerable = %q, want %q", r.IsVulnerable, "unknown")
 	}
 }
+
+// --- DetectUnsafeReflectUsage tests ---
+
+func TestDetectUnsafeReflectUsage_UnsafeOnly(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.go"), []byte(`package main
+import "unsafe"
+var _ = unsafe.Sizeof(0)
+func main() {}
+`), 0644)
+
+	r := &Result{Directory: dir}
+	DetectUnsafeReflectUsage(r, nil)
+
+	if !r.Unsafe {
+		t.Error("expected Unsafe=true")
+	}
+	if r.Reflect {
+		t.Error("expected Reflect=false")
+	}
+}
+
+func TestDetectUnsafeReflectUsage_ReflectOnly(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.go"), []byte(`package main
+import "reflect"
+var _ = reflect.TypeOf(0)
+func main() {}
+`), 0644)
+
+	r := &Result{Directory: dir}
+	DetectUnsafeReflectUsage(r, nil)
+
+	if r.Unsafe {
+		t.Error("expected Unsafe=false")
+	}
+	if !r.Reflect {
+		t.Error("expected Reflect=true")
+	}
+}
+
+func TestDetectUnsafeReflectUsage_Both(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.go"), []byte(`package main
+import "unsafe"
+var _ = unsafe.Sizeof(0)
+`), 0644)
+	os.WriteFile(filepath.Join(dir, "b.go"), []byte(`package main
+import "reflect"
+var _ = reflect.TypeOf(0)
+`), 0644)
+
+	r := &Result{Directory: dir}
+	DetectUnsafeReflectUsage(r, nil)
+
+	if !r.Unsafe {
+		t.Error("expected Unsafe=true")
+	}
+	if !r.Reflect {
+		t.Error("expected Reflect=true")
+	}
+}
+
+func TestDetectUnsafeReflectUsage_Neither(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.go"), []byte(`package main
+import "fmt"
+func main() { fmt.Println("hello") }
+`), 0644)
+
+	r := &Result{Directory: dir}
+	DetectUnsafeReflectUsage(r, nil)
+
+	if r.Unsafe {
+		t.Error("expected Unsafe=false")
+	}
+	if r.Reflect {
+		t.Error("expected Reflect=false")
+	}
+}
+
+func TestDetectUnsafeReflectUsage_SkipsVendorAndTests(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "vendor", "pkg"), 0755)
+	os.WriteFile(filepath.Join(dir, "vendor", "pkg", "v.go"), []byte(`package pkg
+import "unsafe"
+var _ = unsafe.Sizeof(0)
+`), 0644)
+	os.WriteFile(filepath.Join(dir, "main_test.go"), []byte(`package main
+import "reflect"
+var _ = reflect.TypeOf(0)
+`), 0644)
+	os.WriteFile(filepath.Join(dir, "main.go"), []byte(`package main
+func main() {}
+`), 0644)
+
+	r := &Result{Directory: dir}
+	DetectUnsafeReflectUsage(r, nil)
+
+	if r.Unsafe {
+		t.Error("expected Unsafe=false (vendor should be skipped)")
+	}
+	if r.Reflect {
+		t.Error("expected Reflect=false (test files should be skipped)")
+	}
+}
+
+func TestDetectUnsafeReflectUsage_WithProgress(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.go"), []byte(`package main
+import "unsafe"
+var _ = unsafe.Sizeof(0)
+func main() {}
+`), 0644)
+
+	var messages []string
+	r := &Result{Directory: dir}
+	DetectUnsafeReflectUsage(r, func(msg string) {
+		messages = append(messages, msg)
+	})
+
+	if !r.Unsafe {
+		t.Error("expected Unsafe=true")
+	}
+	if len(messages) == 0 {
+		t.Error("expected progress messages")
+	}
+}
