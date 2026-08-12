@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"golang.org/x/tools/go/callgraph"
@@ -2004,5 +2005,53 @@ func TestDetectReflectionVulnerabilities_BadFile(t *testing.T) {
 	risks := r.detectReflectionVulnerabilities("fmt", dir, []string{"Println"}, []string{"nonexistent.go"})
 	if len(risks) != 0 {
 		t.Errorf("expected no risks for missing file, got %d", len(risks))
+	}
+}
+
+func TestWorker(t *testing.T) {
+	dir := filepath.Join("testdata", "simple")
+	t.Setenv("ALGO", "rta")
+
+	absDir, _ := filepath.Abs(dir)
+
+	runner := newFakeRunner()
+	runner.combined[absDir+"|go|list|-f|{{if .Module}}{{.Module.Version}}{{end}}|fmt"] = []byte("v1.21.0\n")
+	runner.combined[absDir+"|go|list|-m|-f|{{.Path}}|fmt"] = []byte("fmt\n")
+	runner.stdout[absDir+"|go|mod|edit|-json"] = []byte(`{"Module":{"Path":"example.com/simple"},"Go":"1.21","Require":[],"Replace":[]}`)
+
+	result := &Result{
+		Directory: absDir,
+		GoCVE:     "GO-2024-0001",
+		AffectedImports: map[string]AffectedImportsDetails{
+			"fmt": {
+				Symbols:      []string{"Println"},
+				Type:         "stdlib",
+				FixedVersion: []string{"v1.21.9"},
+			},
+		},
+		Runner: runner,
+	}
+
+	jobs := make(chan Job, 1)
+	results := make(chan *Result, 1)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go Worker(jobs, results, &wg, result)
+
+	jobs <- Job{
+		Package: "fmt",
+		Symbols: []string{"Println"},
+		Dir:     ".",
+		Files:   []string{"main.go"},
+	}
+	close(jobs)
+
+	wg.Wait()
+	close(results)
+
+	res := <-results
+	if res == nil {
+		t.Fatal("expected non-nil result from worker")
 	}
 }
