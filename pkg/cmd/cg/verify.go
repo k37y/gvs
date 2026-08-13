@@ -55,14 +55,14 @@ func VerifyAndSummarizeWithClaude(result *Result, repoDir string) {
 		return
 	}
 
-	skillPrompt, found := loadSkillPrompt()
+	skillPrompt, found := loadSkillPrompt(result)
 	if !found {
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "[claude] Collecting source code from repository...\n")
+	result.progress("[claude] Collecting source code from repository...")
 	sourceSnippets := collectRelevantSource(result, repoDir)
-	fmt.Fprintf(os.Stderr, "[claude] Collected %d source files\n", len(sourceSnippets))
+	result.progress(fmt.Sprintf("[claude] Collected %d source files", len(sourceSnippets)))
 
 	prompt, err := buildVerificationPrompt(result, skillPrompt, sourceSnippets)
 	if err != nil {
@@ -70,32 +70,33 @@ func VerifyAndSummarizeWithClaude(result *Result, repoDir string) {
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "[claude] REQUEST >>>\n%s\n[claude] <<< REQUEST\n", prompt)
-	fmt.Fprintf(os.Stderr, "[claude] Calling Vertex AI agentic loop (project=%s, location=%s, model=%s, max_iterations=%d)...\n",
-		cfg.ProjectID, cfg.Location, cfg.Model, cfg.MaxIterations)
+	result.progress(fmt.Sprintf("[claude] REQUEST >>>\n%s\n[claude] <<< REQUEST", prompt))
+	result.progress(fmt.Sprintf("[claude] Calling Vertex AI agentic loop (project=%s, location=%s, model=%s, max_iterations=%d)...",
+		cfg.ProjectID, cfg.Location, cfg.Model, cfg.MaxIterations))
 
 	ctx := context.Background()
 	client := anthropic.NewClient(
 		vertex.WithGoogleAuth(ctx, cfg.Location, cfg.ProjectID),
 	)
 
+	pf := result.ProgressFunc
 	tools := []anthropic.BetaTool{
-		&grepCodeTool{repoDir: repoDir},
-		&readFileTool{repoDir: repoDir},
-		&listFilesTool{repoDir: repoDir},
-		&checkModuleTool{repoDir: repoDir},
-		&checkGoVersionTool{repoDir: repoDir, result: result},
-		&isTestOnlyTool{repoDir: repoDir},
-		&checkBuildTagsTool{repoDir: repoDir},
-		&listEntryPointsTool{repoDir: repoDir},
-		&checkTransitiveDepsTool{repoDir: repoDir},
+		&grepCodeTool{repoDir: repoDir, progressFunc: pf},
+		&readFileTool{repoDir: repoDir, progressFunc: pf},
+		&listFilesTool{repoDir: repoDir, progressFunc: pf},
+		&checkModuleTool{repoDir: repoDir, progressFunc: pf},
+		&checkGoVersionTool{repoDir: repoDir, result: result, progressFunc: pf},
+		&isTestOnlyTool{repoDir: repoDir, progressFunc: pf},
+		&checkBuildTagsTool{repoDir: repoDir, progressFunc: pf},
+		&listEntryPointsTool{repoDir: repoDir, progressFunc: pf},
+		&checkTransitiveDepsTool{repoDir: repoDir, progressFunc: pf},
 	}
 	if result.SsaProg != nil {
-		tools = append(tools, &findImplementationsTool{prog: result.SsaProg})
+		tools = append(tools, &findImplementationsTool{prog: result.SsaProg, progressFunc: pf})
 	}
 	if result.CgGraph != nil {
 		modPath := readModulePath(repoDir)
-		tools = append(tools, &findCallersTool{graph: result.CgGraph, repoModulePath: modPath})
+		tools = append(tools, &findCallersTool{graph: result.CgGraph, repoModulePath: modPath, progressFunc: pf})
 	}
 
 	runner := client.Beta.Messages.NewToolRunner(tools, anthropic.BetaToolRunnerParams{
@@ -115,24 +116,24 @@ func VerifyAndSummarizeWithClaude(result *Result, repoDir string) {
 	for message, err := range runner.All(ctx) {
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("Claude API call failed: %v", err))
-			fmt.Fprintf(os.Stderr, "[claude] API call failed: %v\n", err)
+			result.progress(fmt.Sprintf("[claude] API call failed: %v", err))
 			return
 		}
 		iteration++
 		for _, block := range message.Content {
 			switch block.Type {
 			case "tool_use":
-				fmt.Fprintf(os.Stderr, "[claude] Iteration %d: tool_call %s(%s)\n", iteration, block.Name, string(block.Input))
+				result.progress(fmt.Sprintf("[claude] Iteration %d: tool_call %s(%s)", iteration, block.Name, string(block.Input)))
 			case "text":
 				if block.Text != "" {
-					fmt.Fprintf(os.Stderr, "[claude] Iteration %d: text response (%d chars)\n", iteration, len(block.Text))
+					result.progress(fmt.Sprintf("[claude] Iteration %d: text response (%d chars)", iteration, len(block.Text)))
 				}
 			}
 		}
 	}
 
 	elapsed := time.Since(start)
-	fmt.Fprintf(os.Stderr, "[claude] Agentic loop completed in %d iterations (%.1fs)\n", iteration, elapsed.Seconds())
+	result.progress(fmt.Sprintf("[claude] Agentic loop completed in %d iterations (%.1fs)", iteration, elapsed.Seconds()))
 
 	lastMsg := runner.LastMessage()
 	if lastMsg == nil {
@@ -143,7 +144,7 @@ func VerifyAndSummarizeWithClaude(result *Result, repoDir string) {
 	// If the loop ended while Claude still wanted to use tools (hit MaxIterations),
 	// make one final call forcing it to produce the JSON answer.
 	if lastMsg.StopReason == anthropic.BetaStopReasonToolUse {
-		fmt.Fprintf(os.Stderr, "[claude] Loop ended mid-tool-use (iteration limit). Requesting final answer...\n")
+		result.progress("[claude] Loop ended mid-tool-use (iteration limit). Requesting final answer...")
 		finalMessages := append(runner.Params.Messages,
 			anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(
 				"You have reached the investigation limit. Stop using tools. Based on everything you have found so far, respond with your final JSON assessment now.",
@@ -155,16 +156,16 @@ func VerifyAndSummarizeWithClaude(result *Result, repoDir string) {
 			Messages:  finalMessages,
 		})
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[claude] Final answer call failed: %v\n", err)
+			result.progress(fmt.Sprintf("[claude] Final answer call failed: %v", err))
 			result.Errors = append(result.Errors, fmt.Sprintf("Claude final answer call failed: %v", err))
 			return
 		}
 		lastMsg = finalMsg
-		fmt.Fprintf(os.Stderr, "[claude] Final answer received (stop_reason=%s)\n", lastMsg.StopReason)
+		result.progress(fmt.Sprintf("[claude] Final answer received (stop_reason=%s)", lastMsg.StopReason))
 	}
 
 	if lastMsg.StopReason == anthropic.BetaStopReasonMaxTokens {
-		fmt.Fprintf(os.Stderr, "[claude] WARNING: response truncated (max_tokens reached)\n")
+		result.progress("[claude] WARNING: response truncated (max_tokens reached)")
 	}
 
 	var responseText string
@@ -174,13 +175,13 @@ func VerifyAndSummarizeWithClaude(result *Result, repoDir string) {
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "[claude] RESPONSE (stop_reason=%s) >>>\n%s\n[claude] <<< RESPONSE\n", lastMsg.StopReason, responseText)
+	result.progress(fmt.Sprintf("[claude] RESPONSE (stop_reason=%s) >>>\n%s\n[claude] <<< RESPONSE", lastMsg.StopReason, responseText))
 
 	var resp claudeResponse
 	cleaned := cleanJSONResponse(responseText)
 	if err := json.Unmarshal([]byte(cleaned), &resp); err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("Failed to parse Claude response: %v", err))
-		fmt.Fprintf(os.Stderr, "[claude] Failed to parse response JSON: %v\n", err)
+		result.progress(fmt.Sprintf("[claude] Failed to parse response JSON: %v", err))
 		return
 	}
 
@@ -193,11 +194,11 @@ func VerifyAndSummarizeWithClaude(result *Result, repoDir string) {
 	}
 
 	if isVuln == result.IsVulnerable {
-		fmt.Fprintf(os.Stderr, "[claude] Result: agrees with scanner (confidence: %s, IsVulnerable=%s)\n",
-			resp.Confidence, isVuln)
+		result.progress(fmt.Sprintf("[claude] Result: agrees with scanner (confidence: %s, IsVulnerable=%s)",
+			resp.Confidence, isVuln))
 	} else {
-		fmt.Fprintf(os.Stderr, "[claude] Result: disagrees with scanner (confidence: %s, scanner=%s, claude=%s)\n",
-			resp.Confidence, result.IsVulnerable, isVuln)
+		result.progress(fmt.Sprintf("[claude] Result: disagrees with scanner (confidence: %s, scanner=%s, claude=%s)",
+			resp.Confidence, result.IsVulnerable, isVuln))
 	}
 }
 
@@ -351,8 +352,17 @@ func textResult(text string) ([]anthropic.BetaToolResultBlockParamContentUnion, 
 	}, nil
 }
 
+func toolProgress(pf func(string), msg string) {
+	if pf != nil {
+		pf(msg)
+	}
+}
+
 // grep_code tool
-type grepCodeTool struct{ repoDir string }
+type grepCodeTool struct {
+	repoDir      string
+	progressFunc func(string)
+}
 
 func (t *grepCodeTool) Name() string        { return "grep_code" }
 func (t *grepCodeTool) Description() string  { return "Search for a regex pattern in the repository. Returns matching lines with file paths and line numbers." }
@@ -390,12 +400,15 @@ func (t *grepCodeTool) Execute(ctx context.Context, input json.RawMessage) ([]an
 	if len(lines) > 100 {
 		result = strings.Join(lines[:100], "\n") + "\n... (truncated)"
 	}
-	fmt.Fprintf(os.Stderr, "[claude] grep_code result: %d lines\n", len(lines))
+	toolProgress(t.progressFunc, fmt.Sprintf("[claude] grep_code result: %d lines", len(lines)))
 	return textResult(result)
 }
 
 // read_file tool
-type readFileTool struct{ repoDir string }
+type readFileTool struct {
+	repoDir      string
+	progressFunc func(string)
+}
 
 func (t *readFileTool) Name() string        { return "read_file" }
 func (t *readFileTool) Description() string  { return "Read a file from the repository. Optionally specify start and end line numbers." }
@@ -445,12 +458,15 @@ func (t *readFileTool) Execute(ctx context.Context, input json.RawMessage) ([]an
 	for i := start; i < end && i < len(lines); i++ {
 		b.WriteString(fmt.Sprintf("%d|%s\n", i+1, lines[i]))
 	}
-	fmt.Fprintf(os.Stderr, "[claude] read_file result: %s (%d lines)\n", params.Path, end-start)
+	toolProgress(t.progressFunc, fmt.Sprintf("[claude] read_file result: %s (%d lines)", params.Path, end-start))
 	return textResult(b.String())
 }
 
 // list_files tool
-type listFilesTool struct{ repoDir string }
+type listFilesTool struct {
+	repoDir      string
+	progressFunc func(string)
+}
 
 func (t *listFilesTool) Name() string        { return "list_files" }
 func (t *listFilesTool) Description() string  { return "List files in a directory of the repository. Skips vendor/ and .git/." }
@@ -507,13 +523,14 @@ func (t *listFilesTool) Execute(ctx context.Context, input json.RawMessage) ([]a
 	if result == "" {
 		result = "No files found."
 	}
-	fmt.Fprintf(os.Stderr, "[claude] list_files result: %d files\n", len(files))
+	toolProgress(t.progressFunc, fmt.Sprintf("[claude] list_files result: %d files", len(files)))
 	return textResult(result)
 }
 
 // find_implementations tool
 type findImplementationsTool struct {
-	prog *ssa.Program
+	prog         *ssa.Program
+	progressFunc func(string)
 }
 
 func (t *findImplementationsTool) Name() string { return "find_implementations" }
@@ -623,7 +640,7 @@ func (t *findImplementationsTool) Execute(ctx context.Context, input json.RawMes
 		b.WriteString("  (no concrete types found implementing this interface)\n")
 	}
 
-	fmt.Fprintf(os.Stderr, "[claude] find_implementations result: %d types for %s\n", found, params.InterfaceType)
+	toolProgress(t.progressFunc, fmt.Sprintf("[claude] find_implementations result: %d types for %s", found, params.InterfaceType))
 	return textResult(b.String())
 }
 
@@ -641,6 +658,7 @@ func splitTypeName(fullName string) (pkgPath, typeName string) {
 type findCallersTool struct {
 	graph          *callgraph.Graph
 	repoModulePath string
+	progressFunc   func(string)
 }
 
 func (t *findCallersTool) Name() string { return "find_callers" }
@@ -778,12 +796,15 @@ func (t *findCallersTool) Execute(ctx context.Context, input json.RawMessage) ([
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "[claude] find_callers result: %d callers for %s\n", totalCallers, params.Symbol)
+	toolProgress(t.progressFunc, fmt.Sprintf("[claude] find_callers result: %d callers for %s", totalCallers, params.Symbol))
 	return textResult(b.String())
 }
 
 // check_module tool
-type checkModuleTool struct{ repoDir string }
+type checkModuleTool struct {
+	repoDir      string
+	progressFunc func(string)
+}
 
 func (t *checkModuleTool) Name() string { return "check_module" }
 func (t *checkModuleTool) Description() string {
@@ -960,14 +981,15 @@ func (t *checkModuleTool) Execute(ctx context.Context, input json.RawMessage) ([
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "[claude] check_module result: pkg=%s symbols=%v imports=%d\n", params.Package, params.Symbols, len(importingFiles))
+	toolProgress(t.progressFunc, fmt.Sprintf("[claude] check_module result: pkg=%s symbols=%v imports=%d", params.Package, params.Symbols, len(importingFiles)))
 	return textResult(b.String())
 }
 
 // check_go_version tool
 type checkGoVersionTool struct {
-	repoDir string
-	result  *Result
+	repoDir      string
+	result       *Result
+	progressFunc func(string)
 }
 
 func (t *checkGoVersionTool) Name() string { return "check_go_version" }
@@ -1020,12 +1042,15 @@ func (t *checkGoVersionTool) Execute(ctx context.Context, input json.RawMessage)
 		b.WriteString("No stdlib packages in AffectedImports.\n")
 	}
 
-	fmt.Fprintf(os.Stderr, "[claude] check_go_version result: Go %s, %d stdlib packages checked\n", goMod.Go, stdlibCount)
+	toolProgress(t.progressFunc, fmt.Sprintf("[claude] check_go_version result: Go %s, %d stdlib packages checked", goMod.Go, stdlibCount))
 	return textResult(b.String())
 }
 
 // is_test_only tool
-type isTestOnlyTool struct{ repoDir string }
+type isTestOnlyTool struct {
+	repoDir      string
+	progressFunc func(string)
+}
 
 func (t *isTestOnlyTool) Name() string { return "is_test_only" }
 func (t *isTestOnlyTool) Description() string {
@@ -1059,7 +1084,7 @@ func (t *isTestOnlyTool) Execute(ctx context.Context, input json.RawMessage) ([]
 
 	if strings.HasSuffix(baseName, "_test.go") {
 		b.WriteString("Test-only: YES (filename ends with _test.go)\n")
-		fmt.Fprintf(os.Stderr, "[claude] is_test_only result: %s -> yes (test file)\n", params.File)
+		toolProgress(t.progressFunc, fmt.Sprintf("[claude] is_test_only result: %s -> yes (test file)", params.File))
 		return textResult(b.String())
 	}
 
@@ -1067,7 +1092,7 @@ func (t *isTestOnlyTool) Execute(ctx context.Context, input json.RawMessage) ([]
 	f, err := parser.ParseFile(fset, fullPath, nil, parser.PackageClauseOnly)
 	if err != nil {
 		b.WriteString(fmt.Sprintf("Test-only: UNKNOWN (parse error: %v)\n", err))
-		fmt.Fprintf(os.Stderr, "[claude] is_test_only result: %s -> unknown\n", params.File)
+		toolProgress(t.progressFunc, fmt.Sprintf("[claude] is_test_only result: %s -> unknown", params.File))
 		return textResult(b.String())
 	}
 
@@ -1076,7 +1101,7 @@ func (t *isTestOnlyTool) Execute(ctx context.Context, input json.RawMessage) ([]
 
 	if strings.HasSuffix(pkgName, "_test") {
 		b.WriteString("Test-only: YES (external test package)\n")
-		fmt.Fprintf(os.Stderr, "[claude] is_test_only result: %s -> yes (test package)\n", params.File)
+		toolProgress(t.progressFunc, fmt.Sprintf("[claude] is_test_only result: %s -> yes (test package)", params.File))
 		return textResult(b.String())
 	}
 
@@ -1096,12 +1121,15 @@ func (t *isTestOnlyTool) Execute(ctx context.Context, input json.RawMessage) ([]
 		b.WriteString("Test-only: NO (production code)\n")
 	}
 
-	fmt.Fprintf(os.Stderr, "[claude] is_test_only result: %s -> %v\n", params.File, !hasNonTest)
+	toolProgress(t.progressFunc, fmt.Sprintf("[claude] is_test_only result: %s -> %v", params.File, !hasNonTest))
 	return textResult(b.String())
 }
 
 // check_build_tags tool
-type checkBuildTagsTool struct{ repoDir string }
+type checkBuildTagsTool struct {
+	repoDir      string
+	progressFunc func(string)
+}
 
 func (t *checkBuildTagsTool) Name() string { return "check_build_tags" }
 func (t *checkBuildTagsTool) Description() string {
@@ -1160,12 +1188,15 @@ func (t *checkBuildTagsTool) Execute(ctx context.Context, input json.RawMessage)
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "[claude] check_build_tags result: %s -> %d constraints\n", params.File, len(constraints))
+	toolProgress(t.progressFunc, fmt.Sprintf("[claude] check_build_tags result: %s -> %d constraints", params.File, len(constraints)))
 	return textResult(b.String())
 }
 
 // list_entry_points tool
-type listEntryPointsTool struct{ repoDir string }
+type listEntryPointsTool struct {
+	repoDir      string
+	progressFunc func(string)
+}
 
 func (t *listEntryPointsTool) Name() string { return "list_entry_points" }
 func (t *listEntryPointsTool) Description() string {
@@ -1273,12 +1304,15 @@ func (t *listEntryPointsTool) Execute(ctx context.Context, input json.RawMessage
 		b.WriteString("  (none)\n")
 	}
 
-	fmt.Fprintf(os.Stderr, "[claude] list_entry_points result: %d main dirs, %d total entries\n", len(mainDirs), totalEntries)
+	toolProgress(t.progressFunc, fmt.Sprintf("[claude] list_entry_points result: %d main dirs, %d total entries", len(mainDirs), totalEntries))
 	return textResult(b.String())
 }
 
 // check_transitive_deps tool
-type checkTransitiveDepsTool struct{ repoDir string }
+type checkTransitiveDepsTool struct {
+	repoDir      string
+	progressFunc func(string)
+}
 
 func (t *checkTransitiveDepsTool) Name() string { return "check_transitive_deps" }
 func (t *checkTransitiveDepsTool) Description() string {
@@ -1379,7 +1413,7 @@ func (t *checkTransitiveDepsTool) Execute(ctx context.Context, input json.RawMes
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "[claude] check_transitive_deps result: %s\n", params.Package)
+	toolProgress(t.progressFunc, fmt.Sprintf("[claude] check_transitive_deps result: %s", params.Package))
 	return textResult(b.String())
 }
 
@@ -1400,19 +1434,20 @@ func isEntryPointLike(node *callgraph.Node, repoModulePath string) bool {
 	return false
 }
 
-func LogClaudeStatus() {
+func LogClaudeStatus(progressFunc func(string)) {
 	cfg, found := loadClaudeConfig()
 	if !found {
-		fmt.Fprintf(os.Stderr, "Claude verification: disabled (missing ~/.claude.conf or CLAUDE_CODE_USE_VERTEX!=1)\n")
+		toolProgress(progressFunc, "Claude verification: disabled (missing ~/.claude.conf or CLAUDE_CODE_USE_VERTEX!=1)")
 		return
 	}
-	fmt.Fprintf(os.Stderr, "Claude verification: enabled (project=%s, region=%s, model=%s, max_iterations=%d)\n",
-		cfg.ProjectID, cfg.Location, cfg.Model, cfg.MaxIterations)
+	toolProgress(progressFunc, fmt.Sprintf("Claude verification: enabled (project=%s, region=%s, model=%s, max_iterations=%d)",
+		cfg.ProjectID, cfg.Location, cfg.Model, cfg.MaxIterations))
 
-	if _, ok := loadSkillPrompt(); ok {
-		fmt.Fprintf(os.Stderr, "Claude skill file: loaded\n")
+	r := &Result{ScanConfig: ScanConfig{ProgressFunc: progressFunc}}
+	if _, ok := loadSkillPrompt(r); ok {
+		toolProgress(progressFunc, "Claude skill file: loaded")
 	} else {
-		fmt.Fprintf(os.Stderr, "Claude skill file: not found\n")
+		toolProgress(progressFunc, "Claude skill file: not found")
 	}
 }
 
@@ -1468,12 +1503,12 @@ func loadClaudeConfig() (claudeConfig, bool) {
 	return cfg, true
 }
 
-func loadSkillPrompt() (string, bool) {
+func loadSkillPrompt(result *Result) (string, bool) {
 	// 1. Environment variable override
 	if dir := os.Getenv("GVS_SKILLS_DIR"); dir != "" {
 		path := filepath.Join(dir, "verify-scan.md")
 		if data, err := os.ReadFile(path); err == nil {
-			fmt.Fprintf(os.Stderr, "[claude] Loading skill: %s\n", path)
+			result.progress(fmt.Sprintf("[claude] Loading skill: %s", path))
 			return string(data), true
 		}
 	}
@@ -1483,13 +1518,13 @@ func loadSkillPrompt() (string, bool) {
 		binDir := filepath.Dir(exe)
 		path := filepath.Join(binDir, "..", "skills", "verify-scan.md")
 		if data, err := os.ReadFile(path); err == nil {
-			fmt.Fprintf(os.Stderr, "[claude] Loading skill: %s\n", path)
+			result.progress(fmt.Sprintf("[claude] Loading skill: %s", path))
 			return string(data), true
 		}
 		// Also check same directory as binary (container layout)
 		path = filepath.Join(binDir, "skills", "verify-scan.md")
 		if data, err := os.ReadFile(path); err == nil {
-			fmt.Fprintf(os.Stderr, "[claude] Loading skill: %s\n", path)
+			result.progress(fmt.Sprintf("[claude] Loading skill: %s", path))
 			return string(data), true
 		}
 	}
@@ -1498,7 +1533,7 @@ func loadSkillPrompt() (string, bool) {
 	if homeDir, err := os.UserHomeDir(); err == nil {
 		path := filepath.Join(homeDir, ".local", "share", "gvs", "skills", "verify-scan.md")
 		if data, err := os.ReadFile(path); err == nil {
-			fmt.Fprintf(os.Stderr, "[claude] Loading skill: %s\n", path)
+			result.progress(fmt.Sprintf("[claude] Loading skill: %s", path))
 			return string(data), true
 		}
 	}
@@ -1506,7 +1541,7 @@ func loadSkillPrompt() (string, bool) {
 	// 4. Current working directory (development)
 	path := filepath.Join("skills", "verify-scan.md")
 	if data, err := os.ReadFile(path); err == nil {
-		fmt.Fprintf(os.Stderr, "[claude] Loading skill: %s\n", path)
+		result.progress(fmt.Sprintf("[claude] Loading skill: %s", path))
 		return string(data), true
 	}
 

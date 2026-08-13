@@ -32,8 +32,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	cg.LogClaudeStatus()
-
 	// Define flags
 	var algo = flag.String("algo", "rta", "call graph algorithm: rta (default), cha, vta, static")
 	var progress = flag.Bool("progress", false, "show progress of completed and pending jobs")
@@ -137,6 +135,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "%s\n", msg)
 		}
 	}
+
+	cg.LogClaudeStatus(result.ProgressFunc)
 
 	// Setup: library mode or CVE mode
 	var done bool

@@ -64,7 +64,7 @@ func main() {
 	log.Printf("Using cache directory: %s", cacheDir)
 	log.Printf("Graph cache: %s", graphCacheDir)
 
-	cg.LogClaudeStatus()
+	cg.LogClaudeStatus(nil)
 
 	http.Handle("/graph/", gvs.LogFileAccess(http.StripPrefix("/graph/", http.FileServer(http.Dir(graphCacheDir)))))
 	http.Handle("/", http.FileServer(http.Dir("./site")))
