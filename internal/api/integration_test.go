@@ -1,3 +1,5 @@
+//go:build integration
+
 package api
 
 import (
@@ -13,331 +15,247 @@ import (
 	"time"
 )
 
+const (
+	testServerPort = "8087"
+	testServerURL  = "http://localhost:" + testServerPort
+	testDataRepo   = "https://github.com/k37y/gvs-testdata"
+)
+
+func startTestServer(t *testing.T) {
+	t.Helper()
+
+	t.Log("Clearing cache directory...")
+	if err := os.RemoveAll("/tmp/gvs-cache"); err != nil && !os.IsNotExist(err) {
+		t.Logf("Warning: Failed to clear cache: %v", err)
+	}
+
+	t.Log("Building binaries with make...")
+	buildCmd := exec.Command("make", "gvs", "cg")
+	buildCmd.Dir = "../../"
+	buildCmd.Stdout = os.Stdout
+	buildCmd.Stderr = os.Stderr
+	if err := buildCmd.Run(); err != nil {
+		t.Fatalf("Failed to build binaries: %v", err)
+	}
+
+	t.Log("Starting gvs server on port " + testServerPort + "...")
+	serverCmd := exec.Command("./bin/gvs")
+	serverCmd.Dir = "../../"
+	serverCmd.Env = append(os.Environ(), "GVS_PORT="+testServerPort)
+	serverCmd.Stdout = os.Stdout
+	serverCmd.Stderr = os.Stderr
+
+	if err := serverCmd.Start(); err != nil {
+		t.Fatalf("Failed to start gvs server: %v", err)
+	}
+
+	t.Cleanup(func() {
+		t.Log("Killing gvs server...")
+		if err := exec.Command("pkill", "-f", "./bin/gvs").Run(); err != nil {
+			t.Logf("Warning: pkill failed: %v", err)
+		}
+		if serverCmd.Process != nil {
+			serverCmd.Process.Signal(syscall.SIGTERM)
+		}
+	})
+
+	t.Log("Waiting for server to be ready...")
+	if err := waitForServer(testServerURL+"/healthz", 30*time.Second); err != nil {
+		t.Fatalf("Server did not start in time: %v", err)
+	}
+}
+
+func runCallgraphTest(t *testing.T, repo, branchOrCommit, cve, algo, expectedResult string) {
+	t.Helper()
+
+	requestBody := map[string]interface{}{
+		"repo":           repo,
+		"branchOrCommit": branchOrCommit,
+		"cve":            cve,
+		"algo":           algo,
+	}
+
+	reqJSON, err := json.Marshal(requestBody)
+	if err != nil {
+		t.Fatalf("Failed to marshal request: %v", err)
+	}
+
+	resp, err := http.Post(
+		testServerURL+"/callgraph",
+		"application/json",
+		bytes.NewBuffer(reqJSON),
+	)
+	if err != nil {
+		t.Fatalf("Failed to send callgraph request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Callgraph request failed with status %d: %s", resp.StatusCode, body)
+	}
+
+	var callgraphResp struct {
+		TaskID string `json:"taskId"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&callgraphResp); err != nil {
+		t.Fatalf("Failed to decode callgraph response: %v", err)
+	}
+
+	taskID := callgraphResp.TaskID
+	if taskID == "" {
+		t.Fatal("No taskId returned from callgraph request")
+	}
+	t.Logf("Received taskId: %s", taskID)
+
+	var isVulnerable string
+	maxAttempts := 540
+
+	for i := 0; i < maxAttempts; i++ {
+		statusReq := map[string]string{"taskId": taskID}
+		statusJSON, err := json.Marshal(statusReq)
+		if err != nil {
+			t.Fatalf("Failed to marshal status request: %v", err)
+		}
+
+		statusResp, err := http.Post(
+			testServerURL+"/status",
+			"application/json",
+			bytes.NewBuffer(statusJSON),
+		)
+		if err != nil {
+			t.Fatalf("Failed to send status request: %v", err)
+		}
+
+		var statusResult struct {
+			Status string          `json:"status"`
+			Output json.RawMessage `json:"output"`
+			Error  string          `json:"error"`
+		}
+
+		body, err := io.ReadAll(statusResp.Body)
+		statusResp.Body.Close()
+
+		if err != nil {
+			t.Fatalf("Failed to read status response: %v", err)
+		}
+
+		if err := json.Unmarshal(body, &statusResult); err != nil {
+			t.Fatalf("Failed to decode status response: %v", err)
+		}
+
+		if i%30 == 0 {
+			t.Logf("Attempt %d: Status = %s", i+1, statusResult.Status)
+		}
+
+		if statusResult.Status == "completed" {
+			var output struct {
+				IsVulnerable string `json:"IsVulnerable"`
+			}
+			if err := json.Unmarshal(statusResult.Output, &output); err != nil {
+				t.Fatalf("Failed to parse output: %v", err)
+			}
+
+			isVulnerable = output.IsVulnerable
+			t.Logf("Task completed! IsVulnerable: %s", isVulnerable)
+			break
+		} else if statusResult.Status == "failed" {
+			t.Fatalf("Task failed with error: %s", statusResult.Error)
+		}
+
+		time.Sleep(1 * time.Second)
+	}
+
+	if isVulnerable == "" {
+		t.Fatal("Task did not complete within timeout")
+	}
+
+	if isVulnerable != expectedResult {
+		t.Errorf("Expected IsVulnerable: %s, got: %s", expectedResult, isVulnerable)
+	}
+}
+
 func TestCallgraphIntegration(t *testing.T) {
-	// Step 0: Clear cache
-	t.Log("Clearing cache directory...")
-	if err := os.RemoveAll("/tmp/gvs-cache"); err != nil && !os.IsNotExist(err) {
-		t.Logf("Warning: Failed to clear cache: %v", err)
+	startTestServer(t)
+
+	tests := []struct {
+		name           string
+		repo           string
+		branchOrCommit string
+		cve            string
+		algo           string
+		expected       string
+	}{
+		// CVE-2024-45338: golang.org/x/net/html (single range, 0→0.33.0)
+		{
+			name:           "x/net single range vulnerable",
+			repo:           testDataRepo,
+			branchOrCommit: "vuln-single-range",
+			cve:            "CVE-2024-45338",
+			algo:           "rta",
+			expected:       "true",
+		},
+		{
+			name:           "x/net single range patched",
+			repo:           testDataRepo,
+			branchOrCommit: "patched-single-range",
+			cve:            "CVE-2024-45338",
+			algo:           "rta",
+			expected:       "false",
+		},
+		{
+			name:           "x/net replace directive vulnerable",
+			repo:           testDataRepo,
+			branchOrCommit: "vuln-replace-directive",
+			cve:            "CVE-2024-45338",
+			algo:           "rta",
+			expected:       "true",
+		},
+
+		// CVE-2024-45337: golang.org/x/crypto/ssh (single range, 0→0.31.0)
+		{
+			name:           "x/crypto single range vulnerable",
+			repo:           testDataRepo,
+			branchOrCommit: "vuln-single-range",
+			cve:            "CVE-2024-45337",
+			algo:           "rta",
+			expected:       "true",
+		},
+		{
+			name:           "x/crypto single range patched",
+			repo:           testDataRepo,
+			branchOrCommit: "patched-single-range",
+			cve:            "CVE-2024-45337",
+			algo:           "rta",
+			expected:       "false",
+		},
+
+		// CVE-2023-45288: net/http stdlib (multi-range, 0→1.21.9, 1.22.0-0→1.22.2)
+		{
+			name:           "stdlib multi-range vulnerable",
+			repo:           testDataRepo,
+			branchOrCommit: "vuln-stdlib-multi-range",
+			cve:            "CVE-2023-45288",
+			algo:           "rta",
+			expected:       "true",
+		},
+		{
+			name:           "stdlib multi-range patched",
+			repo:           testDataRepo,
+			branchOrCommit: "patched-stdlib-multi-range",
+			cve:            "CVE-2023-45288",
+			algo:           "rta",
+			expected:       "false",
+		},
 	}
 
-	// Step 1: Build binaries
-	t.Log("Building binaries with make...")
-	buildCmd := exec.Command("make", "gvs", "cg")
-	buildCmd.Dir = "../../" // Go to project root
-	buildCmd.Stdout = os.Stdout
-	buildCmd.Stderr = os.Stderr
-	if err := buildCmd.Run(); err != nil {
-		t.Fatalf("Failed to build binaries: %v", err)
-	}
-
-	// Step 2: Start gvs server
-	t.Log("Starting gvs server on port 8087...")
-	serverCmd := exec.Command("./bin/gvs")
-	serverCmd.Dir = "../../" // Run from project root so bin/cg can be found
-	serverCmd.Env = append(os.Environ(), "GVS_PORT=8087")
-	serverCmd.Stdout = os.Stdout
-	serverCmd.Stderr = os.Stderr
-
-	if err := serverCmd.Start(); err != nil {
-		t.Fatalf("Failed to start gvs server: %v", err)
-	}
-
-	// Ensure cleanup
-	defer func() {
-		t.Log("Killing gvs server...")
-		if err := exec.Command("pkill", "-f", "./bin/gvs").Run(); err != nil {
-			t.Logf("Warning: pkill failed: %v", err)
-		}
-		// Also try to kill by PID as backup
-		if serverCmd.Process != nil {
-			serverCmd.Process.Signal(syscall.SIGTERM)
-		}
-	}()
-
-	// Wait for server to start
-	t.Log("Waiting for server to be ready...")
-	if err := waitForServer("http://localhost:8087/healthz", 30*time.Second); err != nil {
-		t.Fatalf("Server did not start in time: %v", err)
-	}
-
-	// Step 3: Make POST request to /callgraph with non-vulnerable commit
-	t.Log("Sending callgraph request for non-vulnerable commit...")
-	requestBody := map[string]interface{}{
-		"repo":           "https://github.com/openshift/sriov-network-device-plugin",
-		"branchOrCommit": "95ebce39bc8d15f498abb0db0cb5b464db9a4887",
-		"cve":            "CVE-2024-45339",
-		"algo":           "rta",
-	}
-
-	reqJSON, err := json.Marshal(requestBody)
-	if err != nil {
-		t.Fatalf("Failed to marshal request: %v", err)
-	}
-
-	resp, err := http.Post(
-		"http://localhost:8087/callgraph",
-		"application/json",
-		bytes.NewBuffer(reqJSON),
-	)
-	if err != nil {
-		t.Fatalf("Failed to send callgraph request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("Callgraph request failed with status %d: %s", resp.StatusCode, body)
-	}
-
-	var callgraphResp struct {
-		TaskID string `json:"taskId"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&callgraphResp); err != nil {
-		t.Fatalf("Failed to decode callgraph response: %v", err)
-	}
-
-	taskID := callgraphResp.TaskID
-	if taskID == "" {
-		t.Fatal("No taskId returned from callgraph request")
-	}
-	t.Logf("Received taskId: %s", taskID)
-
-	// Step 4: Poll /status endpoint
-	t.Log("Polling status endpoint...")
-	var isVulnerable string
-	maxAttempts := 540 // 9 minutes with 1 second intervals
-
-	for i := 0; i < maxAttempts; i++ {
-		statusReq := map[string]string{"taskId": taskID}
-		statusJSON, err := json.Marshal(statusReq)
-		if err != nil {
-			t.Fatalf("Failed to marshal status request: %v", err)
-		}
-
-		statusResp, err := http.Post(
-			"http://localhost:8087/status",
-			"application/json",
-			bytes.NewBuffer(statusJSON),
-		)
-		if err != nil {
-			t.Fatalf("Failed to send status request: %v", err)
-		}
-
-		var statusResult struct {
-			Status string          `json:"status"`
-			Output json.RawMessage `json:"output"`
-			Error  string          `json:"error"`
-		}
-
-		body, err := io.ReadAll(statusResp.Body)
-		statusResp.Body.Close()
-
-		if err != nil {
-			t.Fatalf("Failed to read status response: %v", err)
-		}
-
-		if err := json.Unmarshal(body, &statusResult); err != nil {
-			t.Fatalf("Failed to decode status response: %v", err)
-		}
-
-		t.Logf("Attempt %d: Status = %s", i+1, statusResult.Status)
-
-		if statusResult.Status == "completed" {
-			// Parse the output to get IsVulnerable
-			var output struct {
-				IsVulnerable string `json:"IsVulnerable"`
-			}
-			if err := json.Unmarshal(statusResult.Output, &output); err != nil {
-				t.Fatalf("Failed to parse output: %v", err)
-			}
-
-			isVulnerable = output.IsVulnerable
-			t.Logf("Task completed! IsVulnerable: %s", isVulnerable)
-			break
-		} else if statusResult.Status == "failed" {
-			t.Fatalf("Task failed with error: %s", statusResult.Error)
-		}
-
-		// Wait before next poll
-		time.Sleep(1 * time.Second)
-	}
-
-	if isVulnerable == "" {
-		t.Fatal("Task did not complete within timeout")
-	}
-
-	// Step 5: Verify the result - this commit should be non-vulnerable
-	t.Logf("Final result - IsVulnerable: %s", isVulnerable)
-
-	// This commit should not be vulnerable
-	if isVulnerable != "false" {
-		t.Errorf("Expected IsVulnerable: false, got: %s", isVulnerable)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runCallgraphTest(t, tt.repo, tt.branchOrCommit, tt.cve, tt.algo, tt.expected)
+		})
 	}
 }
 
-func TestCallgraphIntegrationVulnerable(t *testing.T) {
-	// Step 0: Clear cache
-	t.Log("Clearing cache directory...")
-	if err := os.RemoveAll("/tmp/gvs-cache"); err != nil && !os.IsNotExist(err) {
-		t.Logf("Warning: Failed to clear cache: %v", err)
-	}
-
-	// Step 1: Build binaries
-	t.Log("Building binaries with make...")
-	buildCmd := exec.Command("make", "gvs", "cg")
-	buildCmd.Dir = "../../" // Go to project root
-	buildCmd.Stdout = os.Stdout
-	buildCmd.Stderr = os.Stderr
-	if err := buildCmd.Run(); err != nil {
-		t.Fatalf("Failed to build binaries: %v", err)
-	}
-
-	// Step 2: Start gvs server
-	t.Log("Starting gvs server on port 8087...")
-	serverCmd := exec.Command("./bin/gvs")
-	serverCmd.Dir = "../../" // Run from project root so bin/cg can be found
-	serverCmd.Env = append(os.Environ(), "GVS_PORT=8087")
-	serverCmd.Stdout = os.Stdout
-	serverCmd.Stderr = os.Stderr
-
-	if err := serverCmd.Start(); err != nil {
-		t.Fatalf("Failed to start gvs server: %v", err)
-	}
-
-	// Ensure cleanup
-	defer func() {
-		t.Log("Killing gvs server...")
-		if err := exec.Command("pkill", "-f", "./bin/gvs").Run(); err != nil {
-			t.Logf("Warning: pkill failed: %v", err)
-		}
-		// Also try to kill by PID as backup
-		if serverCmd.Process != nil {
-			serverCmd.Process.Signal(syscall.SIGTERM)
-		}
-	}()
-
-	// Wait for server to start
-	t.Log("Waiting for server to be ready...")
-	if err := waitForServer("http://localhost:8087/healthz", 30*time.Second); err != nil {
-		t.Fatalf("Server did not start in time: %v", err)
-	}
-
-	// Step 3: Make POST request to /callgraph with vulnerable commit
-	t.Log("Sending callgraph request for vulnerable commit...")
-	requestBody := map[string]interface{}{
-		"repo":           "https://github.com/openshift/sriov-network-device-plugin",
-		"branchOrCommit": "c600016ab638aab33bf02be5414f4174033c744a",
-		"cve":            "CVE-2024-45339",
-		"algo":           "rta",
-	}
-
-	reqJSON, err := json.Marshal(requestBody)
-	if err != nil {
-		t.Fatalf("Failed to marshal request: %v", err)
-	}
-
-	resp, err := http.Post(
-		"http://localhost:8087/callgraph",
-		"application/json",
-		bytes.NewBuffer(reqJSON),
-	)
-	if err != nil {
-		t.Fatalf("Failed to send callgraph request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("Callgraph request failed with status %d: %s", resp.StatusCode, body)
-	}
-
-	var callgraphResp struct {
-		TaskID string `json:"taskId"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&callgraphResp); err != nil {
-		t.Fatalf("Failed to decode callgraph response: %v", err)
-	}
-
-	taskID := callgraphResp.TaskID
-	if taskID == "" {
-		t.Fatal("No taskId returned from callgraph request")
-	}
-	t.Logf("Received taskId: %s", taskID)
-
-	// Step 4: Poll /status endpoint
-	t.Log("Polling status endpoint...")
-	var isVulnerable string
-	maxAttempts := 540 // 9 minutes with 1 second intervals
-
-	for i := 0; i < maxAttempts; i++ {
-		statusReq := map[string]string{"taskId": taskID}
-		statusJSON, err := json.Marshal(statusReq)
-		if err != nil {
-			t.Fatalf("Failed to marshal status request: %v", err)
-		}
-
-		statusResp, err := http.Post(
-			"http://localhost:8087/status",
-			"application/json",
-			bytes.NewBuffer(statusJSON),
-		)
-		if err != nil {
-			t.Fatalf("Failed to send status request: %v", err)
-		}
-
-		var statusResult struct {
-			Status string          `json:"status"`
-			Output json.RawMessage `json:"output"`
-			Error  string          `json:"error"`
-		}
-
-		body, err := io.ReadAll(statusResp.Body)
-		statusResp.Body.Close()
-
-		if err != nil {
-			t.Fatalf("Failed to read status response: %v", err)
-		}
-
-		if err := json.Unmarshal(body, &statusResult); err != nil {
-			t.Fatalf("Failed to decode status response: %v", err)
-		}
-
-		t.Logf("Attempt %d: Status = %s", i+1, statusResult.Status)
-
-		if statusResult.Status == "completed" {
-			// Parse the output to get IsVulnerable
-			var output struct {
-				IsVulnerable string `json:"IsVulnerable"`
-			}
-			if err := json.Unmarshal(statusResult.Output, &output); err != nil {
-				t.Fatalf("Failed to parse output: %v", err)
-			}
-
-			isVulnerable = output.IsVulnerable
-			t.Logf("Task completed! IsVulnerable: %s", isVulnerable)
-			break
-		} else if statusResult.Status == "failed" {
-			t.Fatalf("Task failed with error: %s", statusResult.Error)
-		}
-
-		// Wait before next poll
-		time.Sleep(1 * time.Second)
-	}
-
-	if isVulnerable == "" {
-		t.Fatal("Task did not complete within timeout")
-	}
-
-	// Step 5: Verify the result - this commit should be vulnerable
-	t.Logf("Final result - IsVulnerable: %s", isVulnerable)
-
-	// This commit should be vulnerable
-	if isVulnerable != "true" {
-		t.Errorf("Expected IsVulnerable: true, got: %s", isVulnerable)
-	}
-}
-
-// waitForServer waits for the server to be ready by polling the health endpoint
 func waitForServer(healthURL string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 
