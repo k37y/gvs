@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -41,7 +42,11 @@ func startTestServer(t *testing.T) {
 	t.Log("Starting gvs server on port " + testServerPort + "...")
 	serverCmd := exec.Command("./bin/gvs")
 	serverCmd.Dir = "../../"
-	serverCmd.Env = append(os.Environ(), "GVS_PORT="+testServerPort)
+	binDir, _ := filepath.Abs("../../bin")
+	serverCmd.Env = append(os.Environ(),
+		"GVS_PORT="+testServerPort,
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+	)
 	serverCmd.Stdout = os.Stdout
 	serverCmd.Stderr = os.Stderr
 

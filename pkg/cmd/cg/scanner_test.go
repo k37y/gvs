@@ -54,40 +54,191 @@ func newFakeRunner() *fakeRunner {
 	}
 }
 
+func TestParseVersionRanges(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []string
+		want  [][2]string
+	}{
+		{
+			name:  "single range with introduced/fixed",
+			input: []string{"Introduced in 0 and fixed in 0.33.0"},
+			want:  [][2]string{{"v0", "v0.33.0"}},
+		},
+		{
+			name:  "multi range",
+			input: []string{"Introduced in 0 and fixed in 1.21.8", "Introduced in 1.22.0 and fixed in 1.22.2"},
+			want:  [][2]string{{"v0", "v1.21.8"}, {"v1.22.0", "v1.22.2"}},
+		},
+		{
+			name:  "plain version string",
+			input: []string{"v0.33.0"},
+			want:  [][2]string{{"v", "v0.33.0"}},
+		},
+		{
+			name:  "empty input",
+			input: nil,
+			want:  nil,
+		},
+		{
+			name:  "empty string entry",
+			input: []string{""},
+			want:  nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseVersionRanges(tt.input)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %d ranges, want %d: %v", len(got), len(tt.want), got)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("range[%d] = %v, want %v", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestIsVersionInVulnerableRange(t *testing.T) {
+	tests := []struct {
+		name       string
+		version    string
+		rawFixVer  []string
+		wantVuln   bool
+		wantFixVer string
+	}{
+		{
+			name:       "version in single range",
+			version:    "v0.23.0",
+			rawFixVer:  []string{"Introduced in 0 and fixed in 0.33.0"},
+			wantVuln:   true,
+			wantFixVer: "v0.33.0",
+		},
+		{
+			name:      "version at fix boundary",
+			version:   "v0.33.0",
+			rawFixVer: []string{"Introduced in 0 and fixed in 0.33.0"},
+			wantVuln:  false,
+		},
+		{
+			name:      "version above fix",
+			version:   "v0.34.0",
+			rawFixVer: []string{"Introduced in 0 and fixed in 0.33.0"},
+			wantVuln:  false,
+		},
+		{
+			name:       "version in second range",
+			version:    "v1.22.0",
+			rawFixVer:  []string{"Introduced in 0 and fixed in 1.21.9", "Introduced in 1.22.0 and fixed in 1.22.2"},
+			wantVuln:   true,
+			wantFixVer: "v1.22.2",
+		},
+		{
+			name:      "version between ranges (not vulnerable)",
+			version:   "v1.21.9",
+			rawFixVer: []string{"Introduced in 0 and fixed in 1.21.9", "Introduced in 1.22.0 and fixed in 1.22.2"},
+			wantVuln:  false,
+		},
+		{
+			name:       "version in first range of multi-range",
+			version:    "v1.21.4",
+			rawFixVer:  []string{"Introduced in 0 and fixed in 1.21.9", "Introduced in 1.22.0 and fixed in 1.22.2"},
+			wantVuln:   true,
+			wantFixVer: "v1.21.9",
+		},
+		{
+			name:      "version above all ranges",
+			version:   "v1.22.5",
+			rawFixVer: []string{"Introduced in 0 and fixed in 1.21.9", "Introduced in 1.22.0 and fixed in 1.22.2"},
+			wantVuln:  false,
+		},
+		{
+			name:      "empty fix versions",
+			version:   "v0.23.0",
+			rawFixVer: nil,
+			wantVuln:  false,
+		},
+		{
+			name:       "plain version format",
+			version:    "v0.23.0",
+			rawFixVer:  []string{"v0.33.0"},
+			wantVuln:   true,
+			wantFixVer: "v0.33.0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotVuln, gotFix := isVersionInVulnerableRange(tt.version, tt.rawFixVer)
+			if gotVuln != tt.wantVuln {
+				t.Errorf("vulnerable = %v, want %v", gotVuln, tt.wantVuln)
+			}
+			if gotFix != tt.wantFixVer {
+				t.Errorf("fixVersion = %q, want %q", gotFix, tt.wantFixVer)
+			}
+		})
+	}
+}
+
+func TestHasIntroducedInfo(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []string
+		want  bool
+	}{
+		{"with introduced info", []string{"Introduced in 0 and fixed in 1.21.8"}, true},
+		{"plain version", []string{"v0.33.0"}, false},
+		{"mixed", []string{"v0.33.0", "Introduced in 1.22.0 and fixed in 1.22.2"}, true},
+		{"empty", nil, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := hasIntroducedInfo(tt.input)
+			if got != tt.want {
+				t.Errorf("hasIntroducedInfo = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCheckDirVulnerability(t *testing.T) {
 	tests := []struct {
 		name               string
 		curVer             string
 		repVer             string
-		fv                 string
 		used               bool
 		unknown            bool
 		isStdlib           bool
 		goToolchainVersion string
-		fixVer             []string
+		rawFixVer          []string
 		wantDirVuln        bool
 		wantStatus         string
 		wantReplaceFix     bool
+		wantFixVersion     string
 	}{
 		// --- Non-stdlib, symbol used ---
 		{
 			name:       "non-stdlib used, current below fix, no replace",
 			curVer:     "v0.23.0",
-			fv:         "v0.33.0",
+			rawFixVer:  []string{"Introduced in 0 and fixed in 0.33.0"},
 			used:       true,
-			wantStatus: "true", wantDirVuln: true,
+			wantStatus: "true", wantDirVuln: true, wantFixVersion: "v0.33.0",
 		},
 		{
 			name:       "non-stdlib used, current equals fix, no replace",
 			curVer:     "v0.33.0",
-			fv:         "v0.33.0",
+			rawFixVer:  []string{"Introduced in 0 and fixed in 0.33.0"},
 			used:       true,
 			wantStatus: "false", wantDirVuln: false,
 		},
 		{
 			name:       "non-stdlib used, current above fix, no replace",
 			curVer:     "v0.34.0",
-			fv:         "v0.33.0",
+			rawFixVer:  []string{"Introduced in 0 and fixed in 0.33.0"},
 			used:       true,
 			wantStatus: "false", wantDirVuln: false,
 		},
@@ -95,15 +246,15 @@ func TestCheckDirVulnerability(t *testing.T) {
 			name:       "non-stdlib used, replace below fix",
 			curVer:     "v0.23.0",
 			repVer:     "v0.24.0",
-			fv:         "v0.33.0",
+			rawFixVer:  []string{"Introduced in 0 and fixed in 0.33.0"},
 			used:       true,
-			wantStatus: "true", wantDirVuln: true, wantReplaceFix: true,
+			wantStatus: "true", wantDirVuln: true, wantReplaceFix: true, wantFixVersion: "v0.33.0",
 		},
 		{
 			name:       "non-stdlib used, replace equals fix",
 			curVer:     "v0.23.0",
 			repVer:     "v0.33.0",
-			fv:         "v0.33.0",
+			rawFixVer:  []string{"Introduced in 0 and fixed in 0.33.0"},
 			used:       true,
 			wantStatus: "false", wantDirVuln: false,
 		},
@@ -111,7 +262,7 @@ func TestCheckDirVulnerability(t *testing.T) {
 			name:       "non-stdlib used, replace above fix",
 			curVer:     "v0.23.0",
 			repVer:     "v0.34.0",
-			fv:         "v0.33.0",
+			rawFixVer:  []string{"Introduced in 0 and fixed in 0.33.0"},
 			used:       true,
 			wantStatus: "false", wantDirVuln: false,
 		},
@@ -120,7 +271,7 @@ func TestCheckDirVulnerability(t *testing.T) {
 		{
 			name:       "non-stdlib not used, current below fix",
 			curVer:     "v0.23.0",
-			fv:         "v0.33.0",
+			rawFixVer:  []string{"Introduced in 0 and fixed in 0.33.0"},
 			used:       false,
 			wantStatus: "false", wantDirVuln: false,
 		},
@@ -128,16 +279,16 @@ func TestCheckDirVulnerability(t *testing.T) {
 			name:       "non-stdlib not used, replace below fix",
 			curVer:     "v0.23.0",
 			repVer:     "v0.24.0",
-			fv:         "v0.33.0",
+			rawFixVer:  []string{"Introduced in 0 and fixed in 0.33.0"},
 			used:       false,
-			wantStatus: "false", wantDirVuln: true, wantReplaceFix: true,
+			wantStatus: "false", wantDirVuln: true, wantReplaceFix: true, wantFixVersion: "v0.33.0",
 		},
 
 		// --- Unknown reachability ---
 		{
 			name:       "unknown reachability",
 			curVer:     "v0.23.0",
-			fv:         "v0.33.0",
+			rawFixVer:  []string{"Introduced in 0 and fixed in 0.33.0"},
 			unknown:    true,
 			wantStatus: "unknown", wantDirVuln: true,
 		},
@@ -145,68 +296,90 @@ func TestCheckDirVulnerability(t *testing.T) {
 			name:       "unknown reachability with replace below fix",
 			curVer:     "v0.23.0",
 			repVer:     "v0.24.0",
-			fv:         "v0.33.0",
+			rawFixVer:  []string{"Introduced in 0 and fixed in 0.33.0"},
 			unknown:    true,
-			wantStatus: "unknown", wantDirVuln: true, wantReplaceFix: true,
+			wantStatus: "unknown", wantDirVuln: true, wantReplaceFix: true, wantFixVersion: "v0.33.0",
 		},
 
-		// --- Stdlib, symbol used ---
+		// --- Stdlib, symbol used (multi-range) ---
 		{
-			name:               "stdlib used, toolchain below fix",
+			name:               "stdlib used, toolchain below fix in first range",
 			curVer:             "v1.21.0",
-			fv:                 "v1.21.8",
 			used:               true,
 			isStdlib:           true,
 			goToolchainVersion: "v1.21.4",
-			fixVer:             []string{"1.21.8", "1.22.2"},
-			wantStatus:         "true", wantDirVuln: true,
+			rawFixVer:          []string{"Introduced in 0 and fixed in 1.21.8", "Introduced in 1.22.0 and fixed in 1.22.2"},
+			wantStatus:         "true", wantDirVuln: true, wantFixVersion: "v1.21.8",
 		},
 		{
 			name:               "stdlib used, toolchain at fix",
 			curVer:             "v1.21.0",
-			fv:                 "v1.21.8",
 			used:               true,
 			isStdlib:           true,
 			goToolchainVersion: "v1.21.8",
-			fixVer:             []string{"1.21.8", "1.22.2"},
+			rawFixVer:          []string{"Introduced in 0 and fixed in 1.21.8", "Introduced in 1.22.0 and fixed in 1.22.2"},
 			wantStatus:         "false", wantDirVuln: false,
 		},
 		{
-			name:               "stdlib used, toolchain above fix",
+			name:               "stdlib used, toolchain in second range",
+			curVer:             "v1.22.0",
+			used:               true,
+			isStdlib:           true,
+			goToolchainVersion: "v1.22.1",
+			rawFixVer:          []string{"Introduced in 0 and fixed in 1.21.8", "Introduced in 1.22.0 and fixed in 1.22.2"},
+			wantStatus:         "true", wantDirVuln: true, wantFixVersion: "v1.22.2",
+		},
+		{
+			name:               "stdlib used, toolchain above all fixes",
 			curVer:             "v1.21.0",
-			fv:                 "v1.21.8",
 			used:               true,
 			isStdlib:           true,
 			goToolchainVersion: "v1.22.5",
-			fixVer:             []string{"1.21.8", "1.22.2"},
+			rawFixVer:          []string{"Introduced in 0 and fixed in 1.21.8", "Introduced in 1.22.0 and fixed in 1.22.2"},
 			wantStatus:         "false", wantDirVuln: false,
 		},
 		{
-			name:               "stdlib used, no matching fix for branch",
+			name:               "stdlib used, toolchain predates vulnerability (stdlib fallback)",
 			curVer:             "v1.20.0",
-			fv:                 "v1.21.8",
 			used:               true,
 			isStdlib:           true,
 			goToolchainVersion: "v1.20.5",
-			fixVer:             []string{"1.21.8", "1.22.2"},
+			rawFixVer:          []string{"Introduced in 0 and fixed in 1.21.8", "Introduced in 1.22.0 and fixed in 1.22.2"},
 			wantStatus:         "true", wantDirVuln: true,
 		},
 		{
-			name:     "stdlib used, empty toolchain version",
-			curVer:   "v1.21.0",
-			fv:       "v1.21.8",
-			used:     true,
-			isStdlib: true,
-			fixVer:   []string{"1.21.8"},
+			name:               "stdlib used, empty toolchain version",
+			curVer:             "v1.21.0",
+			used:               true,
+			isStdlib:           true,
+			rawFixVer:          []string{"Introduced in 0 and fixed in 1.21.8"},
+			wantStatus:         "unknown", wantDirVuln: true,
+		},
+		{
+			name:       "stdlib used, no fix versions available",
+			curVer:     "v1.21.0",
+			used:       true,
+			isStdlib:   true,
 			wantStatus: "unknown", wantDirVuln: true,
 		},
 		{
-			name:     "stdlib used, no fix versions available",
-			curVer:   "v1.21.0",
-			fv:       "",
-			used:     true,
-			isStdlib: true,
-			wantStatus: "unknown", wantDirVuln: true,
+			name:               "stdlib used, plain version format (implicit introduced=v0)",
+			curVer:             "v1.20.0",
+			used:               true,
+			isStdlib:           true,
+			goToolchainVersion: "v1.20.5",
+			rawFixVer:          []string{"1.21.8", "1.22.2"},
+			wantStatus:         "true", wantDirVuln: true, wantFixVersion: "v1.21.8",
+		},
+
+		{
+			name:               "stdlib used, toolchain above all fixes (fallback safe)",
+			curVer:             "v1.22.0",
+			used:               true,
+			isStdlib:           true,
+			goToolchainVersion: "v1.25.0",
+			rawFixVer:          []string{"Introduced in 0 and fixed in 1.21.9", "Introduced in 1.22.0-0 and fixed in 1.22.2"},
+			wantStatus:         "false", wantDirVuln: false,
 		},
 
 		// --- Real-world mod-dir scenarios ---
@@ -214,15 +387,15 @@ func TestCheckDirVulnerability(t *testing.T) {
 			name:       "mod-dir root: require v0.23.0, replace v0.24.0, fix v0.33.0",
 			curVer:     "v0.23.0",
 			repVer:     "v0.24.0",
-			fv:         "v0.33.0",
+			rawFixVer:  []string{"Introduced in 0 and fixed in 0.33.0"},
 			used:       true,
-			wantStatus: "true", wantDirVuln: true, wantReplaceFix: true,
+			wantStatus: "true", wantDirVuln: true, wantReplaceFix: true, wantFixVersion: "v0.33.0",
 		},
 		{
-			name:       "mod-dir bar: require v0.33.0, replace v0.24.0, fix v0.33.0",
+			name:       "mod-dir bar: require v0.33.0, replace v0.24.0 (downgrade), fix v0.33.0",
 			curVer:     "v0.33.0",
 			repVer:     "v0.24.0",
-			fv:         "v0.33.0",
+			rawFixVer:  []string{"Introduced in 0 and fixed in 0.33.0"},
 			used:       true,
 			wantStatus: "true", wantDirVuln: true,
 		},
@@ -230,7 +403,7 @@ func TestCheckDirVulnerability(t *testing.T) {
 			name:       "mod-dir foo: require v0.23.0, replace v0.33.0 (fixed), fix v0.33.0",
 			curVer:     "v0.23.0",
 			repVer:     "v0.33.0",
-			fv:         "v0.33.0",
+			rawFixVer:  []string{"Introduced in 0 and fixed in 0.33.0"},
 			used:       true,
 			wantStatus: "false", wantDirVuln: false,
 		},
@@ -238,8 +411,8 @@ func TestCheckDirVulnerability(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			vr := checkDirVulnerability(tt.curVer, tt.repVer, tt.fv,
-				tt.used, tt.unknown, tt.isStdlib, tt.goToolchainVersion, tt.fixVer)
+			vr := checkDirVulnerability(tt.curVer, tt.repVer,
+				tt.used, tt.unknown, tt.isStdlib, tt.goToolchainVersion, tt.rawFixVer)
 
 			if vr.DirVulnerable != tt.wantDirVuln {
 				t.Errorf("DirVulnerable = %v, want %v", vr.DirVulnerable, tt.wantDirVuln)
@@ -249,6 +422,9 @@ func TestCheckDirVulnerability(t *testing.T) {
 			}
 			if vr.NeedsReplaceFix != tt.wantReplaceFix {
 				t.Errorf("NeedsReplaceFix = %v, want %v", vr.NeedsReplaceFix, tt.wantReplaceFix)
+			}
+			if tt.wantFixVersion != "" && vr.FixVersion != tt.wantFixVersion {
+				t.Errorf("FixVersion = %q, want %q", vr.FixVersion, tt.wantFixVersion)
 			}
 		})
 	}
@@ -418,7 +594,7 @@ func TestFormatIntroducedFixed(t *testing.T) {
 		{
 			name:   "introduced only",
 			events: []Event{{Introduced: "0"}},
-			want:   []string{"Introdued in 0 - "},
+			want:   []string{"Introduced in 0 - "},
 		},
 		{
 			name:   "multiple pairs",
