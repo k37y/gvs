@@ -81,6 +81,7 @@ type Result struct {
 	ReflectionRisks    []ReflectionRisk    `json:"reflection_risks,omitempty"`
 	GraphPaths         []string            `json:"GraphPaths,omitempty"`
 	ClaudeVerification *ClaudeVerification `json:"ClaudeVerification,omitempty"`
+	GoToolchainVersions map[string]string   `json:"-"`
 	Mu                 sync.Mutex          `json:"-"`
 	Progress           bool                `json:"-"`
 	SsaProg            *ssa.Program        `json:"-"`

@@ -184,6 +184,7 @@ func Prepare(r *Result) bool {
 
 	r.progress("Phase 3/6: Discovering Go modules and main files...")
 	findMainGoFiles(r)
+	cacheGoToolchainVersions(r)
 	r.progress("Phase 4/6: Getting git branch information...")
 	getGitBranch(r)
 	r.progress("Phase 5/6: Getting git repository URL...")
@@ -332,7 +333,7 @@ func checkDirVulnerability(curVer, repVer string, used, unknown, isStdlib bool, 
 }
 
 func (j Job) isVulnerable(result *Result) *Result {
-	curVer := getCurrentVersion(j.Package, filepath.Join(result.Directory, j.Dir), result)
+	curVer := getCurrentVersion(j.Package, filepath.Join(result.Directory, j.Dir), j.Dir, result)
 	modPath := getModPath(j.Package, filepath.Join(result.Directory, j.Dir), result)
 	repPath, repVer := getReplaceVersion(modPath, filepath.Join(result.Directory, j.Dir), result)
 
@@ -393,10 +394,11 @@ func (j Job) isVulnerable(result *Result) *Result {
 	}
 	goToolchainVersion := ""
 	if result.AffectedImports[j.Package].Type == "stdlib" {
-		// Reuse curVer which was read BEFORE SSA loading (isSymbolUsed).
-		// SSA's packages.Load can auto-upgrade go.mod, so reading after would
-		// return the upgraded version instead of the project's actual version.
-		goToolchainVersion = curVer
+		if v, ok := result.GoToolchainVersions[j.Dir]; ok {
+			goToolchainVersion = v
+		} else {
+			goToolchainVersion = curVer
+		}
 	}
 
 	vr := checkDirVulnerability(curVer, repVer, used, unknown,
@@ -1128,10 +1130,12 @@ func buildRTACallGraph(prog *ssa.Program, allFuncs map[*ssa.Function]bool) (resu
 	return static.CallGraph(prog)
 }
 
-func getCurrentVersion(pkg string, dir string, result *Result) string {
-	// Check if this is a stdlib package
+func getCurrentVersion(pkg string, dir string, modDir string, result *Result) string {
 	if result.AffectedImports != nil {
 		if details, exists := result.AffectedImports[pkg]; exists && details.Type == "stdlib" {
+			if v, ok := result.GoToolchainVersions[modDir]; ok {
+				return v
+			}
 			return getGoToolchainVersion(dir, result)
 		}
 	}
@@ -1145,6 +1149,17 @@ func getCurrentVersion(pkg string, dir string, result *Result) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func cacheGoToolchainVersions(r *Result) {
+	r.GoToolchainVersions = make(map[string]string)
+	for modDir := range r.Files {
+		fullDir := filepath.Join(r.Directory, modDir)
+		ver := getGoToolchainVersion(fullDir, r)
+		if ver != "" {
+			r.GoToolchainVersions[modDir] = ver
+		}
+	}
 }
 
 func getGoToolchainVersion(dir string, result *Result) string {

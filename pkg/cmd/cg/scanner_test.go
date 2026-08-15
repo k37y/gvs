@@ -1062,7 +1062,7 @@ func TestGetCurrentVersion_NonStdlib(t *testing.T) {
 	fr.stdout["go list -f {{if .Module}}{{.Module.Version}}{{end}} golang.org/x/net"] = []byte("v0.23.0\n")
 
 	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
-	got := getCurrentVersion("golang.org/x/net", "/some/dir", r)
+	got := getCurrentVersion("golang.org/x/net", "/some/dir", ".", r)
 	if got != "v0.23.0" {
 		t.Errorf("getCurrentVersion = %q, want %q", got, "v0.23.0")
 	}
@@ -1082,7 +1082,7 @@ func TestGetCurrentVersion_Stdlib(t *testing.T) {
 			"net/http": {Type: "stdlib"},
 		},
 	}
-	got := getCurrentVersion("net/http", "/some/dir", r)
+	got := getCurrentVersion("net/http", "/some/dir", ".", r)
 	if got != "v1.21.4" {
 		t.Errorf("getCurrentVersion = %q, want %q", got, "v1.21.4")
 	}
@@ -1094,7 +1094,7 @@ func TestGetCurrentVersion_Error(t *testing.T) {
 	fr.stdout["go list -f {{if .Module}}{{.Module.Version}}{{end}} golang.org/x/net"] = []byte("some error")
 
 	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
-	got := getCurrentVersion("golang.org/x/net", "/some/dir", r)
+	got := getCurrentVersion("golang.org/x/net", "/some/dir", ".", r)
 	if got != "" {
 		t.Errorf("getCurrentVersion = %q, want empty", got)
 	}
