@@ -252,6 +252,122 @@ func TestCallgraphIntegration(t *testing.T) {
 			algo:           "rta",
 			expected:       "false",
 		},
+		{
+			name:           "stdlib multi-range second range vulnerable",
+			repo:           testDataRepo,
+			branchOrCommit: "vuln-stdlib-second-range",
+			cve:            "CVE-2023-45288",
+			algo:           "rta",
+			expected:       "true",
+		},
+		{
+			name:           "stdlib multi-range between ranges patched",
+			repo:           testDataRepo,
+			branchOrCommit: "patched-stdlib-between-ranges",
+			cve:            "CVE-2023-45288",
+			algo:           "rta",
+			expected:       "false",
+		},
+
+		// GO-2023-2153: google.golang.org/grpc (multi-range, 0→1.56.3, 1.57.0→1.57.1, 1.58.0→1.58.3)
+		{
+			name:           "grpc multi-range vulnerable",
+			repo:           testDataRepo,
+			branchOrCommit: "vuln-multi-range",
+			cve:            "GO-2023-2153",
+			algo:           "rta",
+			expected:       "true",
+		},
+		{
+			name:           "grpc multi-range patched",
+			repo:           testDataRepo,
+			branchOrCommit: "patched-multi-range",
+			cve:            "GO-2023-2153",
+			algo:           "rta",
+			expected:       "false",
+		},
+		{
+			name:           "grpc multi-range between ranges patched",
+			repo:           testDataRepo,
+			branchOrCommit: "patched-multi-range-between",
+			cve:            "GO-2023-2153",
+			algo:           "rta",
+			expected:       "false",
+		},
+
+		// Multi-module: svc-a vulnerable, svc-b patched
+		{
+			name:           "multi-module x/net vulnerable",
+			repo:           testDataRepo,
+			branchOrCommit: "multi-module",
+			cve:            "CVE-2024-45338",
+			algo:           "rta",
+			expected:       "true",
+		},
+		{
+			name:           "multi-module x/crypto vulnerable",
+			repo:           testDataRepo,
+			branchOrCommit: "multi-module",
+			cve:            "CVE-2024-45337",
+			algo:           "rta",
+			expected:       "true",
+		},
+
+		// Replace directive pointing to patched version
+		{
+			name:           "x/net replace directive patched",
+			repo:           testDataRepo,
+			branchOrCommit: "patched-replace-directive",
+			cve:            "CVE-2024-45338",
+			algo:           "rta",
+			expected:       "false",
+		},
+
+		// Not a Go repository
+		{
+			name:           "not a go repo",
+			repo:           testDataRepo,
+			branchOrCommit: "not-a-go-repo",
+			cve:            "CVE-2024-45338",
+			algo:           "rta",
+			expected:       "unknown",
+		},
+
+		// Algorithm variations (all should detect the same vulnerability)
+		{
+			name:           "algorithm vta",
+			repo:           testDataRepo,
+			branchOrCommit: "vuln-single-range",
+			cve:            "CVE-2024-45338",
+			algo:           "vta",
+			expected:       "true",
+		},
+		{
+			name:           "algorithm cha",
+			repo:           testDataRepo,
+			branchOrCommit: "vuln-single-range",
+			cve:            "CVE-2024-45338",
+			algo:           "cha",
+			expected:       "true",
+		},
+		{
+			name:           "algorithm static",
+			repo:           testDataRepo,
+			branchOrCommit: "vuln-single-range",
+			cve:            "CVE-2024-45338",
+			algo:           "static",
+			expected:       "true",
+		},
+
+		// GOCVE ID input (GO-2024-3333 == CVE-2024-45338)
+		{
+			name:           "GOCVE input",
+			repo:           testDataRepo,
+			branchOrCommit: "vuln-single-range",
+			cve:            "GO-2024-3333",
+			algo:           "rta",
+			expected:       "true",
+		},
 	}
 
 	for _, tt := range tests {
