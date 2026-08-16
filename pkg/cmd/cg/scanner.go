@@ -1160,6 +1160,10 @@ func getCurrentVersion(pkg string, dir string, modDir string, result *Result) st
 		}
 	}
 
+	if !isModuleInGoMod(pkg, dir) {
+		return ""
+	}
+
 	args := []string{"list", "-f", "{{if .Module}}{{.Module.Version}}{{end}}", pkg}
 	out, err := result.runner().RunCommandWithEnv(dir, result.packagesEnv(dir), "go", args...)
 	if err != nil {
@@ -1278,6 +1282,10 @@ func getFixedVersion(id, pkg string, result *Result) []string {
 }
 
 func getModPath(pkg, dir string, result *Result) string {
+	if !isModuleInGoMod(pkg, dir) {
+		return ""
+	}
+
 	args := []string{"list", "-f", "{{if .Module}}{{.Module.Path}}{{end}}", pkg}
 	out, err := result.runner().RunCommandWithEnv(dir, result.packagesEnv(dir), "go", args...)
 	if err != nil {

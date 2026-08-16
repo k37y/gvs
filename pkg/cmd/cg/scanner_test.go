@@ -1062,11 +1062,14 @@ func TestIsNewAt(t *testing.T) {
 // --- getCurrentVersion tests ---
 
 func TestGetCurrentVersion_NonStdlib(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/foo\ngo 1.22\nrequire golang.org/x/net v0.23.0\n"), 0644)
+
 	fr := newFakeRunner()
 	fr.combined["go list -f {{if .Module}}{{.Module.Version}}{{end}} golang.org/x/net"] = []byte("v0.23.0\n")
 
 	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
-	got := getCurrentVersion("golang.org/x/net", "/some/dir", ".", r)
+	got := getCurrentVersion("golang.org/x/net", dir, ".", r)
 	if got != "v0.23.0" {
 		t.Errorf("getCurrentVersion = %q, want %q", got, "v0.23.0")
 	}
@@ -1095,12 +1098,15 @@ func TestGetCurrentVersion_Stdlib(t *testing.T) {
 }
 
 func TestGetCurrentVersion_Error(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/foo\ngo 1.22\nrequire golang.org/x/net v0.23.0\n"), 0644)
+
 	fr := newFakeRunner()
 	fr.err["go list -f {{if .Module}}{{.Module.Version}}{{end}} golang.org/x/net"] = fmt.Errorf("exit 1")
 	fr.combined["go list -f {{if .Module}}{{.Module.Version}}{{end}} golang.org/x/net"] = []byte("some error")
 
 	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
-	got := getCurrentVersion("golang.org/x/net", "/some/dir", ".", r)
+	got := getCurrentVersion("golang.org/x/net", dir, ".", r)
 	if got != "" {
 		t.Errorf("getCurrentVersion = %q, want empty", got)
 	}
@@ -1210,22 +1216,28 @@ func TestGetReplaceVersion_CmdError(t *testing.T) {
 // --- getModPath tests ---
 
 func TestGetModPath(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/foo\ngo 1.22\nrequire golang.org/x/net v0.23.0\n"), 0644)
+
 	fr := newFakeRunner()
 	fr.combined["go list -f {{if .Module}}{{.Module.Path}}{{end}} golang.org/x/net/html"] = []byte("golang.org/x/net\n")
 
 	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
-	got := getModPath("golang.org/x/net/html", "/some/dir", r)
+	got := getModPath("golang.org/x/net/html", dir, r)
 	if got != "golang.org/x/net" {
 		t.Errorf("getModPath = %q, want %q", got, "golang.org/x/net")
 	}
 }
 
 func TestGetModPath_Error(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/foo\ngo 1.22\nrequire golang.org/x/net v0.23.0\n"), 0644)
+
 	fr := newFakeRunner()
 	fr.err["go list -f {{if .Module}}{{.Module.Path}}{{end}} golang.org/x/net"] = fmt.Errorf("exit 1")
 
 	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
-	got := getModPath("golang.org/x/net", "/some/dir", r)
+	got := getModPath("golang.org/x/net", dir, r)
 	if got != "" {
 		t.Errorf("getModPath = %q, want empty", got)
 	}
