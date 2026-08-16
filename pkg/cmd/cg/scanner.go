@@ -203,6 +203,10 @@ func Prepare(r *Result) bool {
 func Worker(jobs <-chan Job, results chan<- *Result, wg *sync.WaitGroup, result *Result) {
 	defer wg.Done()
 	for job := range jobs {
+		dir := filepath.Join(result.Directory, job.Dir)
+		if result.AffectedImports[job.Package].Type != "stdlib" && !isModuleInGoMod(job.Package, dir) {
+			continue
+		}
 		res := job.isVulnerable(result)
 		results <- res
 	}
@@ -332,10 +336,29 @@ func checkDirVulnerability(curVer, repVer string, used, unknown, isStdlib bool, 
 	return vr
 }
 
+func isModuleInGoMod(pkg, dir string) bool {
+	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return false
+	}
+	f, err := modfile.Parse("go.mod", data, nil)
+	if err != nil {
+		return false
+	}
+	for _, req := range f.Require {
+		if pkg == req.Mod.Path || strings.HasPrefix(pkg, req.Mod.Path+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 func (j Job) isVulnerable(result *Result) *Result {
-	curVer := getCurrentVersion(j.Package, filepath.Join(result.Directory, j.Dir), j.Dir, result)
-	modPath := getModPath(j.Package, filepath.Join(result.Directory, j.Dir), result)
-	repPath, repVer := getReplaceVersion(modPath, filepath.Join(result.Directory, j.Dir), result)
+	dir := filepath.Join(result.Directory, j.Dir)
+
+	curVer := getCurrentVersion(j.Package, dir, j.Dir, result)
+	modPath := getModPath(j.Package, dir, result)
+	repPath, repVer := getReplaceVersion(modPath, dir, result)
 
 	var rawFixVer []string
 	result.Mu.Lock()
@@ -359,7 +382,7 @@ func (j Job) isVulnerable(result *Result) *Result {
 	used := false
 	unknown := false
 
-	isUsed := result.isSymbolUsed(j.Package, filepath.Join(result.Directory, j.Dir), j.Symbols, j.Files)
+	isUsed := result.isSymbolUsed(j.Package, dir, j.Symbols, j.Files)
 	switch isUsed {
 	case "true":
 		used = true

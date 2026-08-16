@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"syscall"
 	"testing"
 	"time"
@@ -21,6 +22,35 @@ const (
 	testServerURL  = "http://localhost:" + testServerPort
 	testDataRepo   = "https://github.com/k37y/gvs-testdata"
 )
+
+type cgUsedImport struct {
+	Symbols        []string `json:"Symbols"`
+	CurrentVersion string   `json:"CurrentVersion"`
+	ReplaceModule  string   `json:"ReplaceModule,omitempty"`
+	ReplaceVersion string   `json:"ReplaceVersion,omitempty"`
+	FixCommands    []string `json:"FixCommands"`
+	Dir            []string `json:"Dir"`
+}
+
+type cgAffectedImport struct {
+	Symbols      []string `json:"Symbols"`
+	Type         string   `json:"Type"`
+	FixedVersion []string `json:"FixedVersion"`
+}
+
+type cgOutput struct {
+	CVE             string                      `json:"CVE"`
+	IsVulnerable    string                      `json:"IsVulnerable"`
+	GoCVE           string                      `json:"GoCVE"`
+	Repository      string                      `json:"Repository"`
+	Branch          string                      `json:"Branch"`
+	Errors          []string                    `json:"Errors"`
+	Unsafe          bool                        `json:"unsafe"`
+	Reflect         bool                        `json:"reflect"`
+	Files           map[string][][]string       `json:"Files"`
+	UsedImports     map[string]cgUsedImport     `json:"UsedImports"`
+	AffectedImports map[string]cgAffectedImport `json:"AffectedImports"`
+}
 
 func startTestServer(t *testing.T) {
 	t.Helper()
@@ -70,7 +100,7 @@ func startTestServer(t *testing.T) {
 	}
 }
 
-func runCallgraphTest(t *testing.T, repo, branchOrCommit, cve, algo, expectedResult string) {
+func pollCallgraphResult(t *testing.T, repo, branchOrCommit, cve, algo string) cgOutput {
 	t.Helper()
 
 	requestBody := map[string]interface{}{
@@ -113,9 +143,7 @@ func runCallgraphTest(t *testing.T, repo, branchOrCommit, cve, algo, expectedRes
 	}
 	t.Logf("Received taskId: %s", taskID)
 
-	var isVulnerable string
 	maxAttempts := 540
-
 	for i := 0; i < maxAttempts; i++ {
 		statusReq := map[string]string{"taskId": taskID}
 		statusJSON, err := json.Marshal(statusReq)
@@ -154,16 +182,12 @@ func runCallgraphTest(t *testing.T, repo, branchOrCommit, cve, algo, expectedRes
 		}
 
 		if statusResult.Status == "completed" {
-			var output struct {
-				IsVulnerable string `json:"IsVulnerable"`
-			}
+			var output cgOutput
 			if err := json.Unmarshal(statusResult.Output, &output); err != nil {
 				t.Fatalf("Failed to parse output: %v", err)
 			}
-
-			isVulnerable = output.IsVulnerable
-			t.Logf("Task completed! IsVulnerable: %s", isVulnerable)
-			break
+			t.Logf("Task completed! IsVulnerable: %s", output.IsVulnerable)
+			return output
 		} else if statusResult.Status == "failed" {
 			t.Fatalf("Task failed with error: %s", statusResult.Error)
 		}
@@ -171,17 +195,198 @@ func runCallgraphTest(t *testing.T, repo, branchOrCommit, cve, algo, expectedRes
 		time.Sleep(1 * time.Second)
 	}
 
-	if isVulnerable == "" {
-		t.Fatal("Task did not complete within timeout")
-	}
+	t.Fatal("Task did not complete within timeout")
+	return cgOutput{}
+}
 
-	if isVulnerable != expectedResult {
-		t.Errorf("Expected IsVulnerable: %s, got: %s", expectedResult, isVulnerable)
+func runCallgraphTest(t *testing.T, repo, branchOrCommit, cve, algo, expectedResult string, expectErrors bool) {
+	t.Helper()
+	output := pollCallgraphResult(t, repo, branchOrCommit, cve, algo)
+	if output.IsVulnerable != expectedResult {
+		t.Errorf("Expected IsVulnerable: %s, got: %s", expectedResult, output.IsVulnerable)
+	}
+	if !expectErrors && len(output.Errors) > 0 {
+		t.Errorf("Errors = %v, want nil", output.Errors)
+	}
+}
+
+func assertUsedImport(t *testing.T, output cgOutput, pkg, currentVersion string, fixCommands []string) {
+	t.Helper()
+	ui, ok := output.UsedImports[pkg]
+	if !ok {
+		t.Errorf("UsedImports missing package %q", pkg)
+		return
+	}
+	if ui.CurrentVersion != currentVersion {
+		t.Errorf("UsedImports[%q].CurrentVersion = %q, want %q", pkg, ui.CurrentVersion, currentVersion)
+	}
+	if len(fixCommands) == 0 {
+		if len(ui.FixCommands) > 0 {
+			t.Errorf("UsedImports[%q].FixCommands = %v, want nil", pkg, ui.FixCommands)
+		}
+	} else {
+		if !slices.Equal(ui.FixCommands, fixCommands) {
+			t.Errorf("UsedImports[%q].FixCommands = %v, want %v", pkg, ui.FixCommands, fixCommands)
+		}
+	}
+	if len(ui.Symbols) == 0 {
+		t.Errorf("UsedImports[%q].Symbols is empty", pkg)
+	}
+	if output.IsVulnerable == "true" && len(ui.Dir) == 0 {
+		t.Errorf("UsedImports[%q].Dir is empty", pkg)
+	}
+}
+
+func assertAffectedImport(t *testing.T, output cgOutput, pkg, typ string, fixedVersions []string) {
+	t.Helper()
+	ai, ok := output.AffectedImports[pkg]
+	if !ok {
+		t.Errorf("AffectedImports missing package %q", pkg)
+		return
+	}
+	if ai.Type != typ {
+		t.Errorf("AffectedImports[%q].Type = %q, want %q", pkg, ai.Type, typ)
+	}
+	if !slices.Equal(ai.FixedVersion, fixedVersions) {
+		t.Errorf("AffectedImports[%q].FixedVersion = %v, want %v", pkg, ai.FixedVersion, fixedVersions)
+	}
+	if len(ai.Symbols) == 0 {
+		t.Errorf("AffectedImports[%q].Symbols is empty", pkg)
+	}
+}
+
+func assertCommon(t *testing.T, output cgOutput, isVuln, goCVE, branch string) {
+	t.Helper()
+	if output.IsVulnerable != isVuln {
+		t.Errorf("IsVulnerable = %q, want %q", output.IsVulnerable, isVuln)
+	}
+	if output.GoCVE != goCVE {
+		t.Errorf("GoCVE = %q, want %q", output.GoCVE, goCVE)
+	}
+	if output.Branch != branch {
+		t.Errorf("Branch = %q, want %q", output.Branch, branch)
+	}
+	if output.Repository != testDataRepo {
+		t.Errorf("Repository = %q, want %q", output.Repository, testDataRepo)
+	}
+	if output.Files == nil {
+		t.Error("Files is nil")
+	}
+	if len(output.Errors) > 0 {
+		t.Errorf("Errors = %v, want nil", output.Errors)
 	}
 }
 
 func TestCallgraphIntegration(t *testing.T) {
 	startTestServer(t)
+
+	// --- Full JSON validation tests ---
+
+	t.Run("full/non-stdlib vulnerable", func(t *testing.T) {
+		output := pollCallgraphResult(t, testDataRepo, "vuln-single-range", "CVE-2024-45338", "rta")
+		assertCommon(t, output, "true", "GO-2024-3333", "vuln-single-range")
+
+		if output.Unsafe {
+			t.Error("unsafe = true, want false")
+		}
+		if output.Reflect {
+			t.Error("reflect = true, want false")
+		}
+
+		assertUsedImport(t, output, "golang.org/x/net/html", "v0.23.0",
+			[]string{"go get golang.org/x/net@v0.33.0", "go mod tidy", "go mod vendor"})
+		assertAffectedImport(t, output, "golang.org/x/net/html", "non-stdlib",
+			[]string{"v0.33.0"})
+	})
+
+	t.Run("full/non-stdlib patched", func(t *testing.T) {
+		output := pollCallgraphResult(t, testDataRepo, "patched-single-range", "CVE-2024-45338", "rta")
+		assertCommon(t, output, "false", "GO-2024-3333", "patched-single-range")
+
+		assertUsedImport(t, output, "golang.org/x/net/html", "v0.33.0", nil)
+		assertAffectedImport(t, output, "golang.org/x/net/html", "non-stdlib",
+			[]string{"v0.33.0"})
+	})
+
+	t.Run("full/stdlib multi-range vulnerable", func(t *testing.T) {
+		output := pollCallgraphResult(t, testDataRepo, "vuln-stdlib-multi-range", "CVE-2023-45288", "rta")
+		assertCommon(t, output, "true", "GO-2024-2687", "vuln-stdlib-multi-range")
+
+		assertUsedImport(t, output, "net/http", "v1.21.4",
+			[]string{"go mod edit -go=1.21.9", "go mod tidy", "go mod vendor"})
+		assertAffectedImport(t, output, "net/http", "stdlib",
+			[]string{"1.21.9", "1.22.2"})
+	})
+
+	t.Run("full/stdlib second range vulnerable", func(t *testing.T) {
+		output := pollCallgraphResult(t, testDataRepo, "vuln-stdlib-second-range", "CVE-2023-45288", "rta")
+		assertCommon(t, output, "true", "GO-2024-2687", "vuln-stdlib-second-range")
+
+		assertUsedImport(t, output, "net/http", "v1.22.1",
+			[]string{"go mod edit -go=1.22.2", "go mod tidy", "go mod vendor"})
+		assertAffectedImport(t, output, "net/http", "stdlib",
+			[]string{"1.21.9", "1.22.2"})
+	})
+
+	t.Run("full/stdlib between ranges patched", func(t *testing.T) {
+		output := pollCallgraphResult(t, testDataRepo, "patched-stdlib-between-ranges", "CVE-2023-45288", "rta")
+		assertCommon(t, output, "false", "GO-2024-2687", "patched-stdlib-between-ranges")
+
+		assertUsedImport(t, output, "net/http", "v1.21.9", nil)
+		assertAffectedImport(t, output, "net/http", "stdlib",
+			[]string{"1.21.9", "1.22.2"})
+	})
+
+	t.Run("full/grpc multi-range vulnerable", func(t *testing.T) {
+		output := pollCallgraphResult(t, testDataRepo, "vuln-multi-range", "GO-2023-2153", "rta")
+		assertCommon(t, output, "true", "GO-2023-2153", "vuln-multi-range")
+
+		assertUsedImport(t, output, "google.golang.org/grpc", "v1.57.0",
+			[]string{"go get google.golang.org/grpc@v1.57.1", "go mod tidy", "go mod vendor"})
+		assertAffectedImport(t, output, "google.golang.org/grpc", "non-stdlib",
+			[]string{"v1.56.3 1.57.1 1.58.3"})
+	})
+
+	t.Run("full/grpc multi-range patched", func(t *testing.T) {
+		output := pollCallgraphResult(t, testDataRepo, "patched-multi-range", "GO-2023-2153", "rta")
+		assertCommon(t, output, "false", "GO-2023-2153", "patched-multi-range")
+
+		assertUsedImport(t, output, "google.golang.org/grpc", "v1.57.1", nil)
+	})
+
+	t.Run("full/grpc between ranges patched", func(t *testing.T) {
+		output := pollCallgraphResult(t, testDataRepo, "patched-multi-range-between", "GO-2023-2153", "rta")
+		assertCommon(t, output, "false", "GO-2023-2153", "patched-multi-range-between")
+
+		assertUsedImport(t, output, "google.golang.org/grpc", "v1.56.3", nil)
+	})
+
+	t.Run("full/replace directive vulnerable", func(t *testing.T) {
+		output := pollCallgraphResult(t, testDataRepo, "vuln-replace-directive", "CVE-2024-45338", "rta")
+		assertCommon(t, output, "true", "GO-2024-3333", "vuln-replace-directive")
+
+		assertUsedImport(t, output, "golang.org/x/net/html", "v0.23.0",
+			[]string{"go mod edit -replace=golang.org/x/net=golang.org/x/net@v0.33.0", "go mod tidy", "go mod vendor"})
+	})
+
+	t.Run("full/replace directive patched", func(t *testing.T) {
+		output := pollCallgraphResult(t, testDataRepo, "patched-replace-directive", "CVE-2024-45338", "rta")
+		assertCommon(t, output, "false", "GO-2024-3333", "patched-replace-directive")
+
+		assertUsedImport(t, output, "golang.org/x/net/html", "v0.23.0", nil)
+	})
+
+	t.Run("full/indirect dep vulnerable", func(t *testing.T) {
+		output := pollCallgraphResult(t, testDataRepo, "vuln-indirect-dep", "CVE-2024-45338", "rta")
+		assertCommon(t, output, "true", "GO-2024-3333", "vuln-indirect-dep")
+
+		assertUsedImport(t, output, "golang.org/x/net/html", "v0.23.0",
+			[]string{"go get golang.org/x/net@v0.33.0", "go mod tidy", "go mod vendor"})
+		assertAffectedImport(t, output, "golang.org/x/net/html", "non-stdlib",
+			[]string{"v0.33.0"})
+	})
+
+	// --- IsVulnerable-only tests ---
 
 	tests := []struct {
 		name           string
@@ -190,34 +395,9 @@ func TestCallgraphIntegration(t *testing.T) {
 		cve            string
 		algo           string
 		expected       string
+		expectErrors   bool
 	}{
-		// CVE-2024-45338: golang.org/x/net/html (single range, 0→0.33.0)
-		{
-			name:           "x/net single range vulnerable",
-			repo:           testDataRepo,
-			branchOrCommit: "vuln-single-range",
-			cve:            "CVE-2024-45338",
-			algo:           "rta",
-			expected:       "true",
-		},
-		{
-			name:           "x/net single range patched",
-			repo:           testDataRepo,
-			branchOrCommit: "patched-single-range",
-			cve:            "CVE-2024-45338",
-			algo:           "rta",
-			expected:       "false",
-		},
-		{
-			name:           "x/net replace directive vulnerable",
-			repo:           testDataRepo,
-			branchOrCommit: "vuln-replace-directive",
-			cve:            "CVE-2024-45338",
-			algo:           "rta",
-			expected:       "true",
-		},
-
-		// CVE-2024-45337: golang.org/x/crypto/ssh (single range, 0→0.31.0)
+		// CVE-2024-45337: golang.org/x/crypto/ssh
 		{
 			name:           "x/crypto single range vulnerable",
 			repo:           testDataRepo,
@@ -235,15 +415,7 @@ func TestCallgraphIntegration(t *testing.T) {
 			expected:       "false",
 		},
 
-		// CVE-2023-45288: net/http stdlib (multi-range, 0→1.21.9, 1.22.0-0→1.22.2)
-		{
-			name:           "stdlib multi-range vulnerable",
-			repo:           testDataRepo,
-			branchOrCommit: "vuln-stdlib-multi-range",
-			cve:            "CVE-2023-45288",
-			algo:           "rta",
-			expected:       "true",
-		},
+		// stdlib patched
 		{
 			name:           "stdlib multi-range patched",
 			repo:           testDataRepo,
@@ -252,50 +424,8 @@ func TestCallgraphIntegration(t *testing.T) {
 			algo:           "rta",
 			expected:       "false",
 		},
-		{
-			name:           "stdlib multi-range second range vulnerable",
-			repo:           testDataRepo,
-			branchOrCommit: "vuln-stdlib-second-range",
-			cve:            "CVE-2023-45288",
-			algo:           "rta",
-			expected:       "true",
-		},
-		{
-			name:           "stdlib multi-range between ranges patched",
-			repo:           testDataRepo,
-			branchOrCommit: "patched-stdlib-between-ranges",
-			cve:            "CVE-2023-45288",
-			algo:           "rta",
-			expected:       "false",
-		},
 
-		// GO-2023-2153: google.golang.org/grpc (multi-range, 0→1.56.3, 1.57.0→1.57.1, 1.58.0→1.58.3)
-		{
-			name:           "grpc multi-range vulnerable",
-			repo:           testDataRepo,
-			branchOrCommit: "vuln-multi-range",
-			cve:            "GO-2023-2153",
-			algo:           "rta",
-			expected:       "true",
-		},
-		{
-			name:           "grpc multi-range patched",
-			repo:           testDataRepo,
-			branchOrCommit: "patched-multi-range",
-			cve:            "GO-2023-2153",
-			algo:           "rta",
-			expected:       "false",
-		},
-		{
-			name:           "grpc multi-range between ranges patched",
-			repo:           testDataRepo,
-			branchOrCommit: "patched-multi-range-between",
-			cve:            "GO-2023-2153",
-			algo:           "rta",
-			expected:       "false",
-		},
-
-		// Multi-module: svc-a vulnerable, svc-b patched
+		// Multi-module
 		{
 			name:           "multi-module x/net vulnerable",
 			repo:           testDataRepo,
@@ -313,16 +443,6 @@ func TestCallgraphIntegration(t *testing.T) {
 			expected:       "true",
 		},
 
-		// Replace directive pointing to patched version
-		{
-			name:           "x/net replace directive patched",
-			repo:           testDataRepo,
-			branchOrCommit: "patched-replace-directive",
-			cve:            "CVE-2024-45338",
-			algo:           "rta",
-			expected:       "false",
-		},
-
 		// Not a Go repository
 		{
 			name:           "not a go repo",
@@ -331,9 +451,10 @@ func TestCallgraphIntegration(t *testing.T) {
 			cve:            "CVE-2024-45338",
 			algo:           "rta",
 			expected:       "unknown",
+			expectErrors:   true,
 		},
 
-		// Algorithm variations (all should detect the same vulnerability)
+		// Algorithm variations
 		{
 			name:           "algorithm vta",
 			repo:           testDataRepo,
@@ -359,7 +480,7 @@ func TestCallgraphIntegration(t *testing.T) {
 			expected:       "true",
 		},
 
-		// GOCVE ID input (GO-2024-3333 == CVE-2024-45338)
+		// GOCVE ID input
 		{
 			name:           "GOCVE input",
 			repo:           testDataRepo,
@@ -372,7 +493,7 @@ func TestCallgraphIntegration(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			runCallgraphTest(t, tt.repo, tt.branchOrCommit, tt.cve, tt.algo, tt.expected)
+			runCallgraphTest(t, tt.repo, tt.branchOrCommit, tt.cve, tt.algo, tt.expected, tt.expectErrors)
 		})
 	}
 }

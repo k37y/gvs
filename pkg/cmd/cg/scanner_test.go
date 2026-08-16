@@ -1255,6 +1255,49 @@ func TestGetRepoModulePath_Error(t *testing.T) {
 	}
 }
 
+// --- isModuleInGoMod tests ---
+
+func TestIsModuleInGoMod(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte(`module github.com/foo/bar
+
+go 1.22.0
+
+require (
+	golang.org/x/net v0.23.0
+	golang.org/x/crypto v0.23.0
+)
+
+require golang.org/x/sys v0.20.0 // indirect
+`), 0644)
+
+	tests := []struct {
+		pkg  string
+		want bool
+	}{
+		{"golang.org/x/net/html", true},
+		{"golang.org/x/net", true},
+		{"golang.org/x/crypto/ssh", true},
+		{"golang.org/x/sys", true},
+		{"golang.org/x/text", false},
+		{"net/http", false},
+		{"github.com/other/pkg", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.pkg, func(t *testing.T) {
+			if got := isModuleInGoMod(tt.pkg, dir); got != tt.want {
+				t.Errorf("isModuleInGoMod(%q) = %v, want %v", tt.pkg, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsModuleInGoMod_NoGoMod(t *testing.T) {
+	if isModuleInGoMod("golang.org/x/net", "/nonexistent/dir") {
+		t.Error("expected false for missing go.mod")
+	}
+}
+
 // --- getGitBranch tests ---
 
 func TestGetGitBranch(t *testing.T) {
