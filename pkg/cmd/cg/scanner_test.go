@@ -46,6 +46,10 @@ func (f *fakeRunner) RunCommandStdout(dir string, command string, args ...string
 	return f.stdout[k], nil
 }
 
+func (f *fakeRunner) RunCommandWithEnv(dir string, env []string, command string, args ...string) ([]byte, error) {
+	return f.RunCommand(dir, command, args...)
+}
+
 func newFakeRunner() *fakeRunner {
 	return &fakeRunner{
 		stdout:   make(map[string][]byte),
@@ -1059,7 +1063,7 @@ func TestIsNewAt(t *testing.T) {
 
 func TestGetCurrentVersion_NonStdlib(t *testing.T) {
 	fr := newFakeRunner()
-	fr.stdout["go list -f {{if .Module}}{{.Module.Version}}{{end}} golang.org/x/net"] = []byte("v0.23.0\n")
+	fr.combined["go list -f {{if .Module}}{{.Module.Version}}{{end}} golang.org/x/net"] = []byte("v0.23.0\n")
 
 	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
 	got := getCurrentVersion("golang.org/x/net", "/some/dir", ".", r)
@@ -1072,17 +1076,19 @@ func TestGetCurrentVersion_NonStdlib(t *testing.T) {
 }
 
 func TestGetCurrentVersion_Stdlib(t *testing.T) {
-	fr := newFakeRunner()
-	goModJSON := `{"Module":{"Path":"example.com/foo"},"Go":"1.21.4"}`
-	fr.stdout["go mod edit -json"] = []byte(goModJSON)
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/foo\ngo 1.21.4\n"), 0644)
 
 	r := &Result{
-		ScanConfig: ScanConfig{Runner: fr},
+		ScanConfig: ScanConfig{Directory: dir},
 		AffectedImports: map[string]AffectedImportsDetails{
 			"net/http": {Type: "stdlib"},
 		},
+		GoToolchainVersions: map[string]string{
+			".": "v1.21.4",
+		},
 	}
-	got := getCurrentVersion("net/http", "/some/dir", ".", r)
+	got := getCurrentVersion("net/http", dir, ".", r)
 	if got != "v1.21.4" {
 		t.Errorf("getCurrentVersion = %q, want %q", got, "v1.21.4")
 	}
@@ -1091,7 +1097,7 @@ func TestGetCurrentVersion_Stdlib(t *testing.T) {
 func TestGetCurrentVersion_Error(t *testing.T) {
 	fr := newFakeRunner()
 	fr.err["go list -f {{if .Module}}{{.Module.Version}}{{end}} golang.org/x/net"] = fmt.Errorf("exit 1")
-	fr.stdout["go list -f {{if .Module}}{{.Module.Version}}{{end}} golang.org/x/net"] = []byte("some error")
+	fr.combined["go list -f {{if .Module}}{{.Module.Version}}{{end}} golang.org/x/net"] = []byte("some error")
 
 	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
 	got := getCurrentVersion("golang.org/x/net", "/some/dir", ".", r)
@@ -1108,40 +1114,34 @@ func TestGetCurrentVersion_Error(t *testing.T) {
 func TestGetGoToolchainVersion(t *testing.T) {
 	tests := []struct {
 		name    string
-		json    string
+		gomod   string
 		want    string
 		wantErr bool
 	}{
 		{
-			name: "normal",
-			json: `{"Module":{"Path":"example.com/foo"},"Go":"1.21.4"}`,
-			want: "v1.21.4",
+			name:  "normal",
+			gomod: "module example.com/foo\ngo 1.21.4\n",
+			want:  "v1.21.4",
 		},
 		{
-			name: "with v prefix",
-			json: `{"Module":{"Path":"example.com/foo"},"Go":"v1.22.0"}`,
-			want: "v1.22.0",
+			name:  "with v prefix",
+			gomod: "module example.com/foo\ngo 1.22.0\n",
+			want:  "v1.22.0",
 		},
 		{
-			name: "empty go version",
-			json: `{"Module":{"Path":"example.com/foo"},"Go":""}`,
-			want: "",
-		},
-		{
-			name:    "invalid json",
-			json:    `not json`,
-			want:    "",
-			wantErr: true,
+			name:  "no go directive",
+			gomod: "module example.com/foo\n",
+			want:  "",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fr := newFakeRunner()
-			fr.stdout["go mod edit -json"] = []byte(tt.json)
+			dir := t.TempDir()
+			os.WriteFile(filepath.Join(dir, "go.mod"), []byte(tt.gomod), 0644)
 
-			r := &Result{ScanConfig: ScanConfig{Runner: fr}}
-			got := getGoToolchainVersion("/some/dir", r)
+			r := &Result{}
+			got := getGoToolchainVersion(dir, r)
 			if got != tt.want {
 				t.Errorf("getGoToolchainVersion = %q, want %q", got, tt.want)
 			}
@@ -1153,11 +1153,8 @@ func TestGetGoToolchainVersion(t *testing.T) {
 }
 
 func TestGetGoToolchainVersion_CmdError(t *testing.T) {
-	fr := newFakeRunner()
-	fr.err["go mod edit -json"] = fmt.Errorf("exit 1")
-
-	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
-	got := getGoToolchainVersion("/some/dir", r)
+	r := &Result{}
+	got := getGoToolchainVersion("/nonexistent/dir", r)
 	if got != "" {
 		t.Errorf("getGoToolchainVersion = %q, want empty", got)
 	}
@@ -1169,53 +1166,42 @@ func TestGetGoToolchainVersion_CmdError(t *testing.T) {
 // --- getReplaceVersion tests ---
 
 func TestGetReplaceVersion(t *testing.T) {
-	goMod := GoModEdit{
-		Replace: []Replace{
-			{
-				Old: PathVersion{Path: "golang.org/x/net", Version: "v0.23.0"},
-				New: PathVersion{Path: "golang.org/x/net", Version: "v0.33.0"},
-			},
-		},
-	}
-	goModJSON, _ := json.Marshal(goMod)
+	dir := t.TempDir()
+	gomod := `module example.com/test
+go 1.21
 
-	fr := newFakeRunner()
-	fr.stdout["go mod edit -json"] = goModJSON
+require golang.org/x/net v0.23.0
 
-	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
-	path, ver := getReplaceVersion("golang.org/x/net", "/some/dir", r)
+replace golang.org/x/net v0.23.0 => golang.org/x/net v0.33.0
+`
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0644)
+
+	r := &Result{}
+	path, ver := getReplaceVersion("golang.org/x/net", dir, r)
 	if path != "golang.org/x/net" || ver != "v0.33.0" {
 		t.Errorf("getReplaceVersion = (%q, %q), want (%q, %q)", path, ver, "golang.org/x/net", "v0.33.0")
 	}
 }
 
 func TestGetReplaceVersion_NoMatch(t *testing.T) {
-	goMod := GoModEdit{
-		Replace: []Replace{
-			{
-				Old: PathVersion{Path: "other/pkg"},
-				New: PathVersion{Path: "other/pkg", Version: "v1.0.0"},
-			},
-		},
-	}
-	goModJSON, _ := json.Marshal(goMod)
+	dir := t.TempDir()
+	gomod := `module example.com/test
+go 1.21
 
-	fr := newFakeRunner()
-	fr.stdout["go mod edit -json"] = goModJSON
+replace other/pkg => other/pkg v1.0.0
+`
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0644)
 
-	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
-	path, ver := getReplaceVersion("golang.org/x/net", "/some/dir", r)
+	r := &Result{}
+	path, ver := getReplaceVersion("golang.org/x/net", dir, r)
 	if path != "" || ver != "" {
 		t.Errorf("getReplaceVersion = (%q, %q), want empty", path, ver)
 	}
 }
 
 func TestGetReplaceVersion_CmdError(t *testing.T) {
-	fr := newFakeRunner()
-	fr.err["go mod edit -json"] = fmt.Errorf("exit 1")
-
-	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
-	path, ver := getReplaceVersion("golang.org/x/net", "/some/dir", r)
+	r := &Result{}
+	path, ver := getReplaceVersion("golang.org/x/net", "/nonexistent/dir", r)
 	if path != "" || ver != "" {
 		t.Errorf("getReplaceVersion = (%q, %q), want empty", path, ver)
 	}
@@ -1225,7 +1211,7 @@ func TestGetReplaceVersion_CmdError(t *testing.T) {
 
 func TestGetModPath(t *testing.T) {
 	fr := newFakeRunner()
-	fr.stdout["go list -f {{if .Module}}{{.Module.Path}}{{end}} golang.org/x/net/html"] = []byte("golang.org/x/net\n")
+	fr.combined["go list -f {{if .Module}}{{.Module.Path}}{{end}} golang.org/x/net/html"] = []byte("golang.org/x/net\n")
 
 	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
 	got := getModPath("golang.org/x/net/html", "/some/dir", r)
@@ -1251,22 +1237,19 @@ func TestGetModPath_Error(t *testing.T) {
 // --- getRepoModulePath tests ---
 
 func TestGetRepoModulePath(t *testing.T) {
-	fr := newFakeRunner()
-	fr.stdout["go mod edit -json"] = []byte(`{"Module":{"Path":"github.com/foo/bar"}}`)
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module github.com/foo/bar\ngo 1.21\n"), 0644)
 
-	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
-	got := getRepoModulePath("/some/dir", r)
+	r := &Result{}
+	got := getRepoModulePath(dir, r)
 	if got != "github.com/foo/bar" {
 		t.Errorf("getRepoModulePath = %q, want %q", got, "github.com/foo/bar")
 	}
 }
 
 func TestGetRepoModulePath_Error(t *testing.T) {
-	fr := newFakeRunner()
-	fr.err["go mod edit -json"] = fmt.Errorf("exit 1")
-
-	r := &Result{ScanConfig: ScanConfig{Runner: fr}}
-	got := getRepoModulePath("/some/dir", r)
+	r := &Result{}
+	got := getRepoModulePath("/nonexistent/dir", r)
 	if got != "" {
 		t.Errorf("getRepoModulePath = %q, want empty", got)
 	}

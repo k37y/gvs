@@ -8,6 +8,7 @@ import (
 type CommandRunner interface {
 	RunCommand(dir string, command string, args ...string) ([]byte, error)
 	RunCommandStdout(dir string, command string, args ...string) ([]byte, error)
+	RunCommandWithEnv(dir string, env []string, command string, args ...string) ([]byte, error)
 }
 
 type DefaultRunner struct{}
@@ -25,6 +26,14 @@ func (DefaultRunner) RunCommandStdout(dir string, command string, args ...string
 	cmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off")
 	cmd.Dir = dir
 	out, err := cmd.Output()
+	return out, err
+}
+
+func (DefaultRunner) RunCommandWithEnv(dir string, env []string, command string, args ...string) ([]byte, error) {
+	cmd := exec.Command(command, args...)
+	cmd.Env = env
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
 	return out, err
 }
 

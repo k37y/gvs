@@ -40,6 +40,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/semver"
 	"golang.org/x/tools/go/callgraph"
 	"golang.org/x/tools/go/callgraph/cha"
@@ -184,7 +185,6 @@ func Prepare(r *Result) bool {
 
 	r.progress("Phase 3/6: Discovering Go modules and main files...")
 	findMainGoFiles(r)
-	cacheGoToolchainVersions(r)
 	r.progress("Phase 4/6: Getting git branch information...")
 	getGitBranch(r)
 	r.progress("Phase 5/6: Getting git repository URL...")
@@ -492,12 +492,13 @@ func findMainGoFiles(res *Result) {
 		res.Errors = append(res.Errors, errMsg)
 	}
 
+	cacheGoToolchainVersions(res, modDirs)
+
 	for _, modDir := range modDirs {
-		cmd := "go"
 		args := []string{"list", "-f", `{{if eq .Name "main"}}{{.Name}}: {{.Dir}}{{end}}`, "./..."}
-		out, err := res.runner().RunCommand(modDir, cmd, args...)
+		out, err := res.runner().RunCommandWithEnv(modDir, res.packagesEnv(modDir), "go", args...)
 		if err != nil {
-			errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), modDir, strings.TrimSpace(string(out)))
+			errMsg := fmt.Sprintf("Failed to run go %s in %s: %s", strings.Join(args, " "), modDir, strings.TrimSpace(string(out)))
 			res.Errors = append(res.Errors, errMsg)
 			continue
 		}
@@ -538,7 +539,6 @@ func findMainGoFiles(res *Result) {
 		result[modKey] = sets
 	}
 
-	res.Files = make(map[string][][]string)
 	res.Files = result
 	res.progress("  ✓ Directory and fileset discovery complete")
 }
@@ -742,27 +742,19 @@ func (r *Result) checkDirectUsage(pkg, dir string, symbols []string, files []str
 	return "false"
 }
 
-// getRepoModulePath extracts the module path from go.mod in the given directory
 func getRepoModulePath(dir string, result *Result) string {
-	cmd := "go"
-	args := []string{"mod", "edit", "-json"}
-	out, err := result.runner().RunCommandStdout(dir, cmd, args...)
+	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
 	if err != nil {
-		return "" // Return empty string to skip filtering
-	}
-
-	// GoModEdit doesn't have Module field, so we need to parse manually
-	type modInfo struct {
-		Module struct {
-			Path string `json:"Path"`
-		} `json:"Module"`
-	}
-	var info modInfo
-	if err := json.Unmarshal(out, &info); err != nil {
 		return ""
 	}
-
-	return info.Module.Path
+	f, err := modfile.Parse("go.mod", data, nil)
+	if err != nil {
+		return ""
+	}
+	if f.Module != nil {
+		return f.Module.Mod.Path
+	}
+	return ""
 }
 
 // GenerateCallGraphForVisualization is a public wrapper for call graph generation for visualization
@@ -783,18 +775,26 @@ func (r *Result) generateCallGraphWithLib(dir string, files []string) (string, e
 	return output, err
 }
 
+func (r *Result) packagesEnv(dir string) []string {
+	env := append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off")
+	for modDir, ver := range r.GoToolchainVersions {
+		fullDir := filepath.Join(r.Directory, modDir)
+		if fullDir == dir || strings.HasPrefix(dir, fullDir+string(filepath.Separator)) {
+			env = append(env, "GOTOOLCHAIN=go"+strings.TrimPrefix(ver, "v"))
+			break
+		}
+	}
+	return env
+}
+
 // generateCallGraphWithLibInternal creates a call graph and returns string output, SSA program, and graph object
 func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (string, *ssa.Program, *callgraph.Graph, error) {
-	// Load packages with comprehensive mode to handle all dependencies
-	// Use "./..." to load all packages in the module - this is required for
-	// RTA to properly track reflection-based calls like reflect.ValueOf(func).Call()
 	cfg := &packages.Config{
-		Mode: packages.LoadAllSyntax, // This loads everything needed for analysis
+		Mode: packages.LoadAllSyntax,
 		Dir:  dir,
-		Env:  append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off"),
+		Env:  r.packagesEnv(dir),
 	}
 
-	// Load all packages in the module (like callgraph binary does by default)
 	pkgs, err := packages.Load(cfg, "./...")
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("failed to load packages: %v", err)
@@ -804,7 +804,6 @@ func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (s
 		return "", nil, nil, fmt.Errorf("no packages loaded")
 	}
 
-	// Check for package errors and try to filter out packages with issues
 	var validPkgs []*packages.Package
 	for _, pkg := range pkgs {
 		if len(pkg.Errors) == 0 && pkg.Types != nil && pkg.TypesInfo != nil {
@@ -812,13 +811,11 @@ func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (s
 		}
 	}
 
-	// If no valid packages, try loading with less strict requirements
 	if len(validPkgs) == 0 {
-		// Try with just the module root pattern with less strict mode
 		cfg = &packages.Config{
 			Mode: packages.LoadSyntax,
 			Dir:  dir,
-			Env:  append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off"),
+			Env:  r.packagesEnv(dir),
 		}
 
 		pkgs, err = packages.Load(cfg, "./...")
@@ -1140,80 +1137,69 @@ func getCurrentVersion(pkg string, dir string, modDir string, result *Result) st
 		}
 	}
 
-	cmd := "go"
 	args := []string{"list", "-f", "{{if .Module}}{{.Module.Version}}{{end}}", pkg}
-	out, err := result.runner().RunCommandStdout(dir, cmd, args...)
+	out, err := result.runner().RunCommandWithEnv(dir, result.packagesEnv(dir), "go", args...)
 	if err != nil {
-		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
+		errMsg := fmt.Sprintf("Failed to run go %s in %s: %s", strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
 		result.Errors = append(result.Errors, errMsg)
 		return ""
 	}
 	return strings.TrimSpace(string(out))
 }
 
-func cacheGoToolchainVersions(r *Result) {
+func cacheGoToolchainVersions(r *Result, modDirs []string) {
 	r.GoToolchainVersions = make(map[string]string)
-	for modDir := range r.Files {
-		fullDir := filepath.Join(r.Directory, modDir)
+	for _, fullDir := range modDirs {
+		modKey, err := filepath.Rel(r.Directory, fullDir)
+		if err != nil {
+			modKey = fullDir
+		}
 		ver := getGoToolchainVersion(fullDir, r)
 		if ver != "" {
-			r.GoToolchainVersions[modDir] = ver
+			r.GoToolchainVersions[modKey] = ver
 		}
 	}
 }
 
 func getGoToolchainVersion(dir string, result *Result) string {
-	cmd := "go"
-	args := []string{"mod", "edit", "-json"}
-	out, err := result.runner().RunCommandStdout(dir, cmd, args...)
+	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
 	if err != nil {
-		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
-		result.Errors = append(result.Errors, errMsg)
+		result.Errors = append(result.Errors, fmt.Sprintf("Failed to read go.mod in %s: %v", dir, err))
 		return ""
 	}
 
-	var goModEdit GoModEdit
-	err = json.Unmarshal(out, &goModEdit)
+	f, err := modfile.Parse("go.mod", data, nil)
 	if err != nil {
-		errMsg := fmt.Sprintf("Failed to parse go.mod JSON in %s: %v", dir, err)
-		result.Errors = append(result.Errors, errMsg)
+		result.Errors = append(result.Errors, fmt.Sprintf("Failed to parse go.mod in %s: %v", dir, err))
 		return ""
 	}
 
-	// Get the Go version from go.mod
-	if goModEdit.Go != "" {
-		goVersion := goModEdit.Go
-		// Add 'v' prefix for semver compatibility if not present
-		if !strings.HasPrefix(goVersion, "v") {
-			goVersion = "v" + goVersion
+	if f.Go != nil && f.Go.Version != "" {
+		v := f.Go.Version
+		if !strings.HasPrefix(v, "v") {
+			v = "v" + v
 		}
-		return goVersion
+		return v
 	}
 
 	return ""
 }
 
 func getReplaceVersion(pkg string, dir string, result *Result) (string, string) {
-	cmd := "go"
-	args := []string{"mod", "edit", "-json"}
-	out, err := result.runner().RunCommandStdout(dir, cmd, args...)
+	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
 	if err != nil {
-		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
-		result.Errors = append(result.Errors, errMsg)
+		result.Errors = append(result.Errors, fmt.Sprintf("Failed to read go.mod in %s: %v", dir, err))
 		return "", ""
 	}
 
-	var goModEdit GoModEdit
-	err = json.Unmarshal(out, &goModEdit)
+	f, err := modfile.Parse("go.mod", data, nil)
 	if err != nil {
 		return "", ""
 	}
 
-	for _, r := range goModEdit.Replace {
-		if r.Old.Path == pkg {
-			if r.New.Version != "" {
-				return r.New.Path, r.New.Version
-			}
+	for _, r := range f.Replace {
+		if r.Old.Path == pkg && r.New.Version != "" {
+			return r.New.Path, r.New.Version
 		}
 	}
 
@@ -1269,11 +1255,10 @@ func getFixedVersion(id, pkg string, result *Result) []string {
 }
 
 func getModPath(pkg, dir string, result *Result) string {
-	cmd := "go"
 	args := []string{"list", "-f", "{{if .Module}}{{.Module.Path}}{{end}}", pkg}
-	out, err := result.runner().RunCommandStdout(dir, cmd, args...)
+	out, err := result.runner().RunCommandWithEnv(dir, result.packagesEnv(dir), "go", args...)
 	if err != nil {
-		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
+		errMsg := fmt.Sprintf("Failed to run go %s in %s: %s", strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
 		result.Errors = append(result.Errors, errMsg)
 		return ""
 	}
