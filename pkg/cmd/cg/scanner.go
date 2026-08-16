@@ -336,28 +336,41 @@ func checkDirVulnerability(curVer, repVer string, used, unknown, isStdlib bool, 
 	return vr
 }
 
-func isModuleInGoMod(pkg, dir string) bool {
+func findModuleInGoMod(pkg, dir string) (modPath, version string, found bool) {
 	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
 	if err != nil {
-		return false
+		return "", "", false
 	}
 	f, err := modfile.Parse("go.mod", data, nil)
 	if err != nil {
-		return false
+		return "", "", false
 	}
+	var best string
+	var bestVer string
 	for _, req := range f.Require {
 		if pkg == req.Mod.Path || strings.HasPrefix(pkg, req.Mod.Path+"/") {
-			return true
+			if len(req.Mod.Path) > len(best) {
+				best = req.Mod.Path
+				bestVer = req.Mod.Version
+			}
 		}
 	}
-	return false
+	if best != "" {
+		return best, bestVer, true
+	}
+	return "", "", false
+}
+
+func isModuleInGoMod(pkg, dir string) bool {
+	_, _, found := findModuleInGoMod(pkg, dir)
+	return found
 }
 
 func (j Job) isVulnerable(result *Result) *Result {
 	dir := filepath.Join(result.Directory, j.Dir)
 
 	curVer := getCurrentVersion(j.Package, dir, j.Dir, result)
-	modPath := getModPath(j.Package, dir, result)
+	modPath := getModPath(j.Package, dir)
 	repPath, repVer := getReplaceVersion(modPath, dir, result)
 
 	var rawFixVer []string
@@ -1160,18 +1173,11 @@ func getCurrentVersion(pkg string, dir string, modDir string, result *Result) st
 		}
 	}
 
-	if !isModuleInGoMod(pkg, dir) {
+	_, ver, found := findModuleInGoMod(pkg, dir)
+	if !found {
 		return ""
 	}
-
-	args := []string{"list", "-f", "{{if .Module}}{{.Module.Version}}{{end}}", pkg}
-	out, err := result.runner().RunCommandWithEnv(dir, result.packagesEnv(dir), "go", args...)
-	if err != nil {
-		errMsg := fmt.Sprintf("Failed to run go %s in %s: %s", strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
-		result.Errors = append(result.Errors, errMsg)
-		return ""
-	}
-	return strings.TrimSpace(string(out))
+	return ver
 }
 
 func cacheGoToolchainVersions(r *Result, modDirs []string) {
@@ -1281,19 +1287,12 @@ func getFixedVersion(id, pkg string, result *Result) []string {
 	return nil
 }
 
-func getModPath(pkg, dir string, result *Result) string {
-	if !isModuleInGoMod(pkg, dir) {
+func getModPath(pkg, dir string) string {
+	path, _, found := findModuleInGoMod(pkg, dir)
+	if !found {
 		return ""
 	}
-
-	args := []string{"list", "-f", "{{if .Module}}{{.Module.Path}}{{end}}", pkg}
-	out, err := result.runner().RunCommandWithEnv(dir, result.packagesEnv(dir), "go", args...)
-	if err != nil {
-		errMsg := fmt.Sprintf("Failed to run go %s in %s: %s", strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
-		result.Errors = append(result.Errors, errMsg)
-		return ""
-	}
-	return strings.TrimSpace(string(out))
+	return path
 }
 
 func getGitBranch(result *Result) {
