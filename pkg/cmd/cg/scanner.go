@@ -204,6 +204,7 @@ func Worker(jobs <-chan Job, results chan<- *Result, wg *sync.WaitGroup, result 
 	for job := range jobs {
 		dir := filepath.Join(result.Directory, job.Dir)
 		if result.AffectedImports[job.Package].Type != "stdlib" && !isModuleInGoMod(job.Package, dir) {
+			results <- &Result{IsVulnerable: "false"}
 			continue
 		}
 		res := job.isVulnerable(result)
