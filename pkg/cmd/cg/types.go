@@ -35,8 +35,7 @@ type UsedImportsDetails struct {
 	ReplaceModule  string              `json:"ReplaceModule,omitempty"`
 	ReplaceVersion string              `json:"ReplaceVersion,omitempty"`
 	FixCommands    []string            `json:"FixCommands,omitempty"`
-	Dir            []string            `json:"Dir,omitempty"`
-	Paths          [][]*callgraph.Node `json:"-"` // For visualization, not serialized
+	Paths          [][]*callgraph.Node `json:"-"`
 }
 
 // ReflectionRisk represents a potential vulnerability through reflection usage
@@ -69,7 +68,7 @@ type ScanConfig struct {
 type Result struct {
 	ScanConfig
 	IsVulnerable       string
-	UsedImports        map[string]UsedImportsDetails
+	UsedImports        map[string]map[string]UsedImportsDetails
 	Files              map[string][][]string
 	AffectedImports    map[string]AffectedImportsDetails
 	GoCVE              string

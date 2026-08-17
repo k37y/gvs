@@ -370,10 +370,12 @@ func TestFormatCallTraces_WithPaths(t *testing.T) {
 	node2 := &callgraph.Node{Func: vulnFn, ID: 1}
 
 	result := &Result{
-		UsedImports: map[string]UsedImportsDetails{
-			"example.com/vuln": {
-				Symbols: []string{"BadFunc"},
-				Paths:   [][]*callgraph.Node{{node1, node2}},
+		UsedImports: map[string]map[string]UsedImportsDetails{
+			".": {
+				"example.com/vuln": {
+					Symbols: []string{"BadFunc"},
+					Paths:   [][]*callgraph.Node{{node1, node2}},
+				},
 			},
 		},
 	}

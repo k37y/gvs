@@ -23,7 +23,6 @@ package cg
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"go/ast"
@@ -382,6 +381,9 @@ func (j Job) isVulnerable(result *Result) *Result {
 		if fixPkg == "" && result.AffectedImports[j.Package].Type == "stdlib" {
 			fixPkg = "stdlib"
 		}
+		if fixPkg == "" {
+			fixPkg = j.Package
+		}
 		rawFixVer = getFixedVersion(result.GoCVE, fixPkg, result)
 	}
 	result.Mu.Unlock()
@@ -395,7 +397,7 @@ func (j Job) isVulnerable(result *Result) *Result {
 	used := false
 	unknown := false
 
-	isUsed := result.isSymbolUsed(j.Package, dir, j.Symbols, j.Files)
+	isUsed := result.isSymbolUsed(j.Package, dir, j.Dir, j.Symbols, j.Files)
 	switch isUsed {
 	case "true":
 		used = true
@@ -420,9 +422,12 @@ func (j Job) isVulnerable(result *Result) *Result {
 
 	result.Mu.Lock()
 	if result.UsedImports == nil {
-		result.UsedImports = make(map[string]UsedImportsDetails)
+		result.UsedImports = make(map[string]map[string]UsedImportsDetails)
 	}
-	uentry := result.UsedImports[j.Package]
+	if result.UsedImports[j.Dir] == nil {
+		result.UsedImports[j.Dir] = make(map[string]UsedImportsDetails)
+	}
+	uentry := result.UsedImports[j.Dir][j.Package]
 	uentry.CurrentVersion = curVer
 	if repVer != "" {
 		uentry.ReplaceModule = repPath
@@ -441,9 +446,6 @@ func (j Job) isVulnerable(result *Result) *Result {
 		result.AffectedImports[j.Package].Type == "stdlib", goToolchainVersion, rawFixVer)
 
 	result.IsVulnerable = vr.Status
-	if vr.DirVulnerable {
-		uentry.Dir = append(uentry.Dir, j.Dir)
-	}
 	if vr.NeedsReplaceFix && vr.FixVersion != "" {
 		uentry.FixCommands = []string{
 			fmt.Sprintf("go mod edit -replace=%s=%s@%s", modPath, modPath, vr.FixVersion),
@@ -466,7 +468,7 @@ func (j Job) isVulnerable(result *Result) *Result {
 			}
 		}
 	}
-	result.UsedImports[j.Package] = uentry
+	result.UsedImports[j.Dir][j.Package] = uentry
 	result.Mu.Unlock()
 
 	return result
@@ -531,36 +533,39 @@ func findMainGoFiles(res *Result) {
 	cacheGoToolchainVersions(res, modDirs)
 
 	for _, modDir := range modDirs {
-		args := []string{"list", "-f", `{{if eq .Name "main"}}{{.Name}}: {{.Dir}}{{end}}`, "./..."}
-		out, err := res.runner().RunCommandWithEnv(modDir, res.packagesEnv(modDir), "go", args...)
-		if err != nil {
-			errMsg := fmt.Sprintf("Failed to run go %s in %s: %s", strings.Join(args, " "), modDir, strings.TrimSpace(string(out)))
-			res.Errors = append(res.Errors, errMsg)
-			continue
-		}
-
 		modKey, err := filepath.Rel(res.Directory, modDir)
 		if err != nil {
 			modKey = modDir
 		}
 
-		var sets [][]string
+		mainDirs := make(map[string]bool)
+		filepath.WalkDir(modDir, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() && (strings.HasPrefix(d.Name(), ".") || d.Name() == "vendor") {
+				return filepath.SkipDir
+			}
+			if d.IsDir() || !strings.HasSuffix(d.Name(), ".go") || strings.HasSuffix(d.Name(), "_test.go") {
+				return nil
+			}
+			fset := token.NewFileSet()
+			parsed, parseErr := parser.ParseFile(fset, path, nil, parser.PackageClauseOnly)
+			if parseErr != nil {
+				return nil
+			}
+			if parsed.Name.Name == "main" {
+				mainDirs[filepath.Dir(path)] = true
+			}
+			return nil
+		})
 
-		scanner := bufio.NewScanner(bytes.NewReader(out))
-		for scanner.Scan() {
-			line := scanner.Text()
-			if !strings.HasPrefix(line, "main") {
-				continue
-			}
-			parts := strings.SplitN(line, ": ", 2)
-			if len(parts) != 2 {
-				continue
-			}
-			dirPath := parts[1]
+		var sets [][]string
+		for dirPath := range mainDirs {
 			files, _ := filepath.Glob(filepath.Join(dirPath, "*.go"))
 			var group []string
 			for _, file := range files {
-				if strings.HasSuffix(file, "_test.go") || strings.Contains(filepath.Base(file), "windows") {
+				if strings.HasSuffix(file, "_test.go") {
 					continue
 				}
 				rel, _ := filepath.Rel(modDir, file)
@@ -654,7 +659,7 @@ func fetchAffectedSymbols(result *Result) {
 	result.progress(fmt.Sprintf("  ✓ Affected symbols fetched: %d symbols across %d packages", symbolCount, len(imports)))
 }
 
-func (r *Result) isSymbolUsed(pkg, dir string, symbols, files []string) string {
+func (r *Result) isSymbolUsed(pkg, dir, modDir string, symbols, files []string) string {
 	// Store original symbols for reflection analysis
 	originalSymbols := make([]string, len(symbols))
 	copy(originalSymbols, symbols)
@@ -681,7 +686,7 @@ func (r *Result) isSymbolUsed(pkg, dir string, symbols, files []string) string {
 	}
 
 	// Check for direct usage via call graph analysis
-	directUsage := r.checkDirectUsage(pkg, dir, symbols, files)
+	directUsage := r.checkDirectUsage(pkg, dir, modDir, symbols, files)
 
 	// Check for reflection-based usage
 	reflectionRisks := r.detectReflectionVulnerabilities(pkg, dir, originalSymbols, files)
@@ -700,7 +705,7 @@ func (r *Result) isSymbolUsed(pkg, dir string, symbols, files []string) string {
 }
 
 // checkDirectUsage handles the call graph analysis using BFS on the callgraph.Graph directly
-func (r *Result) checkDirectUsage(pkg, dir string, symbols []string, files []string) string {
+func (r *Result) checkDirectUsage(pkg, dir, modDir string, symbols []string, files []string) string {
 	progress := r.Progress
 
 	// Compute relative directory for progress messages
@@ -714,7 +719,7 @@ func (r *Result) checkDirectUsage(pkg, dir string, symbols []string, files []str
 	}
 
 	// Use callgraph library to build the graph directly
-	_, prog, cg, err := r.generateCallGraphWithLibInternal(dir, files)
+	_, prog, cg, loadedPkgs, err := r.generateCallGraphWithLibInternal(dir, files)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to generate call graph in %s: %v", dir, err)
 		r.Errors = append(r.Errors, errMsg)
@@ -754,12 +759,15 @@ func (r *Result) checkDirectUsage(pkg, dir string, symbols []string, files []str
 			if path, found := findPathToSymbolFromAny(entryPoints, pkg, sym, progress); found {
 				r.Mu.Lock()
 				if r.UsedImports == nil {
-					r.UsedImports = make(map[string]UsedImportsDetails)
+					r.UsedImports = make(map[string]map[string]UsedImportsDetails)
 				}
-				entry := r.UsedImports[pkg]
+				if r.UsedImports[modDir] == nil {
+					r.UsedImports[modDir] = make(map[string]UsedImportsDetails)
+				}
+				entry := r.UsedImports[modDir][pkg]
 				entry.Symbols = append(entry.Symbols, sym)
 				entry.Paths = append(entry.Paths, path)
-				r.UsedImports[pkg] = entry
+				r.UsedImports[modDir][pkg] = entry
 				r.Mu.Unlock()
 
 				mu.Lock()
@@ -775,7 +783,44 @@ func (r *Result) checkDirectUsage(pkg, dir string, symbols []string, files []str
 	if foundAny {
 		return "true"
 	}
+
+	if warnings := checkIgnoredFiles(loadedPkgs, pkg); len(warnings) > 0 {
+		r.Mu.Lock()
+		r.Errors = append(r.Errors, warnings...)
+		r.Mu.Unlock()
+		return "unknown"
+	}
+
 	return "false"
+}
+
+// checkIgnoredFiles parses files excluded by build constraints and returns
+// warnings for any that import the vulnerable package.
+func checkIgnoredFiles(pkgs []*packages.Package, vulnPkg string) []string {
+	var warnings []string
+	seen := make(map[string]bool)
+	for _, pkg := range pkgs {
+		for _, f := range pkg.IgnoredFiles {
+			if seen[f] {
+				continue
+			}
+			seen[f] = true
+			fset := token.NewFileSet()
+			parsed, err := parser.ParseFile(fset, f, nil, parser.ImportsOnly)
+			if err != nil {
+				continue
+			}
+			for _, imp := range parsed.Imports {
+				importPath := strings.Trim(imp.Path.Value, `"`)
+				if importPath == vulnPkg || strings.HasPrefix(importPath, vulnPkg+"/") {
+					warnings = append(warnings, fmt.Sprintf(
+						"File %s imports %s but was excluded by build constraints. Need manual analysis",
+						f, importPath))
+				}
+			}
+		}
+	}
+	return warnings
 }
 
 func getRepoModulePath(dir string, result *Result) string {
@@ -795,19 +840,19 @@ func getRepoModulePath(dir string, result *Result) string {
 
 // GenerateCallGraphForVisualization is a public wrapper for call graph generation for visualization
 func (r *Result) GenerateCallGraphForVisualization(dir string, files []string) (string, error) {
-	output, _, _, err := r.generateCallGraphWithLibInternal(dir, files)
+	output, _, _, _, err := r.generateCallGraphWithLibInternal(dir, files)
 	return output, err
 }
 
 // GenerateCallGraphObject returns the callgraph.Graph object for direct manipulation
 func (r *Result) GenerateCallGraphObject(dir string, files []string) (*callgraph.Graph, error) {
-	_, _, cg, err := r.generateCallGraphWithLibInternal(dir, files)
+	_, _, cg, _, err := r.generateCallGraphWithLibInternal(dir, files)
 	return cg, err
 }
 
 // generateCallGraphWithLib creates a call graph using the callgraph library (backward compat wrapper)
 func (r *Result) generateCallGraphWithLib(dir string, files []string) (string, error) {
-	output, _, _, err := r.generateCallGraphWithLibInternal(dir, files)
+	output, _, _, _, err := r.generateCallGraphWithLibInternal(dir, files)
 	return output, err
 }
 
@@ -823,8 +868,8 @@ func (r *Result) packagesEnv(dir string) []string {
 	return env
 }
 
-// generateCallGraphWithLibInternal creates a call graph and returns string output, SSA program, and graph object
-func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (string, *ssa.Program, *callgraph.Graph, error) {
+// generateCallGraphWithLibInternal creates a call graph and returns string output, SSA program, graph object, and loaded packages
+func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (string, *ssa.Program, *callgraph.Graph, []*packages.Package, error) {
 	cfg := &packages.Config{
 		Mode: packages.LoadAllSyntax,
 		Dir:  dir,
@@ -833,11 +878,11 @@ func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (s
 
 	pkgs, err := packages.Load(cfg, "./...")
 	if err != nil {
-		return "", nil, nil, fmt.Errorf("failed to load packages: %v", err)
+		return "", nil, nil, nil, fmt.Errorf("failed to load packages: %v", err)
 	}
 
 	if len(pkgs) == 0 {
-		return "", nil, nil, fmt.Errorf("no packages loaded")
+		return "", nil, nil, nil, fmt.Errorf("no packages loaded")
 	}
 
 	var validPkgs []*packages.Package
@@ -856,7 +901,7 @@ func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (s
 
 		pkgs, err = packages.Load(cfg, "./...")
 		if err != nil {
-			return "", nil, nil, fmt.Errorf("failed to load packages with fallback: %v", err)
+			return "", nil, nil, nil, fmt.Errorf("failed to load packages with fallback: %v", err)
 		}
 
 		for _, pkg := range pkgs {
@@ -867,7 +912,7 @@ func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (s
 	}
 
 	if len(validPkgs) == 0 {
-		return "", nil, nil, fmt.Errorf("no valid packages found after loading")
+		return "", nil, nil, nil, fmt.Errorf("no valid packages found after loading")
 	}
 
 	// Create SSA program with InstantiateGenerics for call graph analysis
@@ -896,7 +941,7 @@ func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (s
 		}
 	}
 
-	return output.String(), prog, cg, nil
+	return output.String(), prog, cg, pkgs, nil
 }
 
 // extractEntryPoints finds all main functions in the call graph (string-based, for backward compat)
@@ -1263,7 +1308,7 @@ func getFixedVersion(id, pkg string, result *Result) []string {
 	}
 
 	for _, a := range detail.Affected {
-		if a.Package.Name == pkg {
+		if a.Package.Name == pkg || strings.HasPrefix(pkg, a.Package.Name+"/") {
 			for _, r := range a.Ranges {
 				if r.Type == "SEMVER" {
 					return formatIntroducedFixed(r.Events)

@@ -50,6 +50,9 @@ func (r *claudeResponse) GetIsVulnerable() string {
 }
 
 func VerifyAndSummarizeWithClaude(result *Result, repoDir string) {
+	if os.Getenv("GVS_SKIP_CLAUDE") == "1" {
+		return
+	}
 	cfg, found := loadClaudeConfig()
 	if !found {
 		return
@@ -283,39 +286,41 @@ func FormatCallTraces(result *Result) string {
 	}
 
 	var b strings.Builder
-	for pkg, details := range result.UsedImports {
-		for i, sym := range details.Symbols {
-			if i >= len(details.Paths) {
-				continue
-			}
-			path := details.Paths[i]
-			if len(path) == 0 {
-				continue
-			}
-			b.WriteString(fmt.Sprintf("Trace for %s.%s:\n", pkg, sym))
-			for j, node := range path {
-				funcName := "unknown"
-				location := "unknown"
-				if node.Func != nil {
-					func() {
-						defer func() { recover() }()
-						funcName = node.Func.String()
-					}()
-					if node.Func.Prog != nil {
-						pos := node.Func.Prog.Fset.Position(node.Func.Pos())
-						if pos.IsValid() {
-							location = fmt.Sprintf("%s:%d", pos.Filename, pos.Line)
+	for _, pkgs := range result.UsedImports {
+		for pkg, details := range pkgs {
+			for i, sym := range details.Symbols {
+				if i >= len(details.Paths) {
+					continue
+				}
+				path := details.Paths[i]
+				if len(path) == 0 {
+					continue
+				}
+				b.WriteString(fmt.Sprintf("Trace for %s.%s:\n", pkg, sym))
+				for j, node := range path {
+					funcName := "unknown"
+					location := "unknown"
+					if node.Func != nil {
+						func() {
+							defer func() { recover() }()
+							funcName = node.Func.String()
+						}()
+						if node.Func.Prog != nil {
+							pos := node.Func.Prog.Fset.Position(node.Func.Pos())
+							if pos.IsValid() {
+								location = fmt.Sprintf("%s:%d", pos.Filename, pos.Line)
+							}
 						}
 					}
-				}
-				b.WriteString(fmt.Sprintf("  %d. %s at %s\n", j+1, funcName, location))
+					b.WriteString(fmt.Sprintf("  %d. %s at %s\n", j+1, funcName, location))
 
-				if j < len(path)-1 {
-					edgeDesc := findEdgeDescription(path[j], path[j+1])
-					b.WriteString(fmt.Sprintf("     -> [%s]\n", edgeDesc))
+					if j < len(path)-1 {
+						edgeDesc := findEdgeDescription(path[j], path[j+1])
+						b.WriteString(fmt.Sprintf("     -> [%s]\n", edgeDesc))
+					}
 				}
+				b.WriteString("\n")
 			}
-			b.WriteString("\n")
 		}
 	}
 	return b.String()
@@ -1549,26 +1554,25 @@ func loadSkillPrompt(result *Result) (string, bool) {
 }
 
 func buildVerificationPrompt(result *Result, skillTemplate string, sourceSnippets map[string]string) (string, error) {
-	// Strip verdict-leaking fields (Symbols, FixCommands) from UsedImports
-	// to avoid anchoring Claude's independent assessment
 	type sanitizedUsedImports struct {
 		CurrentVersion string `json:"CurrentVersion,omitempty"`
 		ReplaceModule  string `json:"ReplaceModule,omitempty"`
 		ReplaceVersion string `json:"ReplaceVersion,omitempty"`
-		Dir            []string `json:"Dir,omitempty"`
 	}
-	sanitized := make(map[string]sanitizedUsedImports)
-	for pkg, details := range result.UsedImports {
-		sanitized[pkg] = sanitizedUsedImports{
-			CurrentVersion: details.CurrentVersion,
-			ReplaceModule:  details.ReplaceModule,
-			ReplaceVersion: details.ReplaceVersion,
-			Dir:            details.Dir,
+	sanitized := make(map[string]map[string]sanitizedUsedImports)
+	for dir, pkgs := range result.UsedImports {
+		sanitized[dir] = make(map[string]sanitizedUsedImports)
+		for pkg, details := range pkgs {
+			sanitized[dir][pkg] = sanitizedUsedImports{
+				CurrentVersion: details.CurrentVersion,
+				ReplaceModule:  details.ReplaceModule,
+				ReplaceVersion: details.ReplaceVersion,
+			}
 		}
 	}
 
 	promptResult := struct {
-		UsedImports     map[string]sanitizedUsedImports   `json:"UsedImports,omitempty"`
+		UsedImports     map[string]map[string]sanitizedUsedImports `json:"UsedImports,omitempty"`
 		AffectedImports map[string]AffectedImportsDetails `json:"AffectedImports,omitempty"`
 		GoCVE           string                            `json:"GoCVE"`
 		CVE             string                            `json:"CVE"`
@@ -1642,21 +1646,23 @@ func collectRelevantSource(result *Result, repoDir string) map[string]string {
 	addFile("go.mod")
 
 	// 2. Files along call graph paths (highest signal -- actual vulnerability paths)
-	for _, details := range result.UsedImports {
-		for _, path := range details.Paths {
-			for _, node := range path {
-				if node.Func == nil || node.Func.Prog == nil {
-					continue
+	for _, pkgs := range result.UsedImports {
+		for _, details := range pkgs {
+			for _, path := range details.Paths {
+				for _, node := range path {
+					if node.Func == nil || node.Func.Prog == nil {
+						continue
+					}
+					pos := node.Func.Prog.Fset.Position(node.Func.Pos())
+					if !pos.IsValid() || pos.Filename == "" {
+						continue
+					}
+					relPath, err := filepath.Rel(repoDir, pos.Filename)
+					if err != nil || strings.HasPrefix(relPath, "..") {
+						continue
+					}
+					addFile(relPath)
 				}
-				pos := node.Func.Prog.Fset.Position(node.Func.Pos())
-				if !pos.IsValid() || pos.Filename == "" {
-					continue
-				}
-				relPath, err := filepath.Rel(repoDir, pos.Filename)
-				if err != nil || strings.HasPrefix(relPath, "..") {
-					continue
-				}
-				addFile(relPath)
 			}
 		}
 	}

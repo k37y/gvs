@@ -10,10 +10,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
 	"golang.org/x/tools/go/callgraph"
+	"golang.org/x/tools/go/packages"
 )
 
 type fakeRunner struct {
@@ -1222,6 +1224,51 @@ func TestGetModPath_NotFound(t *testing.T) {
 	}
 }
 
+// --- checkIgnoredFiles tests ---
+
+func TestCheckIgnoredFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	// File that imports the vulnerable package
+	vulnFile := filepath.Join(dir, "constrained.go")
+	os.WriteFile(vulnFile, []byte("//go:build linux\n\npackage main\n\nimport \"golang.org/x/net/html\"\n\nvar _ = html.Parse\n"), 0644)
+
+	// File that imports something else
+	safeFile := filepath.Join(dir, "safe.go")
+	os.WriteFile(safeFile, []byte("//go:build windows\n\npackage main\n\nimport \"fmt\"\n\nvar _ = fmt.Println\n"), 0644)
+
+	pkgs := []*packages.Package{
+		{IgnoredFiles: []string{vulnFile, safeFile}},
+	}
+
+	warnings := checkIgnoredFiles(pkgs, "golang.org/x/net/html")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "constrained.go") {
+		t.Errorf("warning should mention constrained.go: %s", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "Need manual analysis") {
+		t.Errorf("warning should say 'Need manual analysis': %s", warnings[0])
+	}
+}
+
+func TestCheckIgnoredFiles_NoMatch(t *testing.T) {
+	dir := t.TempDir()
+
+	safeFile := filepath.Join(dir, "safe.go")
+	os.WriteFile(safeFile, []byte("package main\n\nimport \"fmt\"\n\nvar _ = fmt.Println\n"), 0644)
+
+	pkgs := []*packages.Package{
+		{IgnoredFiles: []string{safeFile}},
+	}
+
+	warnings := checkIgnoredFiles(pkgs, "golang.org/x/net/html")
+	if len(warnings) != 0 {
+		t.Errorf("expected 0 warnings, got %d: %v", len(warnings), warnings)
+	}
+}
+
 // --- getRepoModulePath tests ---
 
 func TestGetRepoModulePath(t *testing.T) {
@@ -1368,12 +1415,11 @@ func TestFindMainGoFiles(t *testing.T) {
 	os.MkdirAll(filepath.Join(tmpDir, "cmd", "app"), 0755)
 	os.WriteFile(filepath.Join(tmpDir, "cmd", "app", "main.go"), []byte("package main\nfunc main() {}\n"), 0644)
 
-	fr := newFakeRunner()
-	fr.combined[`go list -f {{if eq .Name "main"}}{{.Name}}: {{.Dir}}{{end}} ./...`] = []byte(
-		fmt.Sprintf("main: %s\n", filepath.Join(tmpDir, "cmd", "app")),
-	)
+	// Library package should not be found
+	os.MkdirAll(filepath.Join(tmpDir, "pkg", "lib"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "pkg", "lib", "lib.go"), []byte("package lib\nfunc Hello() {}\n"), 0644)
 
-	r := &Result{ScanConfig: ScanConfig{Runner: fr, Directory: tmpDir}}
+	r := &Result{ScanConfig: ScanConfig{Directory: tmpDir}}
 	findMainGoFiles(r)
 
 	if r.Files == nil {
@@ -1381,6 +1427,56 @@ func TestFindMainGoFiles(t *testing.T) {
 	}
 	if len(r.Errors) > 0 {
 		t.Errorf("unexpected errors: %v", r.Errors)
+	}
+	sets, ok := r.Files["."]
+	if !ok {
+		t.Fatal("Files missing root module entry '.'")
+	}
+	if len(sets) != 1 {
+		t.Fatalf("expected 1 file set, got %d", len(sets))
+	}
+	if len(sets[0]) != 1 || sets[0][0] != filepath.Join("cmd", "app", "main.go") {
+		t.Errorf("expected [cmd/app/main.go], got %v", sets[0])
+	}
+}
+
+func TestFindMainGoFiles_MultipleAndConstrained(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte("module example.com/test\ngo 1.21\n"), 0644)
+
+	// Two separate main packages
+	os.MkdirAll(filepath.Join(tmpDir, "cmd", "server"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "cmd", "server", "main.go"), []byte("package main\nfunc main() {}\n"), 0644)
+
+	os.MkdirAll(filepath.Join(tmpDir, "cmd", "cli"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "cmd", "cli", "main.go"), []byte("package main\nfunc main() {}\n"), 0644)
+
+	// Build-constrained main file should also be found
+	os.WriteFile(filepath.Join(tmpDir, "cmd", "cli", "windows.go"), []byte("//go:build windows\n\npackage main\n\nfunc init() {}\n"), 0644)
+
+	r := &Result{ScanConfig: ScanConfig{Directory: tmpDir}}
+	findMainGoFiles(r)
+
+	sets, ok := r.Files["."]
+	if !ok {
+		t.Fatal("Files missing root module entry '.'")
+	}
+	if len(sets) != 2 {
+		t.Fatalf("expected 2 file sets, got %d: %v", len(sets), sets)
+	}
+
+	// Verify constrained file is included (not filtered out)
+	foundConstrainedFile := false
+	for _, set := range sets {
+		for _, f := range set {
+			if strings.Contains(f, "windows.go") {
+				foundConstrainedFile = true
+			}
+		}
+	}
+	if !foundConstrainedFile {
+		t.Error("build-constrained file windows.go should be included")
 	}
 }
 
@@ -1899,7 +1995,7 @@ func TestGenerateCallGraphWithLibInternal_Simple(t *testing.T) {
 	r := &Result{}
 	t.Setenv("ALGO", "rta")
 
-	output, prog, cg, err := r.generateCallGraphWithLibInternal(dir, nil)
+	output, prog, cg, _, err := r.generateCallGraphWithLibInternal(dir, nil)
 	if err != nil {
 		t.Fatalf("generateCallGraphWithLibInternal failed: %v", err)
 	}
@@ -1938,7 +2034,7 @@ func TestBuildCallGraph_AllAlgorithms(t *testing.T) {
 	for _, algo := range []string{"vta", "rta", "cha", "static"} {
 		t.Run(algo, func(t *testing.T) {
 			t.Setenv("ALGO", algo)
-			_, _, cg, err := r.generateCallGraphWithLibInternal(dir, nil)
+			_, _, cg, _, err := r.generateCallGraphWithLibInternal(dir, nil)
 			if err != nil {
 				t.Fatalf("failed with algo %s: %v", algo, err)
 			}
@@ -1954,7 +2050,7 @@ func TestFindPathToSymbol_Found(t *testing.T) {
 	r := &Result{}
 	t.Setenv("ALGO", "rta")
 
-	_, _, graph, err := r.generateCallGraphWithLibInternal(dir, nil)
+	_, _, graph, _, err := r.generateCallGraphWithLibInternal(dir, nil)
 	if err != nil {
 		t.Fatalf("failed to generate call graph: %v", err)
 	}
@@ -1986,7 +2082,7 @@ func TestFindPathToSymbol_NotFound(t *testing.T) {
 	r := &Result{}
 	t.Setenv("ALGO", "rta")
 
-	_, _, graph, err := r.generateCallGraphWithLibInternal(dir, nil)
+	_, _, graph, _, err := r.generateCallGraphWithLibInternal(dir, nil)
 	if err != nil {
 		t.Fatalf("failed to generate call graph: %v", err)
 	}
@@ -2013,7 +2109,7 @@ func TestCheckDirectUsage_Found(t *testing.T) {
 	r := &Result{ScanConfig: ScanConfig{Directory: dir}}
 	t.Setenv("ALGO", "rta")
 
-	result := r.checkDirectUsage("fmt", dir, []string{"fmt.Println"}, nil)
+	result := r.checkDirectUsage("fmt", dir, ".", []string{"fmt.Println"}, nil)
 	if result != "true" {
 		t.Errorf("expected 'true' for fmt.Println usage, got %q", result)
 	}
@@ -2024,7 +2120,7 @@ func TestCheckDirectUsage_NotFound(t *testing.T) {
 	r := &Result{ScanConfig: ScanConfig{Directory: dir}}
 	t.Setenv("ALGO", "rta")
 
-	result := r.checkDirectUsage("crypto/tls", dir, []string{"crypto/tls.Dial"}, nil)
+	result := r.checkDirectUsage("crypto/tls", dir, ".", []string{"crypto/tls.Dial"}, nil)
 	if result == "true" {
 		t.Error("expected non-true for unused symbol")
 	}
@@ -2035,7 +2131,7 @@ func TestGenerateCallGraphWithLibInternal_NoMain(t *testing.T) {
 	r := &Result{}
 	t.Setenv("ALGO", "rta")
 
-	_, _, cg, err := r.generateCallGraphWithLibInternal(dir, nil)
+	_, _, cg, _, err := r.generateCallGraphWithLibInternal(dir, nil)
 	if err != nil {
 		t.Fatalf("expected no error for lib-only, got: %v", err)
 	}
@@ -2049,7 +2145,7 @@ func TestMatchesSymbol_WithSSA(t *testing.T) {
 	r := &Result{}
 	t.Setenv("ALGO", "static")
 
-	_, _, graph, err := r.generateCallGraphWithLibInternal(dir, nil)
+	_, _, graph, _, err := r.generateCallGraphWithLibInternal(dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2111,7 +2207,7 @@ func TestFindPathToSymbolExported(t *testing.T) {
 	r := &Result{}
 	t.Setenv("ALGO", "rta")
 
-	_, _, graph, err := r.generateCallGraphWithLibInternal(dir, nil)
+	_, _, graph, _, err := r.generateCallGraphWithLibInternal(dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2141,7 +2237,7 @@ func TestIsSymbolUsed(t *testing.T) {
 	r := &Result{ScanConfig: ScanConfig{Directory: dir}}
 	t.Setenv("ALGO", "rta")
 
-	result := r.isSymbolUsed("fmt", dir, []string{"Println"}, []string{"main.go"})
+	result := r.isSymbolUsed("fmt", dir, ".", []string{"Println"}, []string{"main.go"})
 	if result != "true" {
 		t.Errorf("expected 'true' for fmt.Println usage, got %q", result)
 	}

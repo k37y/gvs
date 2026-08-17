@@ -246,7 +246,6 @@ func main() {
 		close(results)
 	}()
 
-	mergedImports := make(map[string]cg.UsedImportsDetails)
 	hasVulnerable := false
 	hasUnknown := false
 	hasProcessedAny := false
@@ -254,50 +253,15 @@ func main() {
 	for res := range results {
 		hasProcessedAny = true
 
-		// Increment completed jobs counter for progress tracking
 		if *progress {
 			atomic.AddInt64(&completedJobs, 1)
 		}
 
-		// Track the overall vulnerability status across all packages
 		switch res.IsVulnerable {
 		case "true":
 			hasVulnerable = true
 		case "unknown":
 			hasUnknown = true
-		}
-
-		// Merge imports for all packages where symbols were found (informational)
-		for pkg, symbols := range res.UsedImports {
-			entry := mergedImports[pkg]
-
-			// Merge paths (once per package, before symbol loop)
-			entry.Paths = append(entry.Paths, symbols.Paths...)
-
-			for _, sym := range symbols.Symbols {
-				if strings.HasPrefix(sym, pkg+".") {
-					sym = strings.TrimPrefix(sym, pkg+".")
-				}
-				entry.Symbols = append(entry.Symbols, sym)
-			}
-
-			if entry.CurrentVersion == "" {
-				entry.CurrentVersion = symbols.CurrentVersion
-			}
-			if entry.ReplaceModule == "" {
-				entry.ReplaceModule = symbols.ReplaceModule
-			}
-			if entry.ReplaceVersion == "" {
-				entry.ReplaceVersion = symbols.ReplaceVersion
-			}
-			if entry.FixCommands == nil {
-				entry.FixCommands = symbols.FixCommands
-			}
-			entry.Dir = append(entry.Dir, symbols.Dir...)
-
-			result.Mu.Lock()
-			mergedImports[pkg] = entry
-			result.Mu.Unlock()
 		}
 	}
 
@@ -306,33 +270,35 @@ func main() {
 		close(progressDone)
 		completed := atomic.LoadInt64(&completedJobs)
 		total := atomic.LoadInt64(&totalJobs)
-		// Only print final progress if 100% hasn't been printed yet
 		if lastPrintedPercentage != 100.0 {
 			fmt.Fprintf(os.Stderr, "Progress: %d/%d jobs completed (100.0%%)\n", completed, total)
 		}
 	}
 
-	for pkg, details := range mergedImports {
-		deduped := common.UniqueStrings(details.Symbols)
-		isSymbolsEmpty := len(deduped) == 0
-		isCurrentVersionEmpty := details.CurrentVersion == ""
-		isReplaceVersionEmpty := details.ReplaceVersion == ""
-
-		if isSymbolsEmpty && isCurrentVersionEmpty && isReplaceVersionEmpty {
-			delete(mergedImports, pkg)
-			continue
+	// Deduplicate and normalize symbols within each dir/pkg entry
+	for dir, pkgs := range result.UsedImports {
+		for pkg, details := range pkgs {
+			for i, sym := range details.Symbols {
+				if strings.HasPrefix(sym, pkg+".") {
+					details.Symbols[i] = strings.TrimPrefix(sym, pkg+".")
+				}
+			}
+			deduped := common.UniqueStrings(details.Symbols)
+			if len(deduped) == 0 && details.CurrentVersion == "" && details.ReplaceVersion == "" {
+				delete(pkgs, pkg)
+				continue
+			}
+			if len(deduped) > 0 {
+				sort.Strings(deduped)
+				details.Symbols = deduped
+			}
+			pkgs[pkg] = details
 		}
-
-		if !isSymbolsEmpty {
-			sort.Strings(deduped)
-			details.Symbols = deduped
+		if len(pkgs) == 0 {
+			delete(result.UsedImports, dir)
 		}
-		details.Dir = common.UniqueStrings(details.Dir)
-		sort.Strings(details.Dir)
-		mergedImports[pkg] = details
 	}
 
-	// Properly determine final vulnerability status
 	if hasVulnerable {
 		result.IsVulnerable = "true"
 	} else if hasUnknown {
@@ -340,18 +306,7 @@ func main() {
 	} else if hasProcessedAny {
 		result.IsVulnerable = "false"
 	} else {
-		// No packages were processed (shouldn't happen, but safe fallback)
 		result.IsVulnerable = "unknown"
-	}
-	// Always set UsedImports from merged data (informational)
-	result.UsedImports = mergedImports
-
-	// Remove UsedImports entries that have no symbols (only version info)
-	// These are libraries that were checked but no vulnerable symbols were found
-	for pkg, details := range result.UsedImports {
-		if len(details.Symbols) == 0 {
-			delete(result.UsedImports, pkg)
-		}
 	}
 
 	// Generate call graph visualizations if requested (one per affected symbol)
@@ -396,36 +351,36 @@ func main() {
 
 			// Generate a graph for each vulnerable symbol
 			result.GraphPaths = []string{}
-			for pkg, details := range result.UsedImports {
-				for _, symbol := range details.Symbols {
-					// Create filename: library-symbol.svg
-					// Sanitize names for filesystem (CVE is in the directory structure when using -graph with server)
-					sanitizedLib := strings.ReplaceAll(pkg, "/", "-")
-				sanitizedSymbol := strings.ReplaceAll(symbol, "/", "-")
-				sanitizedSymbol = strings.ReplaceAll(sanitizedSymbol, ".", "-")
-				sanitizedSymbol = strings.ReplaceAll(sanitizedSymbol, "*", "ptr")
-				sanitizedSymbol = strings.ReplaceAll(sanitizedSymbol, "(", "")
-				sanitizedSymbol = strings.ReplaceAll(sanitizedSymbol, ")", "")
+			for _, pkgs := range result.UsedImports {
+				for pkg, details := range pkgs {
+					for _, symbol := range details.Symbols {
+						sanitizedLib := strings.ReplaceAll(pkg, "/", "-")
+						sanitizedSymbol := strings.ReplaceAll(symbol, "/", "-")
+						sanitizedSymbol = strings.ReplaceAll(sanitizedSymbol, ".", "-")
+						sanitizedSymbol = strings.ReplaceAll(sanitizedSymbol, "*", "ptr")
+						sanitizedSymbol = strings.ReplaceAll(sanitizedSymbol, "(", "")
+						sanitizedSymbol = strings.ReplaceAll(sanitizedSymbol, ")", "")
 
-					filename := fmt.Sprintf("%s-%s.svg", sanitizedLib, sanitizedSymbol)
-					outputPath := filepath.Join(outputDir, filename)
+						filename := fmt.Sprintf("%s-%s.svg", sanitizedLib, sanitizedSymbol)
+						outputPath := filepath.Join(outputDir, filename)
 
-					if *progress {
-						fmt.Fprintf(os.Stderr, "  Generating graph for %s.%s...\n", pkg, symbol)
-					}
-
-					svgPath, err := generateCallGraphSVGForSymbol(result, directory, pkg, symbol, outputPath, *progress)
-					if err != nil {
-						errMsg := fmt.Sprintf("Failed to generate call graph for %s.%s: %v", pkg, symbol, err)
-						result.Errors = append(result.Errors, errMsg)
 						if *progress {
-							fmt.Fprintf(os.Stderr, "  ✗ Failed: %v\n", err)
+							fmt.Fprintf(os.Stderr, "  Generating graph for %s.%s...\n", pkg, symbol)
 						}
-					} else {
-						if *progress {
-							fmt.Fprintf(os.Stderr, "  ✓ Saved to: %s\n", svgPath)
+
+						svgPath, err := generateCallGraphSVGForSymbol(result, directory, pkg, symbol, outputPath, *progress)
+						if err != nil {
+							errMsg := fmt.Sprintf("Failed to generate call graph for %s.%s: %v", pkg, symbol, err)
+							result.Errors = append(result.Errors, errMsg)
+							if *progress {
+								fmt.Fprintf(os.Stderr, "  ✗ Failed: %v\n", err)
+							}
+						} else {
+							if *progress {
+								fmt.Fprintf(os.Stderr, "  ✓ Saved to: %s\n", svgPath)
+							}
+							result.GraphPaths = append(result.GraphPaths, svgPath)
 						}
-						result.GraphPaths = append(result.GraphPaths, svgPath)
 					}
 				}
 			}
@@ -498,25 +453,25 @@ func pathToDOT(path []*callgraph.Node) string {
 // generateCallGraphSVGForSymbol generates an SVG visualization of the call graph for a specific symbol
 func generateCallGraphSVGForSymbol(result *cg.Result, directory, pkg, symbol, outputPath string, showProgress bool) (string, error) {
 	// Try to use the stored path from the result first (most efficient)
-	if details, ok := result.UsedImports[pkg]; ok && len(details.Paths) > 0 {
-		// Find the path that corresponds to this symbol
-		for i, sym := range details.Symbols {
-			if sym == symbol && i < len(details.Paths) {
-				path := details.Paths[i]
-				if len(path) > 0 {
-					if showProgress {
-						fmt.Fprintf(os.Stderr, "    Using stored path (%d nodes)...\n", len(path))
+	for _, pkgs := range result.UsedImports {
+		if details, ok := pkgs[pkg]; ok && len(details.Paths) > 0 {
+			for i, sym := range details.Symbols {
+				if sym == symbol && i < len(details.Paths) {
+					path := details.Paths[i]
+					if len(path) > 0 {
+						if showProgress {
+							fmt.Fprintf(os.Stderr, "    Using stored path (%d nodes)...\n", len(path))
+						}
+						return generateSVGFromPath(path, outputPath, showProgress)
 					}
-					return generateSVGFromPath(path, outputPath, showProgress)
 				}
 			}
-		}
-		// If no matching path, use the first available path
-		if len(details.Paths[0]) > 0 {
-			if showProgress {
-				fmt.Fprintf(os.Stderr, "    Using first available path (%d nodes)...\n", len(details.Paths[0]))
+			if len(details.Paths[0]) > 0 {
+				if showProgress {
+					fmt.Fprintf(os.Stderr, "    Using first available path (%d nodes)...\n", len(details.Paths[0]))
+				}
+				return generateSVGFromPath(details.Paths[0], outputPath, showProgress)
 			}
-			return generateSVGFromPath(details.Paths[0], outputPath, showProgress)
 		}
 	}
 
