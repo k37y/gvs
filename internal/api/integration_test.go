@@ -101,6 +101,21 @@ func startTestServer(t *testing.T) {
 	}
 }
 
+func pollCallgraphManualResult(t *testing.T, repo, branchOrCommit, library, symbol, fixversion, algo string) cgOutput {
+	t.Helper()
+
+	requestBody := map[string]interface{}{
+		"repo":           repo,
+		"branchOrCommit": branchOrCommit,
+		"library":        library,
+		"symbol":         symbol,
+		"fixversion":     fixversion,
+		"algo":           algo,
+	}
+
+	return pollCallgraphRequest(t, requestBody)
+}
+
 func pollCallgraphResult(t *testing.T, repo, branchOrCommit, cve, algo string) cgOutput {
 	t.Helper()
 
@@ -110,6 +125,12 @@ func pollCallgraphResult(t *testing.T, repo, branchOrCommit, cve, algo string) c
 		"cve":            cve,
 		"algo":           algo,
 	}
+
+	return pollCallgraphRequest(t, requestBody)
+}
+
+func pollCallgraphRequest(t *testing.T, requestBody map[string]interface{}) cgOutput {
+	t.Helper()
 
 	reqJSON, err := json.Marshal(requestBody)
 	if err != nil {
@@ -647,6 +668,163 @@ func TestCallgraphIntegration(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			runCallgraphTest(t, tt.repo, tt.branchOrCommit, tt.cve, tt.algo, tt.expected, tt.expectErrors)
+		})
+	}
+
+	// --- Manual scan tests (library + symbol + fixversion) ---
+
+	t.Run("manual/single version vulnerable", func(t *testing.T) {
+		output := pollCallgraphManualResult(t, testDataRepo, "vuln-single-range",
+			"golang.org/x/net/html", "Parse,ParseWithOptions", "v0.33.0", "rta")
+		assertCommon(t, output, "true", "MANUAL-SCAN", "vuln-single-range", false, false, singleMainFiles, []string{"."})
+
+		assertUsedImport(t, output, ".", "golang.org/x/net/html", "v0.23.0",
+			[]string{"go get golang.org/x/net@v0.33.0", "go mod tidy", "go mod vendor"},
+			nil, "", "")
+		assertAffectedImport(t, output, "golang.org/x/net/html", "non-stdlib",
+			[]string{"v0.33.0"})
+	})
+
+	t.Run("manual/single version patched", func(t *testing.T) {
+		output := pollCallgraphManualResult(t, testDataRepo, "patched-single-range",
+			"golang.org/x/net/html", "Parse,ParseWithOptions", "v0.33.0", "rta")
+		assertCommon(t, output, "false", "MANUAL-SCAN", "patched-single-range", false, false, singleMainFiles, []string{"."})
+
+		assertUsedImport(t, output, ".", "golang.org/x/net/html", "v0.33.0", nil,
+			nil, "", "")
+	})
+
+	t.Run("manual/multi-range vulnerable", func(t *testing.T) {
+		output := pollCallgraphManualResult(t, testDataRepo, "vuln-multi-range",
+			"google.golang.org/grpc", "NewServer", "0:v1.56.3,v1.57.0:v1.57.1,v1.58.0:v1.58.3", "rta")
+		assertCommon(t, output, "true", "MANUAL-SCAN", "vuln-multi-range", false, false, singleMainFiles, []string{"."})
+
+		assertUsedImport(t, output, ".", "google.golang.org/grpc", "v1.57.0",
+			[]string{"go get google.golang.org/grpc@v1.57.1", "go mod tidy", "go mod vendor"},
+			nil, "", "")
+		assertAffectedImport(t, output, "google.golang.org/grpc", "non-stdlib",
+			[]string{"Introduced in 0 and fixed in v1.56.3", "Introduced in v1.57.0 and fixed in v1.57.1", "Introduced in v1.58.0 and fixed in v1.58.3"})
+	})
+
+	t.Run("manual/multi-range between ranges patched", func(t *testing.T) {
+		output := pollCallgraphManualResult(t, testDataRepo, "patched-multi-range-between",
+			"google.golang.org/grpc", "NewServer", "0:v1.56.3,v1.57.0:v1.57.1,v1.58.0:v1.58.3", "rta")
+		assertCommon(t, output, "false", "MANUAL-SCAN", "patched-multi-range-between", false, false, singleMainFiles, []string{"."})
+
+		assertUsedImport(t, output, ".", "google.golang.org/grpc", "v1.56.3", nil,
+			nil, "", "")
+	})
+
+	t.Run("manual/multi-range patched", func(t *testing.T) {
+		output := pollCallgraphManualResult(t, testDataRepo, "patched-multi-range",
+			"google.golang.org/grpc", "NewServer", "0:v1.56.3,v1.57.0:v1.57.1,v1.58.0:v1.58.3", "rta")
+		assertCommon(t, output, "false", "MANUAL-SCAN", "patched-multi-range", false, false, singleMainFiles, []string{"."})
+
+		assertUsedImport(t, output, ".", "google.golang.org/grpc", "v1.57.1", nil,
+			nil, "", "")
+	})
+
+	t.Run("manual/stdlib first range vulnerable", func(t *testing.T) {
+		output := pollCallgraphManualResult(t, testDataRepo, "vuln-stdlib-multi-range",
+			"net/http", "Get,NewRequest", "0:1.21.9,1.22.0:1.22.2", "rta")
+		assertCommon(t, output, "true", "MANUAL-SCAN", "vuln-stdlib-multi-range", false, false, singleMainFiles, []string{"."})
+
+		assertUsedImport(t, output, ".", "net/http", "v1.21.4",
+			[]string{"go mod edit -go=1.21.9", "go mod tidy", "go mod vendor"},
+			nil, "", "")
+		assertAffectedImport(t, output, "net/http", "stdlib",
+			[]string{"Introduced in 0 and fixed in 1.21.9", "Introduced in 1.22.0 and fixed in 1.22.2"})
+	})
+
+	t.Run("manual/stdlib second range vulnerable", func(t *testing.T) {
+		output := pollCallgraphManualResult(t, testDataRepo, "vuln-stdlib-second-range",
+			"net/http", "Get,NewRequest", "0:1.21.9,1.22.0:1.22.2", "rta")
+		assertCommon(t, output, "true", "MANUAL-SCAN", "vuln-stdlib-second-range", false, false, singleMainFiles, []string{"."})
+
+		assertUsedImport(t, output, ".", "net/http", "v1.22.1",
+			[]string{"go mod edit -go=1.22.2", "go mod tidy", "go mod vendor"},
+			nil, "", "")
+		assertAffectedImport(t, output, "net/http", "stdlib",
+			[]string{"Introduced in 0 and fixed in 1.21.9", "Introduced in 1.22.0 and fixed in 1.22.2"})
+	})
+
+	t.Run("manual/stdlib between ranges patched", func(t *testing.T) {
+		output := pollCallgraphManualResult(t, testDataRepo, "patched-stdlib-between-ranges",
+			"net/http", "Get,NewRequest", "0:1.21.9,1.22.0:1.22.2", "rta")
+		assertCommon(t, output, "false", "MANUAL-SCAN", "patched-stdlib-between-ranges", false, false, singleMainFiles, []string{"."})
+
+		assertUsedImport(t, output, ".", "net/http", "v1.21.9", nil,
+			nil, "", "")
+	})
+
+	t.Run("manual/stdlib patched", func(t *testing.T) {
+		output := pollCallgraphManualResult(t, testDataRepo, "patched-stdlib-multi-range",
+			"net/http", "Get,NewRequest", "0:1.21.9,1.22.0:1.22.2", "rta")
+		assertCommon(t, output, "false", "MANUAL-SCAN", "patched-stdlib-multi-range", false, false, singleMainFiles, []string{"."})
+
+		assertUsedImport(t, output, ".", "net/http", "v1.22.5", nil,
+			nil, "", "")
+	})
+
+	// --- Manual scan API validation tests ---
+
+	apiValidation := []struct {
+		name string
+		body string
+	}{
+		{"library only", `{"repo":"x","branchOrCommit":"y","library":"golang.org/x/net/html"}`},
+		{"library and symbol only", `{"repo":"x","branchOrCommit":"y","library":"golang.org/x/net/html","symbol":"Parse"}`},
+		{"symbol and fixversion only", `{"repo":"x","branchOrCommit":"y","symbol":"Parse","fixversion":"v0.33.0"}`},
+		{"fixversion only", `{"repo":"x","branchOrCommit":"y","fixversion":"v0.33.0"}`},
+		{"library and fixversion only", `{"repo":"x","branchOrCommit":"y","library":"golang.org/x/net/html","fixversion":"v0.33.0"}`},
+		{"symbol only", `{"repo":"x","branchOrCommit":"y","symbol":"Parse"}`},
+	}
+
+	for _, tt := range apiValidation {
+		t.Run("manual/validation "+tt.name, func(t *testing.T) {
+			resp, err := http.Post(testServerURL+"/callgraph", "application/json", strings.NewReader(tt.body))
+			if err != nil {
+				t.Fatalf("request failed: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+			}
+		})
+	}
+}
+
+func TestCgBinaryValidation(t *testing.T) {
+	cgBin := filepath.Join("..", "..", "bin", "cg")
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module test\ngo 1.22.0\n"), 0644)
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"library only", []string{"-library", "golang.org/x/net/html", dir}},
+		{"library and symbol only", []string{"-library", "golang.org/x/net/html", "-symbols", "Parse", dir}},
+		{"symbol and fixversion only", []string{"-symbols", "Parse", "-fixversion", "v0.33.0", dir}},
+		{"fixversion only", []string{"-fixversion", "v0.33.0", dir}},
+		{"library and fixversion only", []string{"-library", "golang.org/x/net/html", "-fixversion", "v0.33.0", dir}},
+		{"symbol only", []string{"-symbols", "Parse", dir}},
+		{"no args", []string{}},
+		{"cve only no dir", []string{"CVE-2024-45338"}},
+		{"invalid directory", []string{"CVE-2024-45338", "/nonexistent/path"}},
+		{"manual no directory", []string{"-library", "golang.org/x/net/html", "-symbols", "Parse", "-fixversion", "v0.33.0"}},
+		{"manual too many args", []string{"-library", "golang.org/x/net/html", "-symbols", "Parse", "-fixversion", "v0.33.0", "CVE-2024-45338", dir, "extra"}},
+		{"invalid algo", []string{"-algo", "invalid", "CVE-2024-45338", dir}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := exec.Command(cgBin, tt.args...)
+			cmd.Env = os.Environ()
+			err := cmd.Run()
+			if err == nil {
+				t.Error("expected non-zero exit code, got success")
+			}
 		})
 	}
 }

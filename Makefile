@@ -47,7 +47,7 @@ test:
 
 test-integration:
 	@echo "Running integration tests..."
-	go test -v -count=1 -tags integration ./internal/api -run TestCallgraphIntegration -timeout 25m
+	go test -v -count=1 -tags integration ./internal/api -run "TestCallgraphIntegration|TestCgBinaryValidation" -timeout 25m
 
 .PHONY: gvs
 

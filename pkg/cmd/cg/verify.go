@@ -22,6 +22,13 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
+type ClaudeVerification struct {
+	IsVulnerable string   `json:"IsVulnerable"`
+	Confidence   string   `json:"confidence"`
+	Reasoning    string   `json:"reasoning"`
+	Evidence     []string `json:"evidence"`
+}
+
 type claudeConfig struct {
 	ProjectID     string
 	Location      string
@@ -50,7 +57,7 @@ func (r *claudeResponse) GetIsVulnerable() string {
 }
 
 func VerifyAndSummarizeWithClaude(result *Result, repoDir string) {
-	if os.Getenv("GVS_SKIP_CLAUDE") == "1" {
+	if os.Getenv("GVS_CLAUDE") != "1" {
 		return
 	}
 	cfg, found := loadClaudeConfig()
@@ -1440,6 +1447,10 @@ func isEntryPointLike(node *callgraph.Node, repoModulePath string) bool {
 }
 
 func LogClaudeStatus(progressFunc func(string)) {
+	if os.Getenv("GVS_CLAUDE") != "1" {
+		toolProgress(progressFunc, "Claude verification: disabled (set GVS_CLAUDE=1 to enable)")
+		return
+	}
 	cfg, found := loadClaudeConfig()
 	if !found {
 		toolProgress(progressFunc, "Claude verification: disabled (missing ~/.claude.conf or CLAUDE_CODE_USE_VERTEX!=1)")

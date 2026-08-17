@@ -1333,6 +1333,59 @@ func TestIsModuleInGoMod_NoGoMod(t *testing.T) {
 	}
 }
 
+// --- isModuleInGoModOrSum tests ---
+
+func TestIsModuleInGoModOrSum(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte(`module github.com/foo/bar
+
+go 1.22.0
+
+require golang.org/x/net v0.23.0
+`), 0644)
+	os.WriteFile(filepath.Join(dir, "go.sum"), []byte(`golang.org/x/net v0.23.0 h1:abc=
+golang.org/x/net v0.23.0/go.mod h1:def=
+golang.org/x/crypto v0.17.0 h1:ghi=
+golang.org/x/crypto v0.17.0/go.mod h1:jkl=
+`), 0644)
+
+	tests := []struct {
+		pkg  string
+		want bool
+	}{
+		{"golang.org/x/net/html", true},
+		{"golang.org/x/net", true},
+		{"golang.org/x/crypto/ssh", true},
+		{"golang.org/x/crypto", true},
+		{"golang.org/x/text", false},
+		{"github.com/other/pkg", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.pkg, func(t *testing.T) {
+			if got := isModuleInGoModOrSum(tt.pkg, dir); got != tt.want {
+				t.Errorf("isModuleInGoModOrSum(%q) = %v, want %v", tt.pkg, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsModuleInGoModOrSum_NoGoSum(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte(`module github.com/foo/bar
+
+go 1.22.0
+
+require golang.org/x/net v0.23.0
+`), 0644)
+
+	if !isModuleInGoModOrSum("golang.org/x/net", dir) {
+		t.Error("expected true for module in go.mod even without go.sum")
+	}
+	if isModuleInGoModOrSum("golang.org/x/crypto", dir) {
+		t.Error("expected false for module not in go.mod and no go.sum")
+	}
+}
+
 // --- getGitBranch tests ---
 
 func TestGetGitBranch(t *testing.T) {

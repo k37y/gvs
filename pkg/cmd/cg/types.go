@@ -48,14 +48,6 @@ type ReflectionRisk struct {
 	Package    string   `json:"package"`    // The package containing the symbol
 }
 
-// ClaudeVerification holds the independent AI audit of the scan result
-type ClaudeVerification struct {
-	IsVulnerable string   `json:"IsVulnerable"`
-	Confidence   string   `json:"confidence"`
-	Reasoning    string   `json:"reasoning"`
-	Evidence     []string `json:"evidence"`
-}
-
 // ScanConfig holds the input configuration for a scan.
 type ScanConfig struct {
 	CVE          string       `json:"CVE,omitempty"`

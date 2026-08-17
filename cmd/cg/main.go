@@ -24,6 +24,8 @@ import (
 	"github.com/k37y/gvs/pkg/utils"
 )
 
+var version string
+
 func main() {
 	// Note: sfdp is checked conditionally when -graph flag is used
 	// digraph is no longer required - we use the callgraph.Graph directly with BFS
@@ -39,6 +41,7 @@ func main() {
 	var symbols = flag.String("symbols", "", "override symbol(s) to scan for (comma-separated, e.g., Parse,Render)")
 	var fixversion = flag.String("fixversion", "", "fixed version for manual scans (e.g., v1.9.4)")
 	var graph = flag.String("graph", "", "generate call graph SVG visualization (default: ./site/callgraph.svg if flag used without value)")
+	var showVersion = flag.Bool("version", false, "print version and exit")
 
 	// Custom usage function
 	flag.Usage = func() {
@@ -63,6 +66,11 @@ func main() {
 
 	// Parse flags
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version)
+		os.Exit(0)
+	}
 
 	// Validate that library, symbols, and fixversion are all provided together
 	libraryProvided := *library != ""
@@ -154,6 +162,9 @@ func main() {
 		}
 	}
 
+	if result.ProgressFunc != nil {
+		result.ProgressFunc(fmt.Sprintf("cg version %s", version))
+	}
 	cg.LogClaudeStatus(result.ProgressFunc)
 
 	// Setup: library mode or CVE mode
@@ -254,7 +265,13 @@ func main() {
 		hasProcessedAny = true
 
 		if *progress {
-			atomic.AddInt64(&completedJobs, 1)
+			completed := atomic.AddInt64(&completedJobs, 1)
+			total := atomic.LoadInt64(&totalJobs)
+			if total > 0 {
+				percentage := float64(completed) / float64(total) * 100
+				fmt.Fprintf(os.Stderr, "Progress: %d/%d jobs completed (%.1f%%)\n", completed, total, percentage)
+				lastPrintedPercentage = percentage
+			}
 		}
 
 		switch res.IsVulnerable {
@@ -318,8 +335,7 @@ func main() {
 			if *progress {
 				fmt.Fprintf(os.Stderr, "✗ %s\n", errMsg)
 			}
-	} else if len(result.UsedImports) > 0 {
-		// Generate graphs for any found symbols (informational)
+	} else if result.IsVulnerable == "true" && len(result.UsedImports) > 0 {
 			if *progress {
 				fmt.Fprintf(os.Stderr, "Generating call graph visualizations for affected symbols...\n")
 			}

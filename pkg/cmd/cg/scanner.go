@@ -203,13 +203,33 @@ func Worker(jobs <-chan Job, results chan<- *Result, wg *sync.WaitGroup, result 
 	defer wg.Done()
 	for job := range jobs {
 		dir := filepath.Join(result.Directory, job.Dir)
-		if result.AffectedImports[job.Package].Type != "stdlib" && !isModuleInGoMod(job.Package, dir) {
+		if result.AffectedImports[job.Package].Type != "stdlib" && !isModuleInGoModOrSum(job.Package, dir) {
 			results <- &Result{IsVulnerable: "false"}
 			continue
 		}
 		res := job.isVulnerable(result)
 		results <- res
 	}
+}
+
+func isModuleInGoModOrSum(pkg, dir string) bool {
+	if isModuleInGoMod(pkg, dir) {
+		return true
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "go.sum"))
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		if fields[0] == pkg || strings.HasPrefix(pkg, fields[0]+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 type VulnerabilityResult struct {
@@ -421,19 +441,6 @@ func (j Job) isVulnerable(result *Result) *Result {
 	result.AffectedImports[j.Package] = aentry
 	result.Mu.Unlock()
 
-	result.Mu.Lock()
-	if result.UsedImports == nil {
-		result.UsedImports = make(map[string]map[string]UsedImportsDetails)
-	}
-	if result.UsedImports[j.Dir] == nil {
-		result.UsedImports[j.Dir] = make(map[string]UsedImportsDetails)
-	}
-	uentry := result.UsedImports[j.Dir][j.Package]
-	uentry.CurrentVersion = curVer
-	if repVer != "" {
-		uentry.ReplaceModule = repPath
-		uentry.ReplaceVersion = repVer
-	}
 	goToolchainVersion := ""
 	if result.AffectedImports[j.Package].Type == "stdlib" {
 		if v, ok := result.GoToolchainVersions[j.Dir]; ok {
@@ -446,30 +453,46 @@ func (j Job) isVulnerable(result *Result) *Result {
 	vr := checkDirVulnerability(curVer, repVer, used, unknown,
 		result.AffectedImports[j.Package].Type == "stdlib", goToolchainVersion, rawFixVer)
 
+	result.Mu.Lock()
 	result.IsVulnerable = vr.Status
-	if vr.NeedsReplaceFix && vr.FixVersion != "" {
-		uentry.FixCommands = []string{
-			fmt.Sprintf("go mod edit -replace=%s=%s@%s", modPath, modPath, vr.FixVersion),
-			"go mod tidy",
-			"go mod vendor",
+
+	if used || unknown {
+		if result.UsedImports == nil {
+			result.UsedImports = make(map[string]map[string]UsedImportsDetails)
 		}
-	} else if vr.Status == "true" && vr.FixVersion != "" {
-		if result.AffectedImports[j.Package].Type == "stdlib" {
-			selectedFixVersion := selectFixVersionForCurrentGoVersion(goToolchainVersion, fixVer)
+		if result.UsedImports[j.Dir] == nil {
+			result.UsedImports[j.Dir] = make(map[string]UsedImportsDetails)
+		}
+		uentry := result.UsedImports[j.Dir][j.Package]
+		uentry.CurrentVersion = curVer
+		if repVer != "" {
+			uentry.ReplaceModule = repPath
+			uentry.ReplaceVersion = repVer
+		}
+		if vr.NeedsReplaceFix && vr.FixVersion != "" {
 			uentry.FixCommands = []string{
-				fmt.Sprintf("go mod edit -go=%s", selectedFixVersion),
+				fmt.Sprintf("go mod edit -replace=%s=%s@%s", modPath, modPath, vr.FixVersion),
 				"go mod tidy",
 				"go mod vendor",
 			}
-		} else {
-			uentry.FixCommands = []string{
-				fmt.Sprintf("go get %s@%s", modPath, vr.FixVersion),
-				"go mod tidy",
-				"go mod vendor",
+		} else if vr.Status == "true" && vr.FixVersion != "" {
+			if result.AffectedImports[j.Package].Type == "stdlib" {
+				selectedFixVersion := selectFixVersionForCurrentGoVersion(goToolchainVersion, fixVer)
+				uentry.FixCommands = []string{
+					fmt.Sprintf("go mod edit -go=%s", selectedFixVersion),
+					"go mod tidy",
+					"go mod vendor",
+				}
+			} else {
+				uentry.FixCommands = []string{
+					fmt.Sprintf("go get %s@%s", modPath, vr.FixVersion),
+					"go mod tidy",
+					"go mod vendor",
+				}
 			}
 		}
+		result.UsedImports[j.Dir][j.Package] = uentry
 	}
-	result.UsedImports[j.Dir][j.Package] = uentry
 	result.Mu.Unlock()
 
 	return result
@@ -720,6 +743,9 @@ func (r *Result) checkDirectUsage(pkg, dir, modDir string, symbols []string, fil
 	}
 
 	// Use callgraph library to build the graph directly
+	if progress {
+		fmt.Fprintf(os.Stderr, "[%s] Building SSA + call graph...\n", relDir)
+	}
 	_, prog, cg, loadedPkgs, err := r.generateCallGraphWithLibInternal(dir, files)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to generate call graph in %s: %v", dir, err)
@@ -732,6 +758,10 @@ func (r *Result) checkDirectUsage(pkg, dir, modDir string, symbols []string, fil
 
 	r.SsaProg = prog
 	r.CgGraph = cg
+
+	if progress {
+		fmt.Fprintf(os.Stderr, "[%s] Call graph built, starting BFS...\n", relDir)
+	}
 
 	// Get the module path for filtering entry points to repo code only
 	repoModulePath := getRepoModulePath(dir, r)
@@ -753,9 +783,6 @@ func (r *Result) checkDirectUsage(pkg, dir, modDir string, symbols []string, fil
 		wg.Add(1)
 		go func(sym string) {
 			defer wg.Done()
-		if progress {
-			fmt.Fprintf(os.Stderr, "[%s] Scanning %s.%s...\n", relDir, pkg, sym)
-		}
 			// Use BFS to find path to symbol from any entry point
 			if path, found := findPathToSymbolFromAny(entryPoints, pkg, sym, progress); found {
 				r.Mu.Lock()
