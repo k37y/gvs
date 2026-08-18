@@ -77,6 +77,8 @@ type Result struct {
 	Progress           bool                `json:"-"`
 	SsaProg            *ssa.Program        `json:"-"`
 	CgGraph            *callgraph.Graph    `json:"-"`
+	ssaCache           map[string]*ssaCacheEntry `json:"-"`
+	moduleFiles        map[string][]byte         `json:"-"`
 }
 
 type VulnReport struct {

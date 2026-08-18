@@ -54,6 +54,12 @@ import (
 	"github.com/k37y/gvs/internal/common"
 )
 
+type ssaCacheEntry struct {
+	prog       *ssa.Program
+	cg         *callgraph.Graph
+	loadedPkgs []*packages.Package
+}
+
 func (r *Result) runner() cli.CommandRunner {
 	if r.Runner != nil {
 		return r.Runner
@@ -203,7 +209,7 @@ func Worker(jobs <-chan Job, results chan<- *Result, wg *sync.WaitGroup, result 
 	defer wg.Done()
 	for job := range jobs {
 		dir := filepath.Join(result.Directory, job.Dir)
-		if result.AffectedImports[job.Package].Type != "stdlib" && !isModuleInGoModOrSum(job.Package, dir) {
+		if result.AffectedImports[job.Package].Type != "stdlib" && !result.isModuleInGoModOrSum(job.Package, dir) {
 			results <- &Result{IsVulnerable: "false"}
 			continue
 		}
@@ -212,11 +218,11 @@ func Worker(jobs <-chan Job, results chan<- *Result, wg *sync.WaitGroup, result 
 	}
 }
 
-func isModuleInGoModOrSum(pkg, dir string) bool {
-	if isModuleInGoMod(pkg, dir) {
+func (r *Result) isModuleInGoModOrSum(pkg, dir string) bool {
+	if r.isModuleInGoMod(pkg, dir) {
 		return true
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "go.sum"))
+	data, err := r.readModFile(filepath.Join(dir, "go.sum"))
 	if err != nil {
 		return false
 	}
@@ -356,8 +362,8 @@ func checkDirVulnerability(curVer, repVer string, used, unknown, isStdlib bool, 
 	return vr
 }
 
-func findModuleInGoMod(pkg, dir string) (modPath, version string, found bool) {
-	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+func (r *Result) findModuleInGoMod(pkg, dir string) (modPath, version string, found bool) {
+	data, err := r.readModFile(filepath.Join(dir, "go.mod"))
 	if err != nil {
 		return "", "", false
 	}
@@ -381,8 +387,8 @@ func findModuleInGoMod(pkg, dir string) (modPath, version string, found bool) {
 	return "", "", false
 }
 
-func isModuleInGoMod(pkg, dir string) bool {
-	_, _, found := findModuleInGoMod(pkg, dir)
+func (r *Result) isModuleInGoMod(pkg, dir string) bool {
+	_, _, found := r.findModuleInGoMod(pkg, dir)
 	return found
 }
 
@@ -390,7 +396,7 @@ func (j Job) isVulnerable(result *Result) *Result {
 	dir := filepath.Join(result.Directory, j.Dir)
 
 	curVer := getCurrentVersion(j.Package, dir, j.Dir, result)
-	modPath := getModPath(j.Package, dir)
+	modPath := getModPath(j.Package, dir, result)
 	repPath, repVer := getReplaceVersion(modPath, dir, result)
 
 	var rawFixVer []string
@@ -555,6 +561,7 @@ func findMainGoFiles(res *Result) {
 	}
 
 	cacheGoToolchainVersions(res, modDirs)
+	cacheModuleFiles(res, modDirs)
 
 	for _, modDir := range modDirs {
 		modKey, err := filepath.Rel(res.Directory, modDir)
@@ -742,73 +749,81 @@ func (r *Result) checkDirectUsage(pkg, dir, modDir string, symbols []string, fil
 		}
 	}
 
-	// Use callgraph library to build the graph directly
-	if progress {
-		fmt.Fprintf(os.Stderr, "[%s] Building SSA + call graph...\n", relDir)
-	}
-	_, prog, cg, loadedPkgs, err := r.generateCallGraphWithLibInternal(dir, files)
-	if err != nil {
-		errMsg := fmt.Sprintf("Failed to generate call graph in %s: %v", dir, err)
-		r.Errors = append(r.Errors, errMsg)
+	// Build or reuse cached SSA + call graph for this entry point
+	cacheKey := dir + ":" + strings.Join(files, ",")
+	r.Mu.Lock()
+	cached, hasCached := r.ssaCache[cacheKey]
+	r.Mu.Unlock()
+
+	var prog *ssa.Program
+	var cgGraph *callgraph.Graph
+	var loadedPkgs []*packages.Package
+
+	if hasCached {
+		prog = cached.prog
+		cgGraph = cached.cg
+		loadedPkgs = cached.loadedPkgs
 		if progress {
-			fmt.Fprintf(os.Stderr, "[%s] ✗ Failed: %v\n", relDir, err)
+			fmt.Fprintf(os.Stderr, "[%s] Reusing cached SSA + call graph, starting BFS...\n", relDir)
 		}
-		return "unknown"
+	} else {
+		if progress {
+			fmt.Fprintf(os.Stderr, "[%s] Building SSA + call graph...\n", relDir)
+		}
+		var err error
+		_, prog, cgGraph, loadedPkgs, err = r.generateCallGraphWithLibInternal(dir, files)
+		if err != nil {
+			errMsg := fmt.Sprintf("Failed to generate call graph in %s: %v", dir, err)
+			r.Errors = append(r.Errors, errMsg)
+			if progress {
+				fmt.Fprintf(os.Stderr, "[%s] ✗ Failed: %v\n", relDir, err)
+			}
+			return "unknown"
+		}
+
+		r.Mu.Lock()
+		if r.ssaCache == nil {
+			r.ssaCache = make(map[string]*ssaCacheEntry)
+		}
+		r.ssaCache[cacheKey] = &ssaCacheEntry{prog: prog, cg: cgGraph, loadedPkgs: loadedPkgs}
+		r.Mu.Unlock()
+
+		if progress {
+			fmt.Fprintf(os.Stderr, "[%s] Call graph built, starting BFS...\n", relDir)
+		}
 	}
 
 	r.SsaProg = prog
-	r.CgGraph = cg
-
-	if progress {
-		fmt.Fprintf(os.Stderr, "[%s] Call graph built, starting BFS...\n", relDir)
-	}
+	r.CgGraph = cgGraph
 
 	// Get the module path for filtering entry points to repo code only
 	repoModulePath := getRepoModulePath(dir, r)
 
 	// Find entry points from the call graph (main, init, HTTP handlers, exported functions)
-	entryPoints := extractEntryPointNodes(cg, repoModulePath, false) // Don't show entry point stats
+	entryPoints := extractEntryPointNodes(cgGraph, repoModulePath, false)
 	if len(entryPoints) == 0 {
 		errMsg := fmt.Sprintf("No entry points found in call graph for %s", dir)
 		r.Errors = append(r.Errors, errMsg)
 		return "unknown"
 	}
 
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	foundAny := false
-	var allPaths [][]*callgraph.Node
+	found := findAllSymbolsFromAny(entryPoints, pkg, symbols, progress)
 
-	for _, symbol := range symbols {
-		wg.Add(1)
-		go func(sym string) {
-			defer wg.Done()
-			// Use BFS to find path to symbol from any entry point
-			if path, found := findPathToSymbolFromAny(entryPoints, pkg, sym, progress); found {
-				r.Mu.Lock()
-				if r.UsedImports == nil {
-					r.UsedImports = make(map[string]map[string]UsedImportsDetails)
-				}
-				if r.UsedImports[modDir] == nil {
-					r.UsedImports[modDir] = make(map[string]UsedImportsDetails)
-				}
-				entry := r.UsedImports[modDir][pkg]
-				entry.Symbols = append(entry.Symbols, sym)
-				entry.Paths = append(entry.Paths, path)
-				r.UsedImports[modDir][pkg] = entry
-				r.Mu.Unlock()
-
-				mu.Lock()
-				foundAny = true
-				allPaths = append(allPaths, path)
-				mu.Unlock()
-			}
-		}(symbol)
-	}
-
-	wg.Wait()
-
-	if foundAny {
+	if len(found) > 0 {
+		r.Mu.Lock()
+		if r.UsedImports == nil {
+			r.UsedImports = make(map[string]map[string]UsedImportsDetails)
+		}
+		if r.UsedImports[modDir] == nil {
+			r.UsedImports[modDir] = make(map[string]UsedImportsDetails)
+		}
+		entry := r.UsedImports[modDir][pkg]
+		for sym, path := range found {
+			entry.Symbols = append(entry.Symbols, sym)
+			entry.Paths = append(entry.Paths, path)
+		}
+		r.UsedImports[modDir][pkg] = entry
+		r.Mu.Unlock()
 		return "true"
 	}
 
@@ -852,7 +867,7 @@ func checkIgnoredFiles(pkgs []*packages.Package, vulnPkg string) []string {
 }
 
 func getRepoModulePath(dir string, result *Result) string {
-	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	data, err := result.readModFile(filepath.Join(dir, "go.mod"))
 	if err != nil {
 		return ""
 	}
@@ -885,23 +900,27 @@ func (r *Result) generateCallGraphWithLib(dir string, files []string) (string, e
 }
 
 func (r *Result) packagesEnv(dir string) []string {
-	env := append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off")
-	for modDir, ver := range r.GoToolchainVersions {
-		fullDir := filepath.Join(r.Directory, modDir)
-		if fullDir == dir || strings.HasPrefix(dir, fullDir+string(filepath.Separator)) {
-			env = append(env, "GOTOOLCHAIN=go"+strings.TrimPrefix(ver, "v"))
-			break
+	return append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off", "GOTOOLCHAIN=local")
+}
+
+func (r *Result) packagesOverlay(dir string) map[string][]byte {
+	overlay := make(map[string][]byte)
+	for _, name := range []string{"go.mod", "go.sum"} {
+		path := filepath.Join(dir, name)
+		if data, ok := r.moduleFiles[path]; ok {
+			overlay[path] = data
 		}
 	}
-	return env
+	return overlay
 }
 
 // generateCallGraphWithLibInternal creates a call graph and returns string output, SSA program, graph object, and loaded packages
 func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (string, *ssa.Program, *callgraph.Graph, []*packages.Package, error) {
 	cfg := &packages.Config{
-		Mode: packages.LoadAllSyntax,
-		Dir:  dir,
-		Env:  r.packagesEnv(dir),
+		Mode:    packages.LoadAllSyntax,
+		Dir:     dir,
+		Env:     r.packagesEnv(dir),
+		Overlay: r.packagesOverlay(dir),
 	}
 
 	pkgs, err := packages.Load(cfg, "./...")
@@ -1111,6 +1130,50 @@ func findPathToSymbolFromAny(entries []*callgraph.Node, pkg, symbol string, prog
 	return nil, false
 }
 
+// findAllSymbolsFromAny does a single BFS per entry point, checking all symbols at once.
+// Returns a map of symbol -> path for each symbol found reachable.
+func findAllSymbolsFromAny(entries []*callgraph.Node, pkg string, symbols []string, progress bool) map[string][]*callgraph.Node {
+	found := make(map[string][]*callgraph.Node)
+	remaining := make(map[string]bool, len(symbols))
+	for _, s := range symbols {
+		remaining[s] = true
+	}
+
+	for _, entry := range entries {
+		if len(remaining) == 0 {
+			break
+		}
+		queue := []*callgraph.Node{entry}
+		parent := map[*callgraph.Node]*callgraph.Node{entry: nil}
+
+		for len(queue) > 0 {
+			node := queue[0]
+			queue = queue[1:]
+
+			for sym := range remaining {
+				if matchesSymbol(node, pkg, sym) {
+					path := reconstructPath(node, parent)
+					found[sym] = path
+					delete(remaining, sym)
+					if progress {
+						fmt.Fprintf(os.Stderr, "    ✓ Found %s\n", sym)
+					}
+					break
+				}
+			}
+
+			for _, edge := range node.Out {
+				if _, seen := parent[edge.Callee]; !seen {
+					parent[edge.Callee] = node
+					queue = append(queue, edge.Callee)
+				}
+			}
+		}
+	}
+
+	return found
+}
+
 // reconstructPath walks parent pointers backward to build the path from entry to target
 func reconstructPath(target *callgraph.Node, parent map[*callgraph.Node]*callgraph.Node) []*callgraph.Node {
 	var path []*callgraph.Node
@@ -1246,7 +1309,7 @@ func getCurrentVersion(pkg string, dir string, modDir string, result *Result) st
 		}
 	}
 
-	_, ver, found := findModuleInGoMod(pkg, dir)
+	_, ver, found := result.findModuleInGoMod(pkg, dir)
 	if !found {
 		return ""
 	}
@@ -1267,8 +1330,29 @@ func cacheGoToolchainVersions(r *Result, modDirs []string) {
 	}
 }
 
+func cacheModuleFiles(r *Result, modDirs []string) {
+	r.moduleFiles = make(map[string][]byte)
+	for _, dir := range modDirs {
+		for _, name := range []string{"go.mod", "go.sum"} {
+			path := filepath.Join(dir, name)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			r.moduleFiles[path] = data
+		}
+	}
+}
+
+func (r *Result) readModFile(path string) ([]byte, error) {
+	if data, ok := r.moduleFiles[path]; ok {
+		return data, nil
+	}
+	return os.ReadFile(path)
+}
+
 func getGoToolchainVersion(dir string, result *Result) string {
-	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	data, err := result.readModFile(filepath.Join(dir, "go.mod"))
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("Failed to read go.mod in %s: %v", dir, err))
 		return ""
@@ -1292,7 +1376,7 @@ func getGoToolchainVersion(dir string, result *Result) string {
 }
 
 func getReplaceVersion(pkg string, dir string, result *Result) (string, string) {
-	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	data, err := result.readModFile(filepath.Join(dir, "go.mod"))
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("Failed to read go.mod in %s: %v", dir, err))
 		return "", ""
@@ -1360,8 +1444,8 @@ func getFixedVersion(id, pkg string, result *Result) []string {
 	return nil
 }
 
-func getModPath(pkg, dir string) string {
-	path, _, found := findModuleInGoMod(pkg, dir)
+func getModPath(pkg, dir string, result *Result) string {
+	path, _, found := result.findModuleInGoMod(pkg, dir)
 	if !found {
 		return ""
 	}

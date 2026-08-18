@@ -1208,7 +1208,8 @@ func TestGetModPath(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/foo\ngo 1.22\nrequire golang.org/x/net v0.23.0\n"), 0644)
 
-	got := getModPath("golang.org/x/net/html", dir)
+	r := &Result{}
+	got := getModPath("golang.org/x/net/html", dir, r)
 	if got != "golang.org/x/net" {
 		t.Errorf("getModPath = %q, want %q", got, "golang.org/x/net")
 	}
@@ -1218,7 +1219,8 @@ func TestGetModPath_NotFound(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/foo\ngo 1.22\n"), 0644)
 
-	got := getModPath("golang.org/x/net", dir)
+	r := &Result{}
+	got := getModPath("golang.org/x/net", dir, r)
 	if got != "" {
 		t.Errorf("getModPath = %q, want empty", got)
 	}
@@ -1318,9 +1320,10 @@ require golang.org/x/sys v0.20.0 // indirect
 		{"net/http", false},
 		{"github.com/other/pkg", false},
 	}
+	r := &Result{}
 	for _, tt := range tests {
 		t.Run(tt.pkg, func(t *testing.T) {
-			if got := isModuleInGoMod(tt.pkg, dir); got != tt.want {
+			if got := r.isModuleInGoMod(tt.pkg, dir); got != tt.want {
 				t.Errorf("isModuleInGoMod(%q) = %v, want %v", tt.pkg, got, tt.want)
 			}
 		})
@@ -1328,7 +1331,8 @@ require golang.org/x/sys v0.20.0 // indirect
 }
 
 func TestIsModuleInGoMod_NoGoMod(t *testing.T) {
-	if isModuleInGoMod("golang.org/x/net", "/nonexistent/dir") {
+	r := &Result{}
+	if r.isModuleInGoMod("golang.org/x/net", "/nonexistent/dir") {
 		t.Error("expected false for missing go.mod")
 	}
 }
@@ -1360,9 +1364,10 @@ golang.org/x/crypto v0.17.0/go.mod h1:jkl=
 		{"golang.org/x/text", false},
 		{"github.com/other/pkg", false},
 	}
+	r := &Result{}
 	for _, tt := range tests {
 		t.Run(tt.pkg, func(t *testing.T) {
-			if got := isModuleInGoModOrSum(tt.pkg, dir); got != tt.want {
+			if got := r.isModuleInGoModOrSum(tt.pkg, dir); got != tt.want {
 				t.Errorf("isModuleInGoModOrSum(%q) = %v, want %v", tt.pkg, got, tt.want)
 			}
 		})
@@ -1378,10 +1383,11 @@ go 1.22.0
 require golang.org/x/net v0.23.0
 `), 0644)
 
-	if !isModuleInGoModOrSum("golang.org/x/net", dir) {
+	r := &Result{}
+	if !r.isModuleInGoModOrSum("golang.org/x/net", dir) {
 		t.Error("expected true for module in go.mod even without go.sum")
 	}
-	if isModuleInGoModOrSum("golang.org/x/crypto", dir) {
+	if r.isModuleInGoModOrSum("golang.org/x/crypto", dir) {
 		t.Error("expected false for module not in go.mod and no go.sum")
 	}
 }
