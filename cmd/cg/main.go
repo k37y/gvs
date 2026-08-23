@@ -162,6 +162,7 @@ func main() {
 		}
 	}
 
+	scanStart := time.Now()
 	if result.ProgressFunc != nil {
 		result.ProgressFunc(fmt.Sprintf("cg version %s", version))
 	}
@@ -211,7 +212,7 @@ func main() {
 				case <-ticker.C:
 					completed := atomic.LoadInt64(&completedJobs)
 					total := atomic.LoadInt64(&totalJobs)
-					if total > 0 {
+					if total > 0 && completed > 0 {
 						percentage := float64(completed) / float64(total) * 100
 						// Only print if percentage has changed
 						if percentage != lastPrintedPercentage {
@@ -230,23 +231,16 @@ func main() {
 	}
 
 	go func() {
-		// Count total jobs first if progress is enabled
-		if *progress {
-			for _, sets := range result.Files {
-				for range sets {
-					for range result.AffectedImports {
-						atomic.AddInt64(&totalJobs, 1)
-					}
+		seen := make(map[string]bool)
+		for modDir := range result.Files {
+			for pkg, syms := range result.AffectedImports {
+				key := modDir + "\x00" + pkg
+				if seen[key] {
+					continue
 				}
-			}
-		}
-
-		// Send jobs to workers
-		for modDir, sets := range result.Files {
-			for _, fset := range sets {
-				for pkg, syms := range result.AffectedImports {
-					jobs <- cg.Job{Package: pkg, Symbols: syms.Symbols, Dir: modDir, Files: fset}
-				}
+				seen[key] = true
+				atomic.AddInt64(&totalJobs, 1)
+				jobs <- cg.Job{Package: pkg, Symbols: syms.Symbols, Dir: modDir}
 			}
 		}
 		close(jobs)
@@ -411,6 +405,10 @@ func main() {
 
 	// Verify with Claude and generate summary
 	cg.VerifyAndSummarizeWithClaude(result, directory)
+	result.FreeSSABuilds()
+	if *progress {
+		fmt.Fprintf(os.Stderr, "Scan completed in %s\n", time.Since(scanStart).Round(time.Millisecond))
+	}
 	jsonOutput, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		errMsg := "Failed to marshal result to JSON: " + err.Error()

@@ -287,9 +287,7 @@ function highlightLog(line) {
 		return '<span class="log-error">' + s + '</span>';
 	if (/WARNING:/.test(line))
 		return '<span class="log-warn">' + s + '</span>';
-	if (/^Scan Completed/.test(line))
-		return '<span class="log-success">' + s + '</span>';
-	if (/^(Scan (?:Started|Failed)|Initializing)/.test(line))
+	if (/^(Scan Failed|Initializing)/.test(line))
 		return '<span class="log-status">' + s + '</span>';
 	if (/^(Cloning|Clone successful|Running |Found |Discovering)/.test(line))
 		return '<span class="log-info">' + s + '</span>';
@@ -397,8 +395,7 @@ function runScan() {
 	document.getElementById("reportContainer").style.display = "none";
 	
 	// Clear previous progress output and initialize new scan
-	const timestamp = new Date().toLocaleTimeString();
-	progressContent.innerHTML = highlightLog(`Scan Started at ${timestamp}`) + '\n' + highlightLog('Initializing scan...') + '\n';
+	progressContent.innerHTML = highlightLog('Initializing scan...') + '\n';
 	
 	scanButton.disabled = true;
 	scanButton.innerText = "Scanning...";
@@ -553,8 +550,6 @@ function runScan() {
 							progressContent.innerHTML += logLines.join('\n') + '\n';
 						}
 
-						const timestamp = new Date().toLocaleTimeString();
-						progressContent.innerHTML += highlightLog(`Scan Completed Successfully at ${timestamp}`) + '\n';
 						progressContent.scrollTop = progressContent.scrollHeight;
 
 					saveScanToHistory({

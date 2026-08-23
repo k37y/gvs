@@ -1,6 +1,6 @@
 module github.com/k37y/gvs
 
-go 1.26.5
+go 1.27.0
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.56.0

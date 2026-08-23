@@ -101,12 +101,10 @@ func VerifyAndSummarizeWithClaude(result *Result, repoDir string) {
 		&listEntryPointsTool{repoDir: repoDir, progressFunc: pf},
 		&checkTransitiveDepsTool{repoDir: repoDir, progressFunc: pf},
 	}
-	if result.SsaProg != nil {
-		tools = append(tools, &findImplementationsTool{prog: result.SsaProg, progressFunc: pf})
-	}
-	if result.CgGraph != nil {
+	if build := result.firstSSABuild(); build != nil {
+		tools = append(tools, &findImplementationsTool{prog: build.prog, progressFunc: pf})
 		modPath := readModulePath(repoDir)
-		tools = append(tools, &findCallersTool{graph: result.CgGraph, repoModulePath: modPath, progressFunc: pf})
+		tools = append(tools, &findCallersTool{graph: build.cg, repoModulePath: modPath, progressFunc: pf})
 	}
 
 	runner := client.Beta.Messages.NewToolRunner(tools, anthropic.BetaToolRunnerParams{

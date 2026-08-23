@@ -2168,6 +2168,8 @@ func TestCheckDirectUsage_Found(t *testing.T) {
 	r := &Result{ScanConfig: ScanConfig{Directory: dir}}
 	t.Setenv("ALGO", "rta")
 
+
+
 	result := r.checkDirectUsage("fmt", dir, ".", []string{"fmt.Println"}, nil)
 	if result != "true" {
 		t.Errorf("expected 'true' for fmt.Println usage, got %q", result)
@@ -2178,6 +2180,8 @@ func TestCheckDirectUsage_NotFound(t *testing.T) {
 	dir := filepath.Join("testdata", "simple")
 	r := &Result{ScanConfig: ScanConfig{Directory: dir}}
 	t.Setenv("ALGO", "rta")
+
+
 
 	result := r.checkDirectUsage("crypto/tls", dir, ".", []string{"crypto/tls.Dial"}, nil)
 	if result == "true" {
@@ -2295,6 +2299,8 @@ func TestIsSymbolUsed(t *testing.T) {
 	dir := filepath.Join("testdata", "simple")
 	r := &Result{ScanConfig: ScanConfig{Directory: dir}}
 	t.Setenv("ALGO", "rta")
+
+
 
 	result := r.isSymbolUsed("fmt", dir, ".", []string{"Println"}, []string{"main.go"})
 	if result != "true" {

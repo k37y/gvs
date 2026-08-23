@@ -54,10 +54,93 @@ import (
 	"github.com/k37y/gvs/internal/common"
 )
 
-type ssaCacheEntry struct {
-	prog       *ssa.Program
-	cg         *callgraph.Graph
-	loadedPkgs []*packages.Package
+type ssaBuild struct {
+	prog        *ssa.Program
+	cg          *callgraph.Graph
+	loadedPkgs  []*packages.Package
+	entryPoints []*callgraph.Node
+	err         error
+	once        sync.Once
+}
+
+// getSSABuild returns the SSA build for a directory, building it on first access.
+// Concurrent callers for the same directory block until the build completes.
+// Different directories build in parallel.
+func (r *Result) getSSABuild(dir string) *ssaBuild {
+	r.Mu.Lock()
+	if r.ssaBuilds == nil {
+		r.ssaBuilds = make(map[string]*ssaBuild)
+	}
+	build, ok := r.ssaBuilds[dir]
+	if !ok {
+		build = &ssaBuild{}
+		r.ssaBuilds[dir] = build
+	}
+	r.Mu.Unlock()
+
+	build.once.Do(func() {
+		relDir := dir
+		if r.Directory != "" && strings.HasPrefix(dir, r.Directory) {
+			relDir = strings.TrimPrefix(dir, r.Directory)
+			relDir = strings.TrimPrefix(relDir, "/")
+		}
+		if relDir == "" {
+			relDir = "."
+		}
+
+		if r.Progress {
+			fmt.Fprintf(os.Stderr, "[%s] Building SSA + call graph...\n", relDir)
+		}
+
+		prog, cg, loadedPkgs, err := r.buildSSAAndCallGraph(dir)
+		if err != nil {
+			build.err = err
+			r.Mu.Lock()
+			r.Errors = append(r.Errors, fmt.Sprintf("Failed to generate call graph in %s: %v", dir, err))
+			r.Mu.Unlock()
+			if r.Progress {
+				fmt.Fprintf(os.Stderr, "[%s] ✗ Failed: %v\n", relDir, err)
+			}
+			return
+		}
+
+		repoModulePath := getRepoModulePath(dir, r)
+		entryPoints := extractEntryPointNodes(cg, repoModulePath, false)
+
+		build.prog = prog
+		build.cg = cg
+		build.loadedPkgs = loadedPkgs
+		build.entryPoints = entryPoints
+
+		if r.Progress {
+			fmt.Fprintf(os.Stderr, "[%s] Loaded %d packages, call graph built (%d nodes, %d entry points)\n", relDir, len(loadedPkgs), len(cg.Nodes), len(entryPoints))
+		}
+	})
+
+	if build.err != nil {
+		return nil
+	}
+	return build
+}
+
+func (r *Result) firstSSABuild() *ssaBuild {
+	for _, b := range r.ssaBuilds {
+		return b
+	}
+	return nil
+}
+
+func (r *Result) FreeSSABuilds() {
+	r.Mu.Lock()
+	defer r.Mu.Unlock()
+	for k, b := range r.ssaBuilds {
+		b.prog = nil
+		b.cg = nil
+		b.loadedPkgs = nil
+		b.entryPoints = nil
+		delete(r.ssaBuilds, k)
+	}
+	r.ssaBuilds = nil
 }
 
 func (r *Result) runner() cli.CommandRunner {
@@ -739,75 +822,31 @@ func (r *Result) isSymbolUsed(pkg, dir, modDir string, symbols, files []string) 
 func (r *Result) checkDirectUsage(pkg, dir, modDir string, symbols []string, files []string) string {
 	progress := r.Progress
 
-	// Compute relative directory for progress messages
-	relDir := dir
-	if r.Directory != "" && strings.HasPrefix(dir, r.Directory) {
-		relDir = strings.TrimPrefix(dir, r.Directory)
-		relDir = strings.TrimPrefix(relDir, "/")
-		if relDir == "" {
-			relDir = "."
-		}
+	build := r.getSSABuild(dir)
+	if build == nil {
+		return "unknown"
 	}
 
-	// Build or reuse cached SSA + call graph for this entry point
-	cacheKey := dir + ":" + strings.Join(files, ",")
-	r.Mu.Lock()
-	cached, hasCached := r.ssaCache[cacheKey]
-	r.Mu.Unlock()
-
-	var prog *ssa.Program
-	var cgGraph *callgraph.Graph
-	var loadedPkgs []*packages.Package
-
-	if hasCached {
-		prog = cached.prog
-		cgGraph = cached.cg
-		loadedPkgs = cached.loadedPkgs
-		if progress {
-			fmt.Fprintf(os.Stderr, "[%s] Reusing cached SSA + call graph, starting BFS...\n", relDir)
-		}
-	} else {
-		if progress {
-			fmt.Fprintf(os.Stderr, "[%s] Building SSA + call graph...\n", relDir)
-		}
-		var err error
-		_, prog, cgGraph, loadedPkgs, err = r.generateCallGraphWithLibInternal(dir, files)
-		if err != nil {
-			errMsg := fmt.Sprintf("Failed to generate call graph in %s: %v", dir, err)
-			r.Errors = append(r.Errors, errMsg)
-			if progress {
-				fmt.Fprintf(os.Stderr, "[%s] ✗ Failed: %v\n", relDir, err)
-			}
-			return "unknown"
-		}
-
-		r.Mu.Lock()
-		if r.ssaCache == nil {
-			r.ssaCache = make(map[string]*ssaCacheEntry)
-		}
-		r.ssaCache[cacheKey] = &ssaCacheEntry{prog: prog, cg: cgGraph, loadedPkgs: loadedPkgs}
-		r.Mu.Unlock()
-
-		if progress {
-			fmt.Fprintf(os.Stderr, "[%s] Call graph built, starting BFS...\n", relDir)
-		}
-	}
-
-	r.SsaProg = prog
-	r.CgGraph = cgGraph
-
-	// Get the module path for filtering entry points to repo code only
-	repoModulePath := getRepoModulePath(dir, r)
-
-	// Find entry points from the call graph (main, init, HTTP handlers, exported functions)
-	entryPoints := extractEntryPointNodes(cgGraph, repoModulePath, false)
-	if len(entryPoints) == 0 {
+	if len(build.entryPoints) == 0 {
 		errMsg := fmt.Sprintf("No entry points found in call graph for %s", dir)
 		r.Errors = append(r.Errors, errMsg)
 		return "unknown"
 	}
 
-	found := findAllSymbolsFromAny(entryPoints, pkg, symbols, progress)
+	relDir := modDir
+	if relDir == "" {
+		relDir = "."
+	}
+
+	if progress {
+		fmt.Fprintf(os.Stderr, "[%s] BFS: searching %d entry points for %d %s symbols...\n", relDir, len(build.entryPoints), len(symbols), pkg)
+	}
+
+	found, visited := findAllSymbolsFromAny(build.entryPoints, pkg, symbols)
+
+	if progress {
+		fmt.Fprintf(os.Stderr, "[%s] BFS: visited %d nodes, found %d/%d %s symbols\n", relDir, visited, len(found), len(symbols), pkg)
+	}
 
 	if len(found) > 0 {
 		r.Mu.Lock()
@@ -827,7 +866,7 @@ func (r *Result) checkDirectUsage(pkg, dir, modDir string, symbols []string, fil
 		return "true"
 	}
 
-	if warnings := checkIgnoredFiles(loadedPkgs, pkg); len(warnings) > 0 {
+	if warnings := checkIgnoredFiles(build.loadedPkgs, pkg); len(warnings) > 0 {
 		r.Mu.Lock()
 		r.Errors = append(r.Errors, warnings...)
 		r.Mu.Unlock()
@@ -903,33 +942,20 @@ func (r *Result) packagesEnv(dir string) []string {
 	return append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off", "GOTOOLCHAIN=local")
 }
 
-func (r *Result) packagesOverlay(dir string) map[string][]byte {
-	overlay := make(map[string][]byte)
-	for _, name := range []string{"go.mod", "go.sum"} {
-		path := filepath.Join(dir, name)
-		if data, ok := r.moduleFiles[path]; ok {
-			overlay[path] = data
-		}
-	}
-	return overlay
-}
-
-// generateCallGraphWithLibInternal creates a call graph and returns string output, SSA program, graph object, and loaded packages
-func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (string, *ssa.Program, *callgraph.Graph, []*packages.Package, error) {
+func (r *Result) buildSSAAndCallGraph(dir string) (*ssa.Program, *callgraph.Graph, []*packages.Package, error) {
 	cfg := &packages.Config{
-		Mode:    packages.LoadAllSyntax,
-		Dir:     dir,
-		Env:     r.packagesEnv(dir),
-		Overlay: r.packagesOverlay(dir),
+		Mode: packages.LoadAllSyntax,
+		Dir:  dir,
+		Env:  r.packagesEnv(dir),
 	}
 
 	pkgs, err := packages.Load(cfg, "./...")
 	if err != nil {
-		return "", nil, nil, nil, fmt.Errorf("failed to load packages: %v", err)
+		return nil, nil, nil, fmt.Errorf("failed to load packages: %v", err)
 	}
 
 	if len(pkgs) == 0 {
-		return "", nil, nil, nil, fmt.Errorf("no packages loaded")
+		return nil, nil, nil, fmt.Errorf("no packages loaded")
 	}
 
 	var validPkgs []*packages.Package
@@ -948,7 +974,7 @@ func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (s
 
 		pkgs, err = packages.Load(cfg, "./...")
 		if err != nil {
-			return "", nil, nil, nil, fmt.Errorf("failed to load packages with fallback: %v", err)
+			return nil, nil, nil, fmt.Errorf("failed to load packages with fallback: %v", err)
 		}
 
 		for _, pkg := range pkgs {
@@ -959,30 +985,34 @@ func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (s
 	}
 
 	if len(validPkgs) == 0 {
-		return "", nil, nil, nil, fmt.Errorf("no valid packages found after loading")
+		return nil, nil, nil, fmt.Errorf("no valid packages found after loading")
 	}
 
-	// Create SSA program with InstantiateGenerics for call graph analysis
 	prog, _ := ssautil.AllPackages(validPkgs, ssa.InstantiateGenerics)
 	prog.Build()
 
-	// Get the algorithm from environment variable and build call graph
 	algo := getCallGraphAlgorithm()
 	cg := buildCallGraph(prog, algo)
 
-	// Convert call graph to string format matching callgraph binary output
+	return prog, cg, pkgs, nil
+}
+
+func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (string, *ssa.Program, *callgraph.Graph, []*packages.Package, error) {
+	prog, cg, pkgs, err := r.buildSSAAndCallGraph(dir)
+	if err != nil {
+		return "", nil, nil, nil, err
+	}
+
 	var output strings.Builder
 	for _, node := range cg.Nodes {
 		if node.Func == nil {
 			continue
 		}
-
 		caller := node.Func.String()
 		for _, edge := range node.Out {
 			if edge.Callee == nil || edge.Callee.Func == nil {
 				continue
 			}
-
 			callee := edge.Callee.Func.String()
 			output.WriteString(fmt.Sprintf("%s %s\n", caller, callee))
 		}
@@ -1130,48 +1160,52 @@ func findPathToSymbolFromAny(entries []*callgraph.Node, pkg, symbol string, prog
 	return nil, false
 }
 
-// findAllSymbolsFromAny does a single BFS per entry point, checking all symbols at once.
-// Returns a map of symbol -> path for each symbol found reachable.
-func findAllSymbolsFromAny(entries []*callgraph.Node, pkg string, symbols []string, progress bool) map[string][]*callgraph.Node {
+// findAllSymbolsFromAny does multi-source BFS from all entry points simultaneously.
+// Each node is visited exactly once regardless of entry point count.
+// Returns a map of symbol -> path for each symbol found reachable, and total nodes visited.
+func findAllSymbolsFromAny(entries []*callgraph.Node, pkg string, symbols []string) (map[string][]*callgraph.Node, int) {
 	found := make(map[string][]*callgraph.Node)
+	parent := make(map[*callgraph.Node]*callgraph.Node, len(entries))
+	queue := make([]*callgraph.Node, 0, len(entries))
+
+	for _, entry := range entries {
+		if _, seen := parent[entry]; !seen {
+			parent[entry] = nil
+			queue = append(queue, entry)
+		}
+	}
+
 	remaining := make(map[string]bool, len(symbols))
 	for _, s := range symbols {
 		remaining[s] = true
 	}
 
-	for _, entry := range entries {
-		if len(remaining) == 0 {
-			break
-		}
-		queue := []*callgraph.Node{entry}
-		parent := map[*callgraph.Node]*callgraph.Node{entry: nil}
+	visited := 0
+	for len(queue) > 0 && len(remaining) > 0 {
+		node := queue[0]
+		queue = queue[1:]
+		visited++
 
-		for len(queue) > 0 {
-			node := queue[0]
-			queue = queue[1:]
-
-			for sym := range remaining {
-				if matchesSymbol(node, pkg, sym) {
-					path := reconstructPath(node, parent)
-					found[sym] = path
-					delete(remaining, sym)
-					if progress {
-						fmt.Fprintf(os.Stderr, "    ✓ Found %s\n", sym)
-					}
-					break
-				}
+		var matched []string
+		for sym := range remaining {
+			if matchesSymbol(node, pkg, sym) {
+				matched = append(matched, sym)
 			}
+		}
+		for _, sym := range matched {
+			found[sym] = reconstructPath(node, parent)
+			delete(remaining, sym)
+		}
 
-			for _, edge := range node.Out {
-				if _, seen := parent[edge.Callee]; !seen {
-					parent[edge.Callee] = node
-					queue = append(queue, edge.Callee)
-				}
+		for _, edge := range node.Out {
+			if _, seen := parent[edge.Callee]; !seen {
+				parent[edge.Callee] = node
+				queue = append(queue, edge.Callee)
 			}
 		}
 	}
 
-	return found
+	return found, visited
 }
 
 // reconstructPath walks parent pointers backward to build the path from entry to target

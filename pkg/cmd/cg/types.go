@@ -5,7 +5,6 @@ import (
 	"sync"
 
 	"golang.org/x/tools/go/callgraph"
-	"golang.org/x/tools/go/ssa"
 
 	"github.com/k37y/gvs/internal/cli"
 )
@@ -75,9 +74,7 @@ type Result struct {
 	GoToolchainVersions map[string]string   `json:"-"`
 	Mu                 sync.Mutex          `json:"-"`
 	Progress           bool                `json:"-"`
-	SsaProg            *ssa.Program        `json:"-"`
-	CgGraph            *callgraph.Graph    `json:"-"`
-	ssaCache           map[string]*ssaCacheEntry `json:"-"`
+	ssaBuilds          map[string]*ssaBuild      `json:"-"`
 	moduleFiles        map[string][]byte         `json:"-"`
 }
 
