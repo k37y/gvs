@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -15,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"golang.org/x/tools/go/callgraph"
@@ -27,8 +30,9 @@ import (
 var version string
 
 func main() {
-	// Note: sfdp is checked conditionally when -graph flag is used
-	// digraph is no longer required - we use the callgraph.Graph directly with BFS
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	tools := []string{"go", "git"}
 	if !utils.ValidateTools(tools, os.Stderr) {
 		os.Exit(1)
@@ -148,11 +152,11 @@ func main() {
 		}
 	}
 
-	// Initialize result
 	result := &cg.Result{
 		ScanConfig: cg.ScanConfig{
 			CVE:       cveID,
 			Directory: directory,
+			Ctx:       ctx,
 		},
 		IsVulnerable: "unknown",
 	}

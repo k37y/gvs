@@ -1,4 +1,5 @@
 let scanInProgress = false;
+let currentTaskId = null;
 
 // API Configuration
 const API_BASE_URL = (window.GVS_CONFIG && window.GVS_CONFIG.API_BASE_URL) || '';
@@ -397,8 +398,7 @@ function runScan() {
 	// Clear previous progress output and initialize new scan
 	progressContent.innerHTML = highlightLog('Initializing scan...') + '\n';
 	
-	scanButton.disabled = true;
-	scanButton.innerText = "Scanning...";
+	scanButton.innerText = "Cancel Scan";
 	
 	// Save form values to history when scan starts
 	if (repo) {
@@ -452,12 +452,13 @@ function runScan() {
 				}
 
 				const taskId = data.taskId;
+				currentTaskId = taskId;
 				pollStatus(taskId, true);
 			})
 			.catch(err => {
 				outputDiv.innerHTML += `<strong>Network Error:</strong> ${err.message}<br>`;
 				outputDiv.classList.add("alert-danger");
-				
+
 				progressContent.innerHTML += highlightLog(`Network Error: ${err.message}`) + '\n';
 				progressContent.scrollTop = progressContent.scrollHeight;
 			});
@@ -489,6 +490,7 @@ function runScan() {
 				}
 
 				const taskId = data.taskId;
+				currentTaskId = taskId;
 				pollStatus(taskId, true);
 			})
 			.catch(error => {
@@ -531,6 +533,15 @@ function runScan() {
 						progressContent.innerHTML += highlightLog(`Scan Failed at ${timestamp}: ${statusData.error}`) + '\n';
 						progressContent.scrollTop = progressContent.scrollHeight;
 						
+						clearInterval(intervalId);
+						cleanup();
+						return;
+					}
+
+					if (statusData.status === "cancelled") {
+						outputDiv.innerHTML = '<strong>Scan cancelled.</strong>';
+						progressContent.innerHTML += highlightLog('Scan cancelled by user.') + '\n';
+						progressContent.scrollTop = progressContent.scrollHeight;
 						clearInterval(intervalId);
 						cleanup();
 						return;
@@ -591,16 +602,41 @@ function runScan() {
 		scanButton.disabled = false;
 		scanButton.innerText = "Run Scan";
 		scanInProgress = false;
-		
-		// Close progress stream if active
+		currentTaskId = null;
+
 		if (window.currentProgressStream) {
 			window.currentProgressStream.close();
 			window.currentProgressStream = null;
 		}
-		
-		// Keep progress output visible after scan completion
-		// Don't reset the progress card here
 	}
+}
+
+function handleScanButton() {
+	if (scanInProgress) {
+		cancelScan();
+	} else {
+		runScan();
+	}
+}
+
+function cancelScan() {
+	if (!currentTaskId) return;
+
+	const scanButton = document.getElementById("scanButton");
+	scanButton.disabled = true;
+	scanButton.innerText = "Cancelling...";
+
+	const progressContent = document.getElementById("resultProgressContent");
+	progressContent.innerHTML += highlightLog('Cancelling scan...') + '\n';
+	progressContent.scrollTop = progressContent.scrollHeight;
+
+	fetch(`${API_BASE_URL}/cancel`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ taskId: currentTaskId })
+	}).catch(err => {
+		console.error('Cancel request failed:', err);
+	});
 }
 
 function startProgressStream(taskId) {

@@ -1,13 +1,16 @@
 package cli
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestDefaultRunnerImplementsInterface(t *testing.T) {
 	var _ CommandRunner = DefaultRunner{}
 }
 
 func TestRunCommand(t *testing.T) {
-	out, err := RunCommand("", "echo", "hello")
+	out, err := RunCommand(context.Background(), "", "echo", "hello")
 	if err != nil {
 		t.Fatalf("RunCommand failed: %v", err)
 	}
@@ -17,7 +20,7 @@ func TestRunCommand(t *testing.T) {
 }
 
 func TestRunCommandStdout(t *testing.T) {
-	out, err := RunCommandStdout("", "echo", "hello")
+	out, err := RunCommandStdout(context.Background(), "", "echo", "hello")
 	if err != nil {
 		t.Fatalf("RunCommandStdout failed: %v", err)
 	}
@@ -27,14 +30,14 @@ func TestRunCommandStdout(t *testing.T) {
 }
 
 func TestRunCommand_Error(t *testing.T) {
-	_, err := RunCommand("", "nonexistent_cmd_xyz")
+	_, err := RunCommand(context.Background(), "", "nonexistent_cmd_xyz")
 	if err == nil {
 		t.Error("expected error for nonexistent command")
 	}
 }
 
 func TestRunCommand_Dir(t *testing.T) {
-	out, err := RunCommand("/tmp", "pwd")
+	out, err := RunCommand(context.Background(), "/tmp", "pwd")
 	if err != nil {
 		t.Fatalf("RunCommand failed: %v", err)
 	}

@@ -84,7 +84,7 @@ func VerifyAndSummarizeWithClaude(result *Result, repoDir string) {
 	result.progress(fmt.Sprintf("[claude] Calling Vertex AI agentic loop (project=%s, location=%s, model=%s, max_iterations=%d)...",
 		cfg.ProjectID, cfg.Location, cfg.Model, cfg.MaxIterations))
 
-	ctx := context.Background()
+	ctx := result.ctx()
 	client := anthropic.NewClient(
 		vertex.WithGoogleAuth(ctx, cfg.Location, cfg.ProjectID),
 	)

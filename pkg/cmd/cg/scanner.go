@@ -23,6 +23,7 @@ package cg
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"go/ast"
@@ -141,6 +142,13 @@ func (r *Result) FreeSSABuilds() {
 		delete(r.ssaBuilds, k)
 	}
 	r.ssaBuilds = nil
+}
+
+func (r *Result) ctx() context.Context {
+	if r.Ctx != nil {
+		return r.Ctx
+	}
+	return context.Background()
 }
 
 func (r *Result) runner() cli.CommandRunner {
@@ -291,6 +299,12 @@ func Prepare(r *Result) bool {
 func Worker(jobs <-chan Job, results chan<- *Result, wg *sync.WaitGroup, result *Result) {
 	defer wg.Done()
 	for job := range jobs {
+		select {
+		case <-result.ctx().Done():
+			results <- &Result{IsVulnerable: "false"}
+			continue
+		default:
+		}
 		dir := filepath.Join(result.Directory, job.Dir)
 		if result.AffectedImports[job.Package].Type != "stdlib" && !result.isModuleInGoModOrSum(job.Package, dir) {
 			results <- &Result{IsVulnerable: "false"}
@@ -590,7 +604,12 @@ func (j Job) isVulnerable(result *Result) *Result {
 func fetchGoVulnID(result *Result) string {
 	url := VulnsURL + "/index/vulns.json"
 
-	resp, err := result.httpClient().Get(url)
+	req, err := http.NewRequestWithContext(result.ctx(), http.MethodGet, url, nil)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("Failed to create request for %s: %v", url, err))
+		return ""
+	}
+	resp, err := result.httpClient().Do(req)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to get response from %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
@@ -701,7 +720,12 @@ func findMainGoFiles(res *Result) {
 func fetchAffectedSymbols(result *Result) {
 	url := fmt.Sprintf(VulnsURL+"/ID/%s.json", result.GoCVE)
 
-	resp, err := result.httpClient().Get(url)
+	req, err := http.NewRequestWithContext(result.ctx(), http.MethodGet, url, nil)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("Failed to create request for %s: %v", url, err))
+		return
+	}
+	resp, err := result.httpClient().Do(req)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed HTTP request to %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
@@ -842,7 +866,7 @@ func (r *Result) checkDirectUsage(pkg, dir, modDir string, symbols []string, fil
 		fmt.Fprintf(os.Stderr, "[%s] BFS: searching %d entry points for %d %s symbols...\n", relDir, len(build.entryPoints), len(symbols), pkg)
 	}
 
-	found, visited := findAllSymbolsFromAny(build.entryPoints, pkg, symbols)
+	found, visited := findAllSymbolsFromAny(build.entryPoints, pkg, symbols, r.ctx())
 
 	if progress {
 		fmt.Fprintf(os.Stderr, "[%s] BFS: visited %d nodes, found %d/%d %s symbols\n", relDir, visited, len(found), len(symbols), pkg)
@@ -944,9 +968,10 @@ func (r *Result) packagesEnv(dir string) []string {
 
 func (r *Result) buildSSAAndCallGraph(dir string) (*ssa.Program, *callgraph.Graph, []*packages.Package, error) {
 	cfg := &packages.Config{
-		Mode: packages.LoadAllSyntax,
-		Dir:  dir,
-		Env:  r.packagesEnv(dir),
+		Mode:    packages.LoadAllSyntax,
+		Dir:     dir,
+		Env:     r.packagesEnv(dir),
+		Context: r.ctx(),
 	}
 
 	pkgs, err := packages.Load(cfg, "./...")
@@ -967,9 +992,10 @@ func (r *Result) buildSSAAndCallGraph(dir string) (*ssa.Program, *callgraph.Grap
 
 	if len(validPkgs) == 0 {
 		cfg = &packages.Config{
-			Mode: packages.LoadSyntax,
-			Dir:  dir,
-			Env:  r.packagesEnv(dir),
+			Mode:    packages.LoadSyntax,
+			Dir:     dir,
+			Env:     r.packagesEnv(dir),
+			Context: r.ctx(),
 		}
 
 		pkgs, err = packages.Load(cfg, "./...")
@@ -1163,7 +1189,7 @@ func findPathToSymbolFromAny(entries []*callgraph.Node, pkg, symbol string, prog
 // findAllSymbolsFromAny does multi-source BFS from all entry points simultaneously.
 // Each node is visited exactly once regardless of entry point count.
 // Returns a map of symbol -> path for each symbol found reachable, and total nodes visited.
-func findAllSymbolsFromAny(entries []*callgraph.Node, pkg string, symbols []string) (map[string][]*callgraph.Node, int) {
+func findAllSymbolsFromAny(entries []*callgraph.Node, pkg string, symbols []string, ctx ...context.Context) (map[string][]*callgraph.Node, int) {
 	found := make(map[string][]*callgraph.Node)
 	parent := make(map[*callgraph.Node]*callgraph.Node, len(entries))
 	queue := make([]*callgraph.Node, 0, len(entries))
@@ -1180,8 +1206,21 @@ func findAllSymbolsFromAny(entries []*callgraph.Node, pkg string, symbols []stri
 		remaining[s] = true
 	}
 
+	var cancelCtx context.Context
+	if len(ctx) > 0 && ctx[0] != nil {
+		cancelCtx = ctx[0]
+	}
+
 	visited := 0
 	for len(queue) > 0 && len(remaining) > 0 {
+		if cancelCtx != nil && visited%1000 == 0 {
+			select {
+			case <-cancelCtx.Done():
+				return found, visited
+			default:
+			}
+		}
+
 		node := queue[0]
 		queue = queue[1:]
 		visited++
@@ -1432,7 +1471,12 @@ func getReplaceVersion(pkg string, dir string, result *Result) (string, string) 
 
 func getFixedVersion(id, pkg string, result *Result) []string {
 	url := fmt.Sprintf(VulnsURL+"/ID/%s.json", id)
-	resp, err := result.httpClient().Get(url)
+	req, err := http.NewRequestWithContext(result.ctx(), http.MethodGet, url, nil)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("Failed to create request for %s: %v", url, err))
+		return nil
+	}
+	resp, err := result.httpClient().Do(req)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to get response from %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
@@ -1489,7 +1533,7 @@ func getModPath(pkg, dir string, result *Result) string {
 func getGitBranch(result *Result) {
 	cmd := "git"
 	args := []string{"rev-parse", "--abbrev-ref", "HEAD"}
-	out, err := result.runner().RunCommandStdout(result.Directory, cmd, args...)
+	out, err := result.runner().RunCommandStdout(result.ctx(), result.Directory, cmd, args...)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), result.Directory, strings.TrimSpace(string(out)))
 		result.Errors = append(result.Errors, errMsg)
@@ -1503,7 +1547,7 @@ func getGitBranch(result *Result) {
 	if branchName == "HEAD" {
 		commitCmd := "git"
 		commitArgs := []string{"rev-parse", "HEAD"}
-		commitOut, err := result.runner().RunCommandStdout(result.Directory, commitCmd, commitArgs...)
+		commitOut, err := result.runner().RunCommandStdout(result.ctx(), result.Directory, commitCmd, commitArgs...)
 		if err != nil {
 			errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", commitCmd, strings.Join(commitArgs, " "), result.Directory, strings.TrimSpace(string(commitOut)))
 			result.Errors = append(result.Errors, errMsg)
@@ -1520,7 +1564,7 @@ func getGitBranch(result *Result) {
 func getGitURL(result *Result) {
 	cmd := "git"
 	args := []string{"remote", "get-url", "origin"}
-	out, err := result.runner().RunCommandStdout(result.Directory, cmd, args...)
+	out, err := result.runner().RunCommandStdout(result.ctx(), result.Directory, cmd, args...)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), result.Directory, strings.TrimSpace(string(out)))
 		result.Errors = append(result.Errors, errMsg)

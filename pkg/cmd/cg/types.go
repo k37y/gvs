@@ -1,6 +1,7 @@
 package cg
 
 import (
+	"context"
 	"net/http"
 	"sync"
 
@@ -11,6 +12,7 @@ import (
 
 type HTTPClient interface {
 	Get(url string) (*http.Response, error)
+	Do(req *http.Request) (*http.Response, error)
 }
 
 var VulnsURL = "https://vuln.go.dev"
@@ -49,11 +51,12 @@ type ReflectionRisk struct {
 
 // ScanConfig holds the input configuration for a scan.
 type ScanConfig struct {
-	CVE          string       `json:"CVE,omitempty"`
-	Directory    string       `json:"Directory,omitempty"`
-	ProgressFunc func(string) `json:"-"`
+	CVE          string            `json:"CVE,omitempty"`
+	Directory    string            `json:"Directory,omitempty"`
+	Ctx          context.Context   `json:"-"`
+	ProgressFunc func(string)      `json:"-"`
 	Runner       cli.CommandRunner `json:"-"`
-	HTTP         HTTPClient       `json:"-"`
+	HTTP         HTTPClient        `json:"-"`
 }
 
 type Result struct {

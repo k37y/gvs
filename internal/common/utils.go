@@ -2,6 +2,7 @@ package common
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -75,10 +76,10 @@ func UniqueStrings(input []string) []string {
 	return result
 }
 
-func CloneRepo(repoURL, branchOrCommit, cloneDir string) error {
+func CloneRepo(ctx context.Context, repoURL, branchOrCommit, cloneDir string) error {
 	os.Setenv("GIT_TERMINAL_PROMPT", "0")
 
-	checkCmd := exec.Command("git", "ls-remote", "--exit-code", repoURL)
+	checkCmd := exec.CommandContext(ctx, "git", "ls-remote", "--exit-code", repoURL)
 	var checkStderr bytes.Buffer
 	checkCmd.Stderr = &checkStderr
 
@@ -90,11 +91,9 @@ func CloneRepo(repoURL, branchOrCommit, cloneDir string) error {
 	isCommitHash := isCommitHash(branchOrCommit)
 
 	if isCommitHash {
-		// For commit hashes, we need to clone the entire repo first, then checkout the specific commit
-		return cloneByCommit(repoURL, branchOrCommit, cloneDir)
+		return cloneByCommit(ctx, repoURL, branchOrCommit, cloneDir)
 	} else {
-		// For branches, use the existing optimized approach
-		return cloneByBranch(repoURL, branchOrCommit, cloneDir)
+		return cloneByBranch(ctx, repoURL, branchOrCommit, cloneDir)
 	}
 }
 
@@ -115,9 +114,8 @@ func isCommitHash(ref string) bool {
 	return true
 }
 
-// cloneByBranch clones a repository by branch name (optimized with shallow clone)
-func cloneByBranch(repoURL, branch, cloneDir string) error {
-	cmd := exec.Command("git", "clone", "--depth", "1", "--branch", branch, "--single-branch", repoURL, cloneDir)
+func cloneByBranch(ctx context.Context, repoURL, branch, cloneDir string) error {
+	cmd := exec.CommandContext(ctx, "git", "clone", "--depth", "1", "--branch", branch, "--single-branch", repoURL, cloneDir)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -128,10 +126,8 @@ func cloneByBranch(repoURL, branch, cloneDir string) error {
 	return nil
 }
 
-// cloneByCommit clones a repository and checks out a specific commit
-func cloneByCommit(repoURL, commit, cloneDir string) error {
-	// Step 1: Clone the full repository (no --depth for commits)
-	cmd := exec.Command("git", "clone", repoURL, cloneDir)
+func cloneByCommit(ctx context.Context, repoURL, commit, cloneDir string) error {
+	cmd := exec.CommandContext(ctx, "git", "clone", repoURL, cloneDir)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -140,8 +136,7 @@ func cloneByCommit(repoURL, commit, cloneDir string) error {
 		return fmt.Errorf("git clone failed: %v\n%s", err, stderr.String())
 	}
 
-	// Step 2: Checkout the specific commit
-	checkoutCmd := exec.Command("git", "-C", cloneDir, "checkout", commit)
+	checkoutCmd := exec.CommandContext(ctx, "git", "-C", cloneDir, "checkout", commit)
 	var checkoutStderr bytes.Buffer
 	checkoutCmd.Stderr = &checkoutStderr
 
@@ -170,8 +165,8 @@ func FindGoModDirs(root string) ([]string, error) {
 	return dirs, err
 }
 
-func RunGovulncheck(directory, target string) (string, int, error) {
-	cmd := exec.Command("govulncheck", "-format", "sarif", "-C", directory, target)
+func RunGovulncheck(ctx context.Context, directory, target string) (string, int, error) {
+	cmd := exec.CommandContext(ctx, "govulncheck", "-format", "sarif", "-C", directory, target)
 	var out bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &out

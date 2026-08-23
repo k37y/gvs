@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -272,5 +273,103 @@ func TestProgressHandler_Stream(t *testing.T) {
 	}
 	if !strings.Contains(body, "data: step 2") {
 		t.Errorf("expected 'data: step 2' in body, got: %s", body)
+	}
+}
+
+func TestCancelHandler_MissingTaskID(t *testing.T) {
+	req := httptest.NewRequest("POST", "/cancel", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+
+	CancelHandler(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestCancelHandler_InvalidJSON(t *testing.T) {
+	req := httptest.NewRequest("POST", "/cancel", strings.NewReader("not json"))
+	rec := httptest.NewRecorder()
+
+	CancelHandler(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestCancelHandler_UnknownTask(t *testing.T) {
+	req := httptest.NewRequest("POST", "/cancel", strings.NewReader(`{"taskId":"unknown-999"}`))
+	rec := httptest.NewRecorder()
+
+	CancelHandler(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestCancelHandler_TaskNotRunning(t *testing.T) {
+	taskMutex.Lock()
+	taskStore["done-task"] = &TaskResult{Status: StatusCompleted, Output: "{}"}
+	taskMutex.Unlock()
+	defer func() {
+		taskMutex.Lock()
+		delete(taskStore, "done-task")
+		taskMutex.Unlock()
+	}()
+
+	req := httptest.NewRequest("POST", "/cancel", strings.NewReader(`{"taskId":"done-task"}`))
+	rec := httptest.NewRecorder()
+
+	CancelHandler(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestCancelHandler_Success(t *testing.T) {
+	_, cancel := context.WithCancel(context.Background())
+
+	taskMutex.Lock()
+	taskStore["running-task"] = &TaskResult{Status: StatusRunning}
+	taskMutex.Unlock()
+
+	taskCancelMutex.Lock()
+	taskCancels["running-task"] = cancel
+	taskCancelMutex.Unlock()
+
+	defer func() {
+		taskMutex.Lock()
+		delete(taskStore, "running-task")
+		taskMutex.Unlock()
+		taskCancelMutex.Lock()
+		delete(taskCancels, "running-task")
+		taskCancelMutex.Unlock()
+	}()
+
+	req := httptest.NewRequest("POST", "/cancel", strings.NewReader(`{"taskId":"running-task"}`))
+	rec := httptest.NewRecorder()
+
+	CancelHandler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	if body["status"] != "cancelled" {
+		t.Errorf("status = %q, want %q", body["status"], "cancelled")
+	}
+
+	taskMutex.Lock()
+	result := taskStore["running-task"]
+	taskMutex.Unlock()
+	if result.Status != StatusCancelled {
+		t.Errorf("task status = %q, want %q", result.Status, StatusCancelled)
 	}
 }

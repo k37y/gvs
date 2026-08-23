@@ -1,6 +1,7 @@
 package cg
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"go/ast"
@@ -32,7 +33,7 @@ func (f *fakeRunner) key(command string, args ...string) string {
 	return s
 }
 
-func (f *fakeRunner) RunCommand(dir string, command string, args ...string) ([]byte, error) {
+func (f *fakeRunner) RunCommand(_ context.Context, dir string, command string, args ...string) ([]byte, error) {
 	k := f.key(command, args...)
 	if e, ok := f.err[k]; ok {
 		return f.combined[k], e
@@ -40,7 +41,7 @@ func (f *fakeRunner) RunCommand(dir string, command string, args ...string) ([]b
 	return f.combined[k], nil
 }
 
-func (f *fakeRunner) RunCommandStdout(dir string, command string, args ...string) ([]byte, error) {
+func (f *fakeRunner) RunCommandStdout(_ context.Context, dir string, command string, args ...string) ([]byte, error) {
 	k := f.key(command, args...)
 	if e, ok := f.err[k]; ok {
 		return f.stdout[k], e
@@ -48,8 +49,8 @@ func (f *fakeRunner) RunCommandStdout(dir string, command string, args ...string
 	return f.stdout[k], nil
 }
 
-func (f *fakeRunner) RunCommandWithEnv(dir string, env []string, command string, args ...string) ([]byte, error) {
-	return f.RunCommand(dir, command, args...)
+func (f *fakeRunner) RunCommandWithEnv(_ context.Context, dir string, env []string, command string, args ...string) ([]byte, error) {
+	return f.RunCommand(context.Background(), dir, command, args...)
 }
 
 func newFakeRunner() *fakeRunner {

@@ -72,6 +72,7 @@ func main() {
 	http.HandleFunc("/healthz", api.CORSMiddleware(api.HealthHandler))
 	http.HandleFunc("/callgraph", api.CORSMiddleware(api.CallgraphHandler))
 	http.HandleFunc("/status", api.CORSMiddleware(api.StatusHandler))
+	http.HandleFunc("/cancel", api.CORSMiddleware(api.CancelHandler))
 	http.HandleFunc("/progress/", api.CORSMiddleware(api.ProgressHandler))
 
 	srv := &http.Server{Addr: ":" + port}
