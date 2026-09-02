@@ -236,7 +236,10 @@ func main() {
 
 	go func() {
 		seen := make(map[string]bool)
-		for modDir := range result.Files {
+		for modDir, mainFiles := range result.Files {
+			if len(mainFiles) == 0 {
+				continue
+			}
 			for pkg, syms := range result.AffectedImports {
 				key := modDir + "\x00" + pkg
 				if seen[key] {
