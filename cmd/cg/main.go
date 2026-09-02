@@ -1,44 +1,42 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"golang.org/x/tools/go/callgraph"
 
-	"github.com/k37y/gvs/internal/cli"
 	"github.com/k37y/gvs/internal/common"
 	"github.com/k37y/gvs/pkg/cmd/cg"
 	"github.com/k37y/gvs/pkg/utils"
 )
 
+var version string
+
 func main() {
-	// Note: sfdp is checked conditionally when -graph flag is used
-	// digraph is no longer required - we use the callgraph.Graph directly with BFS
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	tools := []string{"go", "git"}
-	if !utils.ValidateTools(tools) {
+	if !utils.ValidateTools(tools, os.Stderr) {
 		os.Exit(1)
 	}
-
-	cg.LogClaudeStatus()
 
 	// Define flags
 	var algo = flag.String("algo", "rta", "call graph algorithm: rta (default), cha, vta, static")
@@ -47,6 +45,7 @@ func main() {
 	var symbols = flag.String("symbols", "", "override symbol(s) to scan for (comma-separated, e.g., Parse,Render)")
 	var fixversion = flag.String("fixversion", "", "fixed version for manual scans (e.g., v1.9.4)")
 	var graph = flag.String("graph", "", "generate call graph SVG visualization (default: ./site/callgraph.svg if flag used without value)")
+	var showVersion = flag.Bool("version", false, "print version and exit")
 
 	// Custom usage function
 	flag.Usage = func() {
@@ -58,6 +57,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  When -library and -symbols are provided, they take precedence over CVE-based symbol lookup.\n")
 		fmt.Fprintf(os.Stderr, "  Optionally use -fixversion to specify the fixed version for version comparison.\n")
 		fmt.Fprintf(os.Stderr, "  This allows scanning for specific library/symbol combinations directly.\n")
+		fmt.Fprintf(os.Stderr, "  -fixversion supports version ranges as introduced:fixed pairs (comma-separated):\n")
+		fmt.Fprintf(os.Stderr, "    -fixversion v1.9.4                              (single fix version)\n")
+		fmt.Fprintf(os.Stderr, "    -fixversion \"0:2.7.26,2.9.13:2.11.14\"           (version ranges)\n")
 		fmt.Fprintf(os.Stderr, "\nCall Graph Visualization:\n")
 		fmt.Fprintf(os.Stderr, "  Use -graph to generate an SVG visualization of the call graph.\n")
 		fmt.Fprintf(os.Stderr, "  -graph          : Saves to ./site/callgraph-<random>.svg (default)\n")
@@ -69,15 +71,10 @@ func main() {
 	// Parse flags
 	flag.Parse()
 
-	// Get positional arguments
-	args := flag.Args()
-	if len(args) != 2 {
-		flag.Usage()
-		os.Exit(1)
+	if *showVersion {
+		fmt.Println(version)
+		os.Exit(0)
 	}
-
-	cveID := args[0]
-	directory := args[1]
 
 	// Validate that library, symbols, and fixversion are all provided together
 	libraryProvided := *library != ""
@@ -94,6 +91,31 @@ func main() {
 			fmt.Fprintf(os.Stderr, "\nPlease provide all three fields or none.\n")
 			os.Exit(1)
 		}
+	}
+
+	// Get positional arguments
+	// Manual scan mode: CVE is optional, only directory required
+	// Normal mode: both CVE and directory required
+	args := flag.Args()
+	var cveID, directory string
+	if anyManualScanFieldProvided {
+		switch len(args) {
+		case 1:
+			directory = args[0]
+		case 2:
+			cveID = args[0]
+			directory = args[1]
+		default:
+			fmt.Fprintf(os.Stderr, "Usage: %s [options] -library <pkg> -symbols <syms> -fixversion <ver> [CVE ID] <directory>\n", os.Args[0])
+			os.Exit(1)
+		}
+	} else {
+		if len(args) != 2 {
+			flag.Usage()
+			os.Exit(1)
+		}
+		cveID = args[0]
+		directory = args[1]
 	}
 
 	if info, err := os.Stat(directory); err != nil || !info.IsDir() {
@@ -130,13 +152,40 @@ func main() {
 		}
 	}
 
-	// Initialize result with progress tracking if enabled
-	var result *cg.Result
+	result := &cg.Result{
+		ScanConfig: cg.ScanConfig{
+			CVE:       cveID,
+			Directory: directory,
+			Ctx:       ctx,
+		},
+		IsVulnerable: "unknown",
+	}
 	if *progress {
-		fmt.Fprintf(os.Stderr, "Initializing vulnerability scan...\n")
-		result = initResultWithProgress(cveID, directory, *library, *symbols, *fixversion)
+		result.ProgressFunc = func(msg string) {
+			fmt.Fprintf(os.Stderr, "%s\n", msg)
+		}
+	}
+
+	scanStart := time.Now()
+	if result.ProgressFunc != nil {
+		result.ProgressFunc(fmt.Sprintf("cg version %s", version))
+	}
+	cg.LogClaudeStatus(result.ProgressFunc)
+
+	// Setup: library mode or CVE mode
+	var done bool
+	if anyManualScanFieldProvided {
+		done = cg.SetupLibraryMode(result, *library, *symbols, *fixversion)
 	} else {
-		result = cg.InitResult(cveID, directory, *library, *symbols, *fixversion)
+		done = cg.SetupCVEMode(result)
+	}
+	if !done {
+		done = cg.Prepare(result)
+	}
+	if done {
+		jsonOutput, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Println(string(jsonOutput))
+		os.Exit(0)
 	}
 
 	// Set progress flag on result for scanner to use
@@ -167,7 +216,7 @@ func main() {
 				case <-ticker.C:
 					completed := atomic.LoadInt64(&completedJobs)
 					total := atomic.LoadInt64(&totalJobs)
-					if total > 0 {
+					if total > 0 && completed > 0 {
 						percentage := float64(completed) / float64(total) * 100
 						// Only print if percentage has changed
 						if percentage != lastPrintedPercentage {
@@ -186,23 +235,19 @@ func main() {
 	}
 
 	go func() {
-		// Count total jobs first if progress is enabled
-		if *progress {
-			for _, sets := range result.Files {
-				for range sets {
-					for range result.AffectedImports {
-						atomic.AddInt64(&totalJobs, 1)
-					}
-				}
+		seen := make(map[string]bool)
+		for modDir, mainFiles := range result.Files {
+			if len(mainFiles) == 0 {
+				continue
 			}
-		}
-
-		// Send jobs to workers
-		for modDir, sets := range result.Files {
-			for _, fset := range sets {
-				for pkg, syms := range result.AffectedImports {
-					jobs <- cg.Job{Package: pkg, Symbols: syms.Symbols, Dir: modDir, Files: fset}
+			for pkg, syms := range result.AffectedImports {
+				key := modDir + "\x00" + pkg
+				if seen[key] {
+					continue
 				}
+				seen[key] = true
+				atomic.AddInt64(&totalJobs, 1)
+				jobs <- cg.Job{Package: pkg, Symbols: syms.Symbols, Dir: modDir}
 			}
 		}
 		close(jobs)
@@ -213,7 +258,6 @@ func main() {
 		close(results)
 	}()
 
-	mergedImports := make(map[string]cg.UsedImportsDetails)
 	hasVulnerable := false
 	hasUnknown := false
 	hasProcessedAny := false
@@ -221,50 +265,21 @@ func main() {
 	for res := range results {
 		hasProcessedAny = true
 
-		// Increment completed jobs counter for progress tracking
 		if *progress {
-			atomic.AddInt64(&completedJobs, 1)
+			completed := atomic.AddInt64(&completedJobs, 1)
+			total := atomic.LoadInt64(&totalJobs)
+			if total > 0 {
+				percentage := float64(completed) / float64(total) * 100
+				fmt.Fprintf(os.Stderr, "Progress: %d/%d jobs completed (%.1f%%)\n", completed, total, percentage)
+				lastPrintedPercentage = percentage
+			}
 		}
 
-		// Track the overall vulnerability status across all packages
 		switch res.IsVulnerable {
 		case "true":
 			hasVulnerable = true
 		case "unknown":
 			hasUnknown = true
-		}
-
-		// Merge imports for all packages where symbols were found (informational)
-		for pkg, symbols := range res.UsedImports {
-			entry := mergedImports[pkg]
-
-			// Merge paths (once per package, before symbol loop)
-			entry.Paths = append(entry.Paths, symbols.Paths...)
-
-			for _, sym := range symbols.Symbols {
-				if strings.HasPrefix(sym, pkg+".") {
-					sym = strings.TrimPrefix(sym, pkg+".")
-				}
-				entry.Symbols = append(entry.Symbols, sym)
-			}
-
-			if entry.CurrentVersion == "" {
-				entry.CurrentVersion = symbols.CurrentVersion
-			}
-			if entry.ReplaceModule == "" {
-				entry.ReplaceModule = symbols.ReplaceModule
-			}
-			if entry.ReplaceVersion == "" {
-				entry.ReplaceVersion = symbols.ReplaceVersion
-			}
-			if entry.FixCommands == nil {
-				entry.FixCommands = symbols.FixCommands
-			}
-			entry.Dir = append(entry.Dir, symbols.Dir...)
-
-			result.Mu.Lock()
-			mergedImports[pkg] = entry
-			result.Mu.Unlock()
 		}
 	}
 
@@ -273,33 +288,35 @@ func main() {
 		close(progressDone)
 		completed := atomic.LoadInt64(&completedJobs)
 		total := atomic.LoadInt64(&totalJobs)
-		// Only print final progress if 100% hasn't been printed yet
 		if lastPrintedPercentage != 100.0 {
 			fmt.Fprintf(os.Stderr, "Progress: %d/%d jobs completed (100.0%%)\n", completed, total)
 		}
 	}
 
-	for pkg, details := range mergedImports {
-		deduped := common.UniqueStrings(details.Symbols)
-		isSymbolsEmpty := len(deduped) == 0
-		isCurrentVersionEmpty := details.CurrentVersion == ""
-		isReplaceVersionEmpty := details.ReplaceVersion == ""
-
-		if isSymbolsEmpty && isCurrentVersionEmpty && isReplaceVersionEmpty {
-			delete(mergedImports, pkg)
-			continue
+	// Deduplicate and normalize symbols within each dir/pkg entry
+	for dir, pkgs := range result.UsedImports {
+		for pkg, details := range pkgs {
+			for i, sym := range details.Symbols {
+				if strings.HasPrefix(sym, pkg+".") {
+					details.Symbols[i] = strings.TrimPrefix(sym, pkg+".")
+				}
+			}
+			deduped := common.UniqueStrings(details.Symbols)
+			if len(deduped) == 0 && details.CurrentVersion == "" && details.ReplaceVersion == "" {
+				delete(pkgs, pkg)
+				continue
+			}
+			if len(deduped) > 0 {
+				sort.Strings(deduped)
+				details.Symbols = deduped
+			}
+			pkgs[pkg] = details
 		}
-
-		if !isSymbolsEmpty {
-			sort.Strings(deduped)
-			details.Symbols = deduped
+		if len(pkgs) == 0 {
+			delete(result.UsedImports, dir)
 		}
-		details.Dir = common.UniqueStrings(details.Dir)
-		sort.Strings(details.Dir)
-		mergedImports[pkg] = details
 	}
 
-	// Properly determine final vulnerability status
 	if hasVulnerable {
 		result.IsVulnerable = "true"
 	} else if hasUnknown {
@@ -307,31 +324,19 @@ func main() {
 	} else if hasProcessedAny {
 		result.IsVulnerable = "false"
 	} else {
-		// No packages were processed (shouldn't happen, but safe fallback)
 		result.IsVulnerable = "unknown"
-	}
-	// Always set UsedImports from merged data (informational)
-	result.UsedImports = mergedImports
-
-	// Remove UsedImports entries that have no symbols (only version info)
-	// These are libraries that were checked but no vulnerable symbols were found
-	for pkg, details := range result.UsedImports {
-		if len(details.Symbols) == 0 {
-			delete(result.UsedImports, pkg)
-		}
 	}
 
 	// Generate call graph visualizations if requested (one per affected symbol)
 	if *graph != "" || isFlagPassed("graph") {
 		// Validate that sfdp is available
-		if !utils.ValidateTools([]string{"sfdp"}) {
+		if !utils.ValidateTools([]string{"sfdp"}, os.Stderr) {
 			errMsg := "sfdp tool not found. Please install graphviz (provides sfdp) to generate call graph visualizations"
 			result.Errors = append(result.Errors, errMsg)
 			if *progress {
 				fmt.Fprintf(os.Stderr, "✗ %s\n", errMsg)
 			}
-	} else if len(result.UsedImports) > 0 {
-		// Generate graphs for any found symbols (informational)
+	} else if result.IsVulnerable == "true" && len(result.UsedImports) > 0 {
 			if *progress {
 				fmt.Fprintf(os.Stderr, "Generating call graph visualizations for affected symbols...\n")
 			}
@@ -363,36 +368,36 @@ func main() {
 
 			// Generate a graph for each vulnerable symbol
 			result.GraphPaths = []string{}
-			for pkg, details := range result.UsedImports {
-				for _, symbol := range details.Symbols {
-					// Create filename: library-symbol.svg
-					// Sanitize names for filesystem (CVE is in the directory structure when using -graph with server)
-					sanitizedLib := strings.ReplaceAll(pkg, "/", "-")
-				sanitizedSymbol := strings.ReplaceAll(symbol, "/", "-")
-				sanitizedSymbol = strings.ReplaceAll(sanitizedSymbol, ".", "-")
-				sanitizedSymbol = strings.ReplaceAll(sanitizedSymbol, "*", "ptr")
-				sanitizedSymbol = strings.ReplaceAll(sanitizedSymbol, "(", "")
-				sanitizedSymbol = strings.ReplaceAll(sanitizedSymbol, ")", "")
+			for _, pkgs := range result.UsedImports {
+				for pkg, details := range pkgs {
+					for _, symbol := range details.Symbols {
+						sanitizedLib := strings.ReplaceAll(pkg, "/", "-")
+						sanitizedSymbol := strings.ReplaceAll(symbol, "/", "-")
+						sanitizedSymbol = strings.ReplaceAll(sanitizedSymbol, ".", "-")
+						sanitizedSymbol = strings.ReplaceAll(sanitizedSymbol, "*", "ptr")
+						sanitizedSymbol = strings.ReplaceAll(sanitizedSymbol, "(", "")
+						sanitizedSymbol = strings.ReplaceAll(sanitizedSymbol, ")", "")
 
-					filename := fmt.Sprintf("%s-%s.svg", sanitizedLib, sanitizedSymbol)
-					outputPath := filepath.Join(outputDir, filename)
+						filename := fmt.Sprintf("%s-%s.svg", sanitizedLib, sanitizedSymbol)
+						outputPath := filepath.Join(outputDir, filename)
 
-					if *progress {
-						fmt.Fprintf(os.Stderr, "  Generating graph for %s.%s...\n", pkg, symbol)
-					}
-
-					svgPath, err := generateCallGraphSVGForSymbol(result, directory, pkg, symbol, outputPath, *progress)
-					if err != nil {
-						errMsg := fmt.Sprintf("Failed to generate call graph for %s.%s: %v", pkg, symbol, err)
-						result.Errors = append(result.Errors, errMsg)
 						if *progress {
-							fmt.Fprintf(os.Stderr, "  ✗ Failed: %v\n", err)
+							fmt.Fprintf(os.Stderr, "  Generating graph for %s.%s...\n", pkg, symbol)
 						}
-					} else {
-						if *progress {
-							fmt.Fprintf(os.Stderr, "  ✓ Saved to: %s\n", svgPath)
+
+						svgPath, err := generateCallGraphSVGForSymbol(result, directory, pkg, symbol, outputPath, *progress)
+						if err != nil {
+							errMsg := fmt.Sprintf("Failed to generate call graph for %s.%s: %v", pkg, symbol, err)
+							result.Errors = append(result.Errors, errMsg)
+							if *progress {
+								fmt.Fprintf(os.Stderr, "  ✗ Failed: %v\n", err)
+							}
+						} else {
+							if *progress {
+								fmt.Fprintf(os.Stderr, "  ✓ Saved to: %s\n", svgPath)
+							}
+							result.GraphPaths = append(result.GraphPaths, svgPath)
 						}
-						result.GraphPaths = append(result.GraphPaths, svgPath)
 					}
 				}
 			}
@@ -407,6 +412,10 @@ func main() {
 
 	// Verify with Claude and generate summary
 	cg.VerifyAndSummarizeWithClaude(result, directory)
+	result.FreeSSABuilds()
+	if *progress {
+		fmt.Fprintf(os.Stderr, "Scan completed in %s\n", time.Since(scanStart).Round(time.Millisecond))
+	}
 	jsonOutput, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		errMsg := "Failed to marshal result to JSON: " + err.Error()
@@ -465,25 +474,25 @@ func pathToDOT(path []*callgraph.Node) string {
 // generateCallGraphSVGForSymbol generates an SVG visualization of the call graph for a specific symbol
 func generateCallGraphSVGForSymbol(result *cg.Result, directory, pkg, symbol, outputPath string, showProgress bool) (string, error) {
 	// Try to use the stored path from the result first (most efficient)
-	if details, ok := result.UsedImports[pkg]; ok && len(details.Paths) > 0 {
-		// Find the path that corresponds to this symbol
-		for i, sym := range details.Symbols {
-			if sym == symbol && i < len(details.Paths) {
-				path := details.Paths[i]
-				if len(path) > 0 {
-					if showProgress {
-						fmt.Fprintf(os.Stderr, "    Using stored path (%d nodes)...\n", len(path))
+	for _, pkgs := range result.UsedImports {
+		if details, ok := pkgs[pkg]; ok && len(details.Paths) > 0 {
+			for i, sym := range details.Symbols {
+				if sym == symbol && i < len(details.Paths) {
+					path := details.Paths[i]
+					if len(path) > 0 {
+						if showProgress {
+							fmt.Fprintf(os.Stderr, "    Using stored path (%d nodes)...\n", len(path))
+						}
+						return generateSVGFromPath(path, outputPath, showProgress)
 					}
-					return generateSVGFromPath(path, outputPath, showProgress)
 				}
 			}
-		}
-		// If no matching path, use the first available path
-		if len(details.Paths[0]) > 0 {
-			if showProgress {
-				fmt.Fprintf(os.Stderr, "    Using first available path (%d nodes)...\n", len(details.Paths[0]))
+			if len(details.Paths[0]) > 0 {
+				if showProgress {
+					fmt.Fprintf(os.Stderr, "    Using first available path (%d nodes)...\n", len(details.Paths[0]))
+				}
+				return generateSVGFromPath(details.Paths[0], outputPath, showProgress)
 			}
-			return generateSVGFromPath(details.Paths[0], outputPath, showProgress)
 		}
 	}
 
@@ -512,8 +521,8 @@ func generateCallGraphSVGForSymbol(result *cg.Result, directory, pkg, symbol, ou
 
 	// Generate call graph using the scanner's function
 	tempResult := &cg.Result{
-		Directory: directory,
-		Errors:    []string{},
+		ScanConfig: cg.ScanConfig{Directory: directory},
+		Errors:     []string{},
 	}
 
 	if showProgress {
@@ -590,434 +599,3 @@ func generateSVGFromPath(path []*callgraph.Node, outputPath string, showProgress
 	return outputPath, nil
 }
 
-// initResultWithProgress initializes the result with progress tracking for each phase
-func initResultWithProgress(cve, dir string, library, symbols, fixversion string) *cg.Result {
-	r := &cg.Result{
-		CVE:          cve,
-		Directory:    dir,
-		IsVulnerable: "unknown",
-	}
-
-	// Check if library and symbols are provided for direct scanning (takes precedence)
-	if library != "" || symbols != "" || fixversion != "" {
-		// Validate that all three parameters are provided together
-		if library == "" || symbols == "" || fixversion == "" {
-			r = &cg.Result{
-				GoCVE:        "",
-				IsVulnerable: "unknown",
-				CVE:          r.CVE,
-				Directory:    r.Directory,
-				Errors:       []string{"When using library mode, all three flags are required: -library, -symbols, and -fixversion"},
-			}
-			jsonOutput, err := json.MarshalIndent(r, "", "  ")
-			if err != nil {
-				errMsg := "Failed to marshal results to JSON: " + err.Error()
-				r.Errors = append(r.Errors, errMsg)
-			}
-			fmt.Println(string(jsonOutput))
-			os.Exit(0)
-		}
-
-		// Validate that values are not just whitespace
-		if strings.TrimSpace(library) == "" || strings.TrimSpace(symbols) == "" || strings.TrimSpace(fixversion) == "" {
-			r = &cg.Result{
-				GoCVE:        "",
-				IsVulnerable: "unknown",
-				CVE:          r.CVE,
-				Directory:    r.Directory,
-				Errors:       []string{"Library mode parameters cannot be empty or whitespace only"},
-			}
-			jsonOutput, err := json.MarshalIndent(r, "", "  ")
-			if err != nil {
-				errMsg := "Failed to marshal results to JSON: " + err.Error()
-				r.Errors = append(r.Errors, errMsg)
-			}
-			fmt.Println(string(jsonOutput))
-			os.Exit(0)
-		}
-
-		fmt.Fprintf(os.Stderr, "Phase 1/6: Using provided library and symbol override...\n")
-		fmt.Fprintf(os.Stderr, "  Library: %s\n", library)
-		fmt.Fprintf(os.Stderr, "  Symbol(s): %s\n", symbols)
-
-		// Set a placeholder GoCVE to indicate manual scanning
-		if cve != "" {
-			if common.IsGOCVEID(cve) {
-				r.GoCVE = cve
-			} else if common.IsCVEID(cve) {
-				fetchGoVulnIDWithProgress(r)
-			}
-		} else {
-			r.GoCVE = "MANUAL-SCAN"
-		}
-
-		// Phase 2: Use provided library and symbols instead of fetching
-		fmt.Fprintf(os.Stderr, "Phase 2/6: Using provided library and symbols...\n")
-		symbolList := strings.Split(symbols, ",")
-		for i := range symbolList {
-			symbolList[i] = strings.TrimSpace(symbolList[i])
-		}
-
-		// Validate that at least one non-empty symbol exists after trimming
-		hasValidSymbol := false
-		for _, sym := range symbolList {
-			if sym != "" {
-				hasValidSymbol = true
-				break
-			}
-		}
-		if !hasValidSymbol {
-			r = &cg.Result{
-				GoCVE:        "",
-				IsVulnerable: "unknown",
-				CVE:          r.CVE,
-				Directory:    r.Directory,
-				Errors:       []string{"At least one non-empty symbol is required"},
-			}
-			jsonOutput, err := json.MarshalIndent(r, "", "  ")
-			if err != nil {
-				errMsg := "Failed to marshal results to JSON: " + err.Error()
-				r.Errors = append(r.Errors, errMsg)
-			}
-			fmt.Println(string(jsonOutput))
-			os.Exit(0)
-		}
-
-		details := cg.AffectedImportsDetails{
-			Symbols: symbolList,
-			Type:    "non-stdlib",
-		}
-
-		// Add fixed version (now guaranteed to be non-empty)
-		details.FixedVersion = []string{fixversion}
-		fmt.Fprintf(os.Stderr, "  Using fixed version: %s\n", fixversion)
-
-		r.AffectedImports = map[string]cg.AffectedImportsDetails{
-			library: details,
-		}
-
-		// Check if it's a stdlib package
-		if strings.HasPrefix(library, "crypto/") || strings.HasPrefix(library, "net/") ||
-		   strings.HasPrefix(library, "encoding/") || strings.HasPrefix(library, "os/") ||
-		   !strings.Contains(library, ".") {
-			entry := r.AffectedImports[library]
-			entry.Type = "stdlib"
-			r.AffectedImports[library] = entry
-		}
-		fmt.Fprintf(os.Stderr, "  ✓ Using %d symbol(s) for library %s\n", len(symbolList), library)
-	} else {
-		// Phase 1: Determine vulnerability ID type and fetch if needed
-		fmt.Fprintf(os.Stderr, "Phase 1/6: Processing vulnerability identifier...\n")
-		if common.IsGOCVEID(cve) {
-			// Input is already a GOCVE ID, use it directly
-			r.GoCVE = cve
-			fmt.Fprintf(os.Stderr, "  ✓ Using provided GOCVE ID: %s\n", cve)
-		} else if common.IsCVEID(cve) {
-			// Input is a CVE ID, convert to GOCVE ID
-			fmt.Fprintf(os.Stderr, "  Converting CVE ID to GOCVE ID...\n")
-			fetchGoVulnIDWithProgress(r)
-		} else {
-			// Invalid input format
-			r = &cg.Result{
-				GoCVE:        "Invalid input format",
-				IsVulnerable: "unknown",
-				CVE:          r.CVE,
-				Directory:    r.Directory,
-				Branch:       r.Branch,
-				Repository:   r.Repository,
-				Unsafe:       r.Unsafe,
-				Reflect:      r.Reflect,
-				Errors:       []string{"Invalid input format. Please provide either a CVE ID (CVE-YYYY-NNNN) or GOCVE ID (GO-YYYY-NNNN)"},
-			}
-			jsonOutput, err := json.MarshalIndent(r, "", "  ")
-			if err != nil {
-				errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
-				r.Errors = append(r.Errors, errMsg)
-			}
-			fmt.Println(string(jsonOutput))
-			os.Exit(0)
-		}
-
-		// Phase 2: Fetch affected symbols
-		fmt.Fprintf(os.Stderr, "Phase 2/6: Fetching affected symbols...\n")
-		fetchAffectedSymbolsWithProgress(r)
-	}
-
-	// Early exit if no vulnerable symbols found
-	if len(r.AffectedImports) == 0 {
-		fmt.Fprintf(os.Stderr, "Scan aborted: No vulnerable symbols to analyze.\n")
-		r.IsVulnerable = "unknown"
-		jsonOutput, err := json.MarshalIndent(r, "", "  ")
-		if err != nil {
-			errMsg := "Failed to marshal results to JSON: " + err.Error()
-			r.Errors = append(r.Errors, errMsg)
-		}
-		fmt.Println(string(jsonOutput))
-		os.Exit(0)
-	}
-
-	// Phase 3: Find main Go files and directories
-	fmt.Fprintf(os.Stderr, "Phase 3/6: Discovering Go modules and main files...\n")
-	findMainGoFilesWithProgress(r)
-
-	// Phase 4: Get git branch
-	fmt.Fprintf(os.Stderr, "Phase 4/6: Getting git branch information...\n")
-	getGitBranchWithProgress(r)
-
-	// Phase 5: Get git URL
-	fmt.Fprintf(os.Stderr, "Phase 5/6: Getting git repository URL...\n")
-	getGitURLWithProgress(r)
-
-	// Phase 6: Detect unsafe/reflect usage
-	fmt.Fprintf(os.Stderr, "Phase 6/6: Detecting unsafe and reflect package usage...\n")
-	cg.DetectUnsafeReflectUsage(r, func(msg string) {
-		fmt.Fprintf(os.Stderr, "%s\n", msg)
-	})
-
-	if r.GoCVE == "" {
-		r = &cg.Result{
-			GoCVE:        "",
-			IsVulnerable: "unknown",
-			CVE:          r.CVE,
-			Directory:    r.Directory,
-			Branch:       r.Branch,
-			Repository:   r.Repository,
-			Unsafe:       r.Unsafe,
-			Reflect:      r.Reflect,
-			Errors:       []string{"No Go CVE ID found"},
-		}
-		jsonOutput, err := json.MarshalIndent(r, "", "  ")
-		if err != nil {
-			errMsg := "Failed to marshal results to JSON: " + err.Error()
-			r.Errors = append(r.Errors, errMsg)
-		}
-		fmt.Println(string(jsonOutput))
-		os.Exit(0)
-	}
-
-	fmt.Fprintf(os.Stderr, "Initialization complete. Starting vulnerability analysis...\n")
-	return r
-}
-
-// Progress-aware wrapper functions for initialization phases
-
-func fetchGoVulnIDWithProgress(result *cg.Result) {
-	client := http.Client{Timeout: 10 * time.Second}
-	url := "https://vuln.go.dev/index/vulns.json"
-
-	resp, err := client.Get(url)
-	if err != nil {
-		errMsg := fmt.Sprintf("Failed to get response from %s: %v", url, err)
-		result.Errors = append(result.Errors, errMsg)
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		errMsg := fmt.Sprintf("Failed to read response body from %s: %v", url, err)
-		result.Errors = append(result.Errors, errMsg)
-		return
-	}
-
-	var vulns []cg.VulnReport
-	if err := json.Unmarshal(body, &vulns); err != nil {
-		errMsg := fmt.Sprintf("Failed to marshal response body from %s: %v", url, err)
-		result.Errors = append(result.Errors, errMsg)
-		return
-	}
-
-	for _, v := range vulns {
-		if slices.Contains(v.Aliases, result.CVE) {
-			result.GoCVE = v.ID
-			break
-		}
-	}
-
-	fmt.Fprintf(os.Stderr, "  ✓ Go vulnerability ID fetched: %s\n", result.GoCVE)
-}
-
-func fetchAffectedSymbolsWithProgress(result *cg.Result) {
-	client := http.Client{Timeout: 10 * time.Second}
-	url := fmt.Sprintf("https://vuln.go.dev/ID/%s.json", result.GoCVE)
-
-	resp, err := client.Get(url)
-	if err != nil {
-		errMsg := fmt.Sprintf("Failed HTTP request to %s: %v", url, err)
-		result.Errors = append(result.Errors, errMsg)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		errMsg := fmt.Sprintf("Failed to connect %s: %s", url, resp.Status)
-		result.Errors = append(result.Errors, errMsg)
-		return
-	}
-
-	var detail cg.VulnReport
-	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
-		errMsg := fmt.Sprintf("Failed to parse JSON: %v", err)
-		result.Errors = append(result.Errors, errMsg)
-		return
-	}
-
-	// Validate that required fields are not empty
-	if len(detail.Affected) == 0 {
-		result.Errors = append(result.Errors, "Affected packages list is empty")
-		fmt.Fprintf(os.Stderr, "  ✗ Error: Affected packages list is empty\n")
-		return
-	}
-
-	imports := make(map[string]cg.AffectedImportsDetails)
-	symbolCount := 0
-	hasValidImports := false
-
-	for _, aff := range detail.Affected {
-		typ := "non-stdlib"
-		if aff.Package.Name == "stdlib" {
-			typ = "stdlib"
-		}
-
-		// Check if imports are empty
-		if len(aff.EcosystemSpecific.Imports) == 0 {
-			continue
-		}
-
-		for _, imp := range aff.EcosystemSpecific.Imports {
-			// Skip imports with empty path or symbols
-			if imp.Path == "" || len(imp.Symbols) == 0 {
-				continue
-			}
-
-			entry := imports[imp.Path]
-			entry.Symbols = append(entry.Symbols, imp.Symbols...)
-			entry.Type = typ
-			imports[imp.Path] = entry
-			symbolCount += len(imp.Symbols)
-			hasValidImports = true
-		}
-	}
-
-	// Validate that we found at least one valid import with symbols
-	if !hasValidImports {
-		result.Errors = append(result.Errors, "No imports or symbols found in vulnerability data")
-		fmt.Fprintf(os.Stderr, "  ✗ Error: No imports or symbols found in vulnerability data\n")
-		return
-	}
-
-	result.AffectedImports = imports
-	fmt.Fprintf(os.Stderr, "  ✓ Affected symbols fetched: %d symbols across %d packages\n", symbolCount, len(imports))
-}
-
-func findMainGoFilesWithProgress(result *cg.Result) {
-	fmt.Fprintf(os.Stderr, "  Scanning directory structure...\n")
-
-	fileResult := make(map[string][][]string)
-	var modDirs []string
-
-	// Walk directory with progress feedback
-	err := filepath.WalkDir(result.Directory, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() && (strings.HasPrefix(d.Name(), ".")) {
-			return filepath.SkipDir
-		}
-		if d.IsDir() && d.Name() == "vendor" {
-			return filepath.SkipDir
-		}
-		if d.Name() == "go.mod" {
-			modDirs = append(modDirs, filepath.Dir(path))
-			fmt.Fprintf(os.Stderr, "  Found Go module: %s\n", filepath.Dir(path))
-		}
-		return nil
-	})
-	if err != nil {
-		errMsg := fmt.Sprintf("Failed to run filepath.WalkDir in %s: %v", result.Directory, err)
-		result.Errors = append(result.Errors, errMsg)
-	}
-
-	fmt.Fprintf(os.Stderr, "  Analyzing %d Go modules...\n", len(modDirs))
-
-	for i, modDir := range modDirs {
-		fmt.Fprintf(os.Stderr, "  Processing module %d/%d: %s\n", i+1, len(modDirs), modDir)
-
-		cmd := "go"
-		args := []string{"list", "-f", `{{if eq .Name "main"}}{{.Name}}: {{.Dir}}{{end}}`, "./..."}
-		out, err := cli.RunCommand(modDir, cmd, args...)
-		if err != nil {
-			errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), modDir, strings.TrimSpace(string(out)))
-			result.Errors = append(result.Errors, errMsg)
-			continue
-		}
-
-		modKey, err := filepath.Rel(result.Directory, modDir)
-		if err != nil {
-			modKey = modDir
-		}
-
-		var sets [][]string
-		mainPackageCount := 0
-
-		scanner := bufio.NewScanner(bytes.NewReader(out))
-		for scanner.Scan() {
-			line := scanner.Text()
-			if !strings.HasPrefix(line, "main") {
-				continue
-			}
-			parts := strings.SplitN(line, ": ", 2)
-			if len(parts) != 2 {
-				continue
-			}
-			dirPath := parts[1]
-			files, _ := filepath.Glob(filepath.Join(dirPath, "*.go"))
-			var group []string
-			for _, file := range files {
-				if strings.HasSuffix(file, "_test.go") || strings.Contains(filepath.Base(file), "windows") {
-					continue
-				}
-				rel, _ := filepath.Rel(modDir, file)
-				group = append(group, rel)
-			}
-			if len(group) > 0 {
-				sort.Strings(group)
-				sets = append(sets, group)
-				mainPackageCount++
-			}
-		}
-
-		if mainPackageCount > 0 {
-			fmt.Fprintf(os.Stderr, "    Found %d main package(s) with %d file set(s)\n", mainPackageCount, len(sets))
-		}
-
-		fileResult[modKey] = sets
-	}
-
-	result.Files = fileResult
-	fmt.Fprintf(os.Stderr, "  ✓ Directory and fileset discovery complete\n")
-}
-
-func getGitBranchWithProgress(result *cg.Result) {
-	cmd := "git"
-	args := []string{"rev-parse", "--abbrev-ref", "HEAD"}
-	out, err := cli.RunCommand(result.Directory, cmd, args...)
-	if err != nil {
-		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), result.Directory, strings.TrimSpace(string(out)))
-		result.Errors = append(result.Errors, errMsg)
-	}
-	result.Branch = strings.TrimSpace(string(out))
-	fmt.Fprintf(os.Stderr, "  ✓ Git branch information retrieved: %s\n", result.Branch)
-}
-
-func getGitURLWithProgress(result *cg.Result) {
-	cmd := "git"
-	args := []string{"remote", "get-url", "origin"}
-	out, err := cli.RunCommand(result.Directory, cmd, args...)
-	if err != nil {
-		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), result.Directory, strings.TrimSpace(string(out)))
-		result.Errors = append(result.Errors, errMsg)
-	}
-	result.Repository = strings.TrimSpace(string(out))
-	fmt.Fprintf(os.Stderr, "  ✓ Git repository URL retrieved: %s\n", result.Repository)
-}

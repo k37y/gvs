@@ -38,11 +38,16 @@ endif
 run: gvs cg
 	./bin/gvs
 
+.PHONY: test
+
+test:
+	go test -v -count=1 ./...
+
 .PHONY: test-integration
 
 test-integration:
 	@echo "Running integration tests..."
-	go test -v -count=1 ./internal/api -run TestCallgraphIntegration -timeout 25m
+	go test -v -count=1 -tags integration ./internal/api -run "TestCallgraphIntegration|TestCgBinaryValidation" -timeout 25m
 
 .PHONY: gvs
 

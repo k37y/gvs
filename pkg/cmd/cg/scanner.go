@@ -23,7 +23,7 @@ package cg
 
 import (
 	"bufio"
-	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"go/ast"
@@ -40,6 +40,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/semver"
 	"golang.org/x/tools/go/callgraph"
 	"golang.org/x/tools/go/callgraph/cha"
@@ -54,204 +55,340 @@ import (
 	"github.com/k37y/gvs/internal/common"
 )
 
-func InitResult(cve, dir string, library, symbols, fixversion string) *Result {
-	r := &Result{
-		CVE:          cve,
-		Directory:    dir,
-		IsVulnerable: "unknown",
+type ssaBuild struct {
+	prog        *ssa.Program
+	cg          *callgraph.Graph
+	loadedPkgs  []*packages.Package
+	entryPoints []*callgraph.Node
+	err         error
+	once        sync.Once
+}
+
+// getSSABuild returns the SSA build for a directory, building it on first access.
+// Concurrent callers for the same directory block until the build completes.
+// Different directories build in parallel.
+func (r *Result) getSSABuild(dir string) *ssaBuild {
+	r.Mu.Lock()
+	if r.ssaBuilds == nil {
+		r.ssaBuilds = make(map[string]*ssaBuild)
+	}
+	build, ok := r.ssaBuilds[dir]
+	if !ok {
+		build = &ssaBuild{}
+		r.ssaBuilds[dir] = build
+	}
+	r.Mu.Unlock()
+
+	build.once.Do(func() {
+		relDir := dir
+		if r.Directory != "" && strings.HasPrefix(dir, r.Directory) {
+			relDir = strings.TrimPrefix(dir, r.Directory)
+			relDir = strings.TrimPrefix(relDir, "/")
+		}
+		if relDir == "" {
+			relDir = "."
+		}
+
+		if r.Progress {
+			fmt.Fprintf(os.Stderr, "[%s] Building SSA + call graph...\n", relDir)
+		}
+
+		prog, cg, loadedPkgs, err := r.buildSSAAndCallGraph(dir)
+		if err != nil {
+			build.err = err
+			r.Mu.Lock()
+			r.Errors = append(r.Errors, fmt.Sprintf("Failed to generate call graph in %s: %v", dir, err))
+			r.Mu.Unlock()
+			if r.Progress {
+				fmt.Fprintf(os.Stderr, "[%s] ✗ Failed: %v\n", relDir, err)
+			}
+			return
+		}
+
+		repoModulePath := getRepoModulePath(dir, r)
+		entryPoints := extractEntryPointNodes(cg, repoModulePath, false)
+
+		build.prog = prog
+		build.cg = cg
+		build.loadedPkgs = loadedPkgs
+		build.entryPoints = entryPoints
+
+		if r.Progress {
+			fmt.Fprintf(os.Stderr, "[%s] Loaded %d packages, call graph built (%d nodes, %d entry points)\n", relDir, len(loadedPkgs), len(cg.Nodes), len(entryPoints))
+		}
+	})
+
+	if build.err != nil {
+		return nil
+	}
+	return build
+}
+
+func (r *Result) firstSSABuild() *ssaBuild {
+	for _, b := range r.ssaBuilds {
+		return b
+	}
+	return nil
+}
+
+func (r *Result) FreeSSABuilds() {
+	r.Mu.Lock()
+	defer r.Mu.Unlock()
+	for k, b := range r.ssaBuilds {
+		b.prog = nil
+		b.cg = nil
+		b.loadedPkgs = nil
+		b.entryPoints = nil
+		delete(r.ssaBuilds, k)
+	}
+	r.ssaBuilds = nil
+}
+
+func (r *Result) ctx() context.Context {
+	if r.Ctx != nil {
+		return r.Ctx
+	}
+	return context.Background()
+}
+
+func (r *Result) runner() cli.CommandRunner {
+	if r.Runner != nil {
+		return r.Runner
+	}
+	return cli.DefaultRunner{}
+}
+
+func (r *Result) httpClient() HTTPClient {
+	if r.HTTP != nil {
+		return r.HTTP
+	}
+	return &http.Client{Timeout: 10 * time.Second}
+}
+
+func (r *Result) progress(msg string) {
+	if r.ProgressFunc != nil {
+		r.ProgressFunc(msg)
+	}
+}
+
+// SetupLibraryMode configures a Result for direct library/symbol scanning.
+// Returns true if the result has a terminal error and scanning should stop.
+func SetupLibraryMode(r *Result, library, symbols, fixversion string) bool {
+	if library == "" || symbols == "" || fixversion == "" {
+		r.Errors = append(r.Errors, "When using library mode, all three flags are required: -library, -symbols, and -fixversion")
+		return true
 	}
 
-	// Check if library and symbols are provided for direct scanning (takes precedence)
-	if library != "" || symbols != "" || fixversion != "" {
-		// Validate that all three parameters are provided together
-		if library == "" || symbols == "" || fixversion == "" {
-			r = &Result{
-				GoCVE:        "",
-				IsVulnerable: "unknown",
-				CVE:          r.CVE,
-				Directory:    r.Directory,
-				Errors:       []string{"When using library mode, all three flags are required: -library, -symbols, and -fixversion"},
-			}
-			jsonOutput, err := json.MarshalIndent(r, "", "  ")
-			if err != nil {
-				errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
-				r.Errors = append(r.Errors, errMsg)
-			}
-			fmt.Println(string(jsonOutput))
-			os.Exit(0)
-		}
+	if strings.TrimSpace(library) == "" || strings.TrimSpace(symbols) == "" || strings.TrimSpace(fixversion) == "" {
+		r.Errors = append(r.Errors, "Library mode parameters cannot be empty or whitespace only")
+		return true
+	}
 
-		// Validate that values are not just whitespace
-		if strings.TrimSpace(library) == "" || strings.TrimSpace(symbols) == "" || strings.TrimSpace(fixversion) == "" {
-			r = &Result{
-				GoCVE:        "",
-				IsVulnerable: "unknown",
-				CVE:          r.CVE,
-				Directory:    r.Directory,
-				Errors:       []string{"Library mode parameters cannot be empty or whitespace only"},
-			}
-			jsonOutput, err := json.MarshalIndent(r, "", "  ")
-			if err != nil {
-				errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
-				r.Errors = append(r.Errors, errMsg)
-			}
-			fmt.Println(string(jsonOutput))
-			os.Exit(0)
-		}
+	r.progress("Phase 1/6: Using provided library and symbol override...")
+	r.progress(fmt.Sprintf("  Library: %s", library))
+	r.progress(fmt.Sprintf("  Symbol(s): %s", symbols))
 
-		// Set a placeholder GoCVE if no CVE provided, or fetch it if provided
-		if cve != "" {
-			if common.IsGOCVEID(cve) {
-				r.GoCVE = cve
-			} else if common.IsCVEID(cve) {
-				fetchGoVulnID(r)
-			}
-		} else {
-			r.GoCVE = "MANUAL-SCAN"
-		}
-
-		// Use provided library and symbols instead of fetching from vulnerability database
-		symbolList := strings.Split(symbols, ",")
-		for i := range symbolList {
-			symbolList[i] = strings.TrimSpace(symbolList[i])
-		}
-
-		// Validate that at least one non-empty symbol exists after trimming
-		hasValidSymbol := false
-		for _, sym := range symbolList {
-			if sym != "" {
-				hasValidSymbol = true
-				break
-			}
-		}
-		if !hasValidSymbol {
-			r = &Result{
-				GoCVE:        "",
-				IsVulnerable: "unknown",
-				CVE:          r.CVE,
-				Directory:    r.Directory,
-				Errors:       []string{"At least one non-empty symbol is required"},
-			}
-			jsonOutput, err := json.MarshalIndent(r, "", "  ")
-			if err != nil {
-				errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
-				r.Errors = append(r.Errors, errMsg)
-			}
-			fmt.Println(string(jsonOutput))
-			os.Exit(0)
-		}
-
-		details := AffectedImportsDetails{
-			Symbols: symbolList,
-			Type:    "non-stdlib",
-		}
-
-		// Add fixed version (now guaranteed to be non-empty)
-		details.FixedVersion = []string{fixversion}
-
-		r.AffectedImports = map[string]AffectedImportsDetails{
-			library: details,
-		}
-
-		// Check if it's a stdlib package
-		if strings.HasPrefix(library, "crypto/") || strings.HasPrefix(library, "net/") ||
-			strings.HasPrefix(library, "encoding/") || strings.HasPrefix(library, "os/") ||
-			!strings.Contains(library, ".") {
-			entry := r.AffectedImports[library]
-			entry.Type = "stdlib"
-			r.AffectedImports[library] = entry
+	if r.CVE != "" {
+		if common.IsGOCVEID(r.CVE) {
+			r.GoCVE = r.CVE
+		} else if common.IsCVEID(r.CVE) {
+			fetchGoVulnID(r)
 		}
 	} else {
-		// Check if input is already a GOCVE ID or needs conversion from CVE ID
-		if common.IsGOCVEID(cve) {
-			// Input is already a GOCVE ID, use it directly
-			r.GoCVE = cve
-		} else if common.IsCVEID(cve) {
-			// Input is a CVE ID, convert to GOCVE ID
-			fetchGoVulnID(r)
-		} else {
-			// Invalid input format
-			r = &Result{
-				GoCVE:        "Invalid input format",
-				IsVulnerable: "unknown",
-				CVE:          r.CVE,
-				Directory:    r.Directory,
-				Branch:       r.Branch,
-				Repository:   r.Repository,
-				Unsafe:       r.Unsafe,
-				Reflect:      r.Reflect,
-				Errors:       []string{"Invalid input format. Please provide either a CVE ID (CVE-YYYY-NNNN) or GOCVE ID (GO-YYYY-NNNN)"},
-			}
-			jsonOutput, err := json.MarshalIndent(r, "", "  ")
-			if err != nil {
-				errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
-				r.Errors = append(r.Errors, errMsg)
-			}
-			fmt.Println(string(jsonOutput))
-			os.Exit(0)
-		}
-
-		fetchAffectedSymbols(r)
+		r.GoCVE = "MANUAL-SCAN"
 	}
 
-	// Early exit if no vulnerable symbols found
+	r.progress("Phase 2/6: Using provided library and symbols...")
+	symbolList := strings.Split(symbols, ",")
+	for i := range symbolList {
+		symbolList[i] = strings.TrimSpace(symbolList[i])
+	}
+
+	hasValidSymbol := false
+	for _, sym := range symbolList {
+		if sym != "" {
+			hasValidSymbol = true
+			break
+		}
+	}
+	if !hasValidSymbol {
+		r.Errors = append(r.Errors, "At least one non-empty symbol is required")
+		return true
+	}
+
+	details := AffectedImportsDetails{
+		Symbols: symbolList,
+		Type:    "non-stdlib",
+	}
+
+	if strings.Contains(fixversion, ":") {
+		for _, pair := range strings.Split(fixversion, ",") {
+			parts := strings.SplitN(strings.TrimSpace(pair), ":", 2)
+			if len(parts) == 2 {
+				details.FixedVersion = append(details.FixedVersion,
+					fmt.Sprintf("Introduced in %s and fixed in %s", parts[0], parts[1]))
+			}
+		}
+	} else {
+		details.FixedVersion = []string{fixversion}
+	}
+	r.progress(fmt.Sprintf("  Using fixed version: %s", fixversion))
+
+	r.AffectedImports = map[string]AffectedImportsDetails{
+		library: details,
+	}
+
+	if strings.HasPrefix(library, "crypto/") || strings.HasPrefix(library, "net/") ||
+		strings.HasPrefix(library, "encoding/") || strings.HasPrefix(library, "os/") ||
+		!strings.Contains(library, ".") {
+		entry := r.AffectedImports[library]
+		entry.Type = "stdlib"
+		r.AffectedImports[library] = entry
+	}
+	r.progress(fmt.Sprintf("  ✓ Using %d symbol(s) for library %s", len(symbolList), library))
+	return false
+}
+
+// SetupCVEMode configures a Result by fetching vulnerability data from vuln.go.dev.
+// Returns true if the result has a terminal error and scanning should stop.
+func SetupCVEMode(r *Result) bool {
+	r.progress("Phase 1/6: Processing vulnerability identifier...")
+	if common.IsGOCVEID(r.CVE) {
+		r.GoCVE = r.CVE
+		r.progress(fmt.Sprintf("  ✓ Using provided GOCVE ID: %s", r.CVE))
+	} else if common.IsCVEID(r.CVE) {
+		r.progress("  Converting CVE ID to GOCVE ID...")
+		fetchGoVulnID(r)
+	} else {
+		r.GoCVE = "Invalid input format"
+		r.Errors = append(r.Errors, "Invalid input format. Please provide either a CVE ID (CVE-YYYY-NNNN) or GOCVE ID (GO-YYYY-NNNN)")
+		return true
+	}
+
+	r.progress("Phase 2/6: Fetching affected symbols...")
+	fetchAffectedSymbols(r)
+	return false
+}
+
+// Prepare runs the discovery and detection phases on a fully configured Result.
+// Call after SetupLibraryMode or SetupCVEMode. Returns true if scanning should stop.
+func Prepare(r *Result) bool {
 	if len(r.AffectedImports) == 0 {
+		r.progress("Scan aborted: No vulnerable symbols to analyze.")
 		r.IsVulnerable = "unknown"
-		jsonOutput, err := json.MarshalIndent(r, "", "  ")
-		if err != nil {
-			errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
-			r.Errors = append(r.Errors, errMsg)
-		}
-		fmt.Println(string(jsonOutput))
-		os.Exit(0)
+		return true
 	}
 
+	r.progress("Phase 3/6: Discovering Go modules and main files...")
 	findMainGoFiles(r)
+	r.progress("Phase 4/6: Getting git branch information...")
 	getGitBranch(r)
+	r.progress("Phase 5/6: Getting git repository URL...")
 	getGitURL(r)
-	DetectUnsafeReflectUsage(r, nil)
+	r.progress("Phase 6/6: Detecting unsafe and reflect package usage...")
+	DetectUnsafeReflectUsage(r, r.ProgressFunc)
 
 	if r.GoCVE == "" {
-		r = &Result{
-			GoCVE:        "",
-			IsVulnerable: "unknown",
-			CVE:          r.CVE,
-			Directory:    r.Directory,
-			Branch:       r.Branch,
-			Repository:   r.Repository,
-			Unsafe:       r.Unsafe,
-			Reflect:      r.Reflect,
-			Errors:       []string{"No Go CVE ID found"},
-		}
-		jsonOutput, err := json.MarshalIndent(r, "", "  ")
-		if err != nil {
-			errMsg := fmt.Sprintf("Failed to marshal results to JSON: %v", err)
-			r.Errors = append(r.Errors, errMsg)
-		}
-		fmt.Println(string(jsonOutput))
-		os.Exit(0)
+		r.Errors = append(r.Errors, "No Go CVE ID found")
+		return true
 	}
-	return r
+	r.progress("Initialization complete. Starting vulnerability analysis...")
+	return false
 }
 
 func Worker(jobs <-chan Job, results chan<- *Result, wg *sync.WaitGroup, result *Result) {
 	defer wg.Done()
 	for job := range jobs {
+		select {
+		case <-result.ctx().Done():
+			results <- &Result{IsVulnerable: "false"}
+			continue
+		default:
+		}
+		dir := filepath.Join(result.Directory, job.Dir)
+		if result.AffectedImports[job.Package].Type != "stdlib" && !result.isModuleInGoModOrSum(job.Package, dir) {
+			results <- &Result{IsVulnerable: "false"}
+			continue
+		}
 		res := job.isVulnerable(result)
 		results <- res
 	}
+}
+
+func (r *Result) isModuleInGoModOrSum(pkg, dir string) bool {
+	if r.isModuleInGoMod(pkg, dir) {
+		return true
+	}
+	data, err := r.readModFile(filepath.Join(dir, "go.sum"))
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		if fields[0] == pkg || strings.HasPrefix(pkg, fields[0]+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 type VulnerabilityResult struct {
 	DirVulnerable   bool
 	Status          string // "true", "false", or "unknown"
 	NeedsReplaceFix bool
+	FixVersion      string
+}
+
+func parseVersionRanges(rawFixVer []string) [][2]string {
+	var ranges [][2]string
+	for _, entry := range rawFixVer {
+		var introduced, fixed string
+		if strings.Contains(entry, "Introduced in") && strings.Contains(entry, "fixed in") {
+			parts := strings.Split(entry, "and fixed in")
+			if len(parts) == 2 {
+				introduced = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(parts[0]), "Introduced in"))
+				fixed = strings.TrimSpace(parts[1])
+			}
+		} else {
+			fixed = strings.TrimSpace(entry)
+		}
+		if fixed != "" {
+			introduced = common.SemVersion(introduced)
+			fixed = common.SemVersion(fixed)
+			ranges = append(ranges, [2]string{introduced, fixed})
+		}
+	}
+	return ranges
+}
+
+func isVersionInVulnerableRange(version string, rawFixVer []string) (bool, string) {
+	version = common.SemVersion(version)
+	ranges := parseVersionRanges(rawFixVer)
+	for _, r := range ranges {
+		introduced, fixed := r[0], r[1]
+		if semver.Compare(version, introduced) >= 0 && semver.Compare(version, fixed) < 0 {
+			return true, fixed
+		}
+	}
+	return false, ""
+}
+
+func hasIntroducedInfo(rawFixVer []string) bool {
+	for _, entry := range rawFixVer {
+		if strings.Contains(entry, "Introduced in") {
+			return true
+		}
+	}
+	return false
 }
 
 // checkDirVulnerability determines whether a directory is vulnerable based on
 // version comparisons. It returns the vulnerability status and whether a
 // replace-directive fix is needed.
-func checkDirVulnerability(curVer, repVer, fv string, used, unknown, isStdlib bool, goToolchainVersion string, fixVer []string) VulnerabilityResult {
+func checkDirVulnerability(curVer, repVer string, used, unknown, isStdlib bool, goToolchainVersion string, rawFixVer []string) VulnerabilityResult {
 	vr := VulnerabilityResult{Status: "false"}
 
 	if used {
@@ -260,72 +397,131 @@ func checkDirVulnerability(curVer, repVer, fv string, used, unknown, isStdlib bo
 			compareVer = repVer
 		}
 
-		if !isStdlib {
-			if semver.Compare(compareVer, fv) < 0 {
+		if isStdlib {
+			compareVer = goToolchainVersion
+		}
+
+		if compareVer == "" {
+			vr.Status = "unknown"
+			vr.DirVulnerable = true
+		} else if len(rawFixVer) > 0 {
+			vuln, matchedFix := isVersionInVulnerableRange(compareVer, rawFixVer)
+			if vuln {
 				vr.Status = "true"
 				vr.DirVulnerable = true
-			}
-		} else {
-			if len(fixVer) > 0 {
-				isVuln := false
-				if goToolchainVersion != "" {
-					appropriateFixVersion := findAppropriateFixVersion(goToolchainVersion, fixVer)
-					if appropriateFixVersion != "" {
-						if semver.Compare(goToolchainVersion, appropriateFixVersion) < 0 {
-							isVuln = true
+				vr.FixVersion = matchedFix
+			} else if isStdlib && hasIntroducedInfo(rawFixVer) {
+				fixVer := common.ExtractFormattedFixedVersions(rawFixVer)
+				if len(fixVer) == 0 {
+					fixVer = rawFixVer
+				}
+				appropriateFixVersion := findAppropriateFixVersion(compareVer, fixVer)
+				if appropriateFixVersion != "" {
+					if semver.Compare(compareVer, appropriateFixVersion) < 0 {
+						vr.Status = "true"
+						vr.DirVulnerable = true
+						vr.FixVersion = appropriateFixVersion
+					}
+				} else {
+					highestFix := ""
+					for _, fv := range fixVer {
+						v := extractGoVersion(fv)
+						if v != "" && (highestFix == "" || semver.Compare(v, highestFix) > 0) {
+							highestFix = v
 						}
-					} else {
-						isVuln = true
+					}
+					if highestFix == "" || semver.Compare(compareVer, highestFix) < 0 {
+						vr.Status = "true"
+						vr.DirVulnerable = true
 					}
 				}
-
-				if goToolchainVersion == "" {
-					vr.Status = "unknown"
-					vr.DirVulnerable = true
-				} else if isVuln {
-					vr.Status = "true"
-					vr.DirVulnerable = true
-				}
-			} else {
-				vr.Status = "unknown"
-				vr.DirVulnerable = true
 			}
+		} else {
+			vr.Status = "unknown"
+			vr.DirVulnerable = true
 		}
 	} else if unknown {
 		vr.Status = "unknown"
 		vr.DirVulnerable = true
 	}
 
-	if repVer != "" && semver.Compare(curVer, repVer) <= 0 && semver.Compare(repVer, fv) < 0 {
-		vr.DirVulnerable = true
-		vr.NeedsReplaceFix = true
+	if repVer != "" {
+		vuln, matchedFix := isVersionInVulnerableRange(repVer, rawFixVer)
+		if vuln && semver.Compare(curVer, repVer) <= 0 {
+			vr.DirVulnerable = true
+			vr.NeedsReplaceFix = true
+			if vr.FixVersion == "" {
+				vr.FixVersion = matchedFix
+			}
+		}
 	}
 
 	return vr
 }
 
-func (j Job) isVulnerable(result *Result) *Result {
-	curVer := getCurrentVersion(j.Package, filepath.Join(result.Directory, j.Dir), result)
-	modPath := getModPath(j.Package, filepath.Join(result.Directory, j.Dir), result)
-	repPath, repVer := getReplaceVersion(modPath, filepath.Join(result.Directory, j.Dir), result)
+func (r *Result) findModuleInGoMod(pkg, dir string) (modPath, version string, found bool) {
+	data, err := r.readModFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return "", "", false
+	}
+	f, err := modfile.Parse("go.mod", data, nil)
+	if err != nil {
+		return "", "", false
+	}
+	var best string
+	var bestVer string
+	for _, req := range f.Require {
+		if pkg == req.Mod.Path || strings.HasPrefix(pkg, req.Mod.Path+"/") {
+			if len(req.Mod.Path) > len(best) {
+				best = req.Mod.Path
+				bestVer = req.Mod.Version
+			}
+		}
+	}
+	if best != "" {
+		return best, bestVer, true
+	}
+	return "", "", false
+}
 
-	// Check if fixed version is already set (from manual scan), otherwise fetch it
-	var fixVer []string
+func (r *Result) isModuleInGoMod(pkg, dir string) bool {
+	_, _, found := r.findModuleInGoMod(pkg, dir)
+	return found
+}
+
+func (j Job) isVulnerable(result *Result) *Result {
+	dir := filepath.Join(result.Directory, j.Dir)
+
+	curVer := getCurrentVersion(j.Package, dir, j.Dir, result)
+	modPath := getModPath(j.Package, dir, result)
+	repPath, repVer := getReplaceVersion(modPath, dir, result)
+
+	var rawFixVer []string
 	result.Mu.Lock()
 	if existing, ok := result.AffectedImports[j.Package]; ok && len(existing.FixedVersion) > 0 {
-		fixVer = existing.FixedVersion
+		rawFixVer = existing.FixedVersion
 	} else {
-		fixVer = getFixedVersion(result.GoCVE, modPath, result)
-		fixVer = common.ExtractFormattedFixedVersions(fixVer)
+		fixPkg := modPath
+		if fixPkg == "" && result.AffectedImports[j.Package].Type == "stdlib" {
+			fixPkg = "stdlib"
+		}
+		if fixPkg == "" {
+			fixPkg = j.Package
+		}
+		rawFixVer = getFixedVersion(result.GoCVE, fixPkg, result)
 	}
 	result.Mu.Unlock()
 
+	fixVer := common.ExtractFormattedFixedVersions(rawFixVer)
+	if len(fixVer) == 0 {
+		fixVer = rawFixVer
+	}
 	fv := common.SemVersion(strings.Join(fixVer, " "))
 
 	used := false
 	unknown := false
 
-	isUsed := result.isSymbolUsed(j.Package, filepath.Join(result.Directory, j.Dir), j.Symbols, j.Files)
+	isUsed := result.isSymbolUsed(j.Package, dir, j.Dir, j.Symbols, j.Files)
 	switch isUsed {
 	case "true":
 		used = true
@@ -338,7 +534,6 @@ func (j Job) isVulnerable(result *Result) *Result {
 		result.AffectedImports = make(map[string]AffectedImportsDetails)
 	}
 	aentry := result.AffectedImports[j.Package]
-	// Only update FixedVersion if it wasn't manually specified
 	if len(aentry.FixedVersion) == 0 {
 		if result.AffectedImports[j.Package].Type != "stdlib" {
 			aentry.FixedVersion = strings.Split(common.SemVersion(fv), ",")
@@ -349,61 +544,72 @@ func (j Job) isVulnerable(result *Result) *Result {
 	result.AffectedImports[j.Package] = aentry
 	result.Mu.Unlock()
 
-	result.Mu.Lock()
-	if result.UsedImports == nil {
-		result.UsedImports = make(map[string]UsedImportsDetails)
-	}
-	uentry := result.UsedImports[j.Package]
-	uentry.CurrentVersion = curVer
-	if repVer != "" {
-		uentry.ReplaceModule = repPath
-		uentry.ReplaceVersion = repVer
-	}
 	goToolchainVersion := ""
 	if result.AffectedImports[j.Package].Type == "stdlib" {
-		goToolchainVersion = getGoToolchainVersion(filepath.Join(result.Directory, j.Dir), result)
-	}
-
-	vr := checkDirVulnerability(curVer, repVer, fv, used, unknown,
-		result.AffectedImports[j.Package].Type == "stdlib", goToolchainVersion, fixVer)
-
-	result.IsVulnerable = vr.Status
-	if vr.DirVulnerable {
-		uentry.Dir = append(uentry.Dir, j.Dir)
-	}
-	if vr.NeedsReplaceFix {
-		uentry.FixCommands = []string{
-			fmt.Sprintf("go mod edit -replace=%s=%s@%s", modPath, modPath, fv),
-			"go mod tidy",
-			"go mod vendor",
-		}
-	} else if vr.Status == "true" {
-		if result.AffectedImports[j.Package].Type == "stdlib" {
-			selectedFixVersion := selectFixVersionForCurrentGoVersion(goToolchainVersion, fixVer)
-			uentry.FixCommands = []string{
-				fmt.Sprintf("go mod edit -go=%s", selectedFixVersion),
-				"go mod tidy",
-				"go mod vendor",
-			}
+		if v, ok := result.GoToolchainVersions[j.Dir]; ok {
+			goToolchainVersion = v
 		} else {
+			goToolchainVersion = curVer
+		}
+	}
+
+	vr := checkDirVulnerability(curVer, repVer, used, unknown,
+		result.AffectedImports[j.Package].Type == "stdlib", goToolchainVersion, rawFixVer)
+
+	result.Mu.Lock()
+	result.IsVulnerable = vr.Status
+
+	if used || unknown {
+		if result.UsedImports == nil {
+			result.UsedImports = make(map[string]map[string]UsedImportsDetails)
+		}
+		if result.UsedImports[j.Dir] == nil {
+			result.UsedImports[j.Dir] = make(map[string]UsedImportsDetails)
+		}
+		uentry := result.UsedImports[j.Dir][j.Package]
+		uentry.CurrentVersion = curVer
+		if repVer != "" {
+			uentry.ReplaceModule = repPath
+			uentry.ReplaceVersion = repVer
+		}
+		if vr.NeedsReplaceFix && vr.FixVersion != "" {
 			uentry.FixCommands = []string{
-				fmt.Sprintf("go get %s@%s", modPath, fv),
+				fmt.Sprintf("go mod edit -replace=%s=%s@%s", modPath, modPath, vr.FixVersion),
 				"go mod tidy",
 				"go mod vendor",
 			}
+		} else if vr.Status == "true" && vr.FixVersion != "" {
+			if result.AffectedImports[j.Package].Type == "stdlib" {
+				selectedFixVersion := selectFixVersionForCurrentGoVersion(goToolchainVersion, fixVer)
+				uentry.FixCommands = []string{
+					fmt.Sprintf("go mod edit -go=%s", selectedFixVersion),
+					"go mod tidy",
+					"go mod vendor",
+				}
+			} else {
+				uentry.FixCommands = []string{
+					fmt.Sprintf("go get %s@%s", modPath, vr.FixVersion),
+					"go mod tidy",
+					"go mod vendor",
+				}
+			}
 		}
+		result.UsedImports[j.Dir][j.Package] = uentry
 	}
-	result.UsedImports[j.Package] = uentry
 	result.Mu.Unlock()
 
 	return result
 }
 
 func fetchGoVulnID(result *Result) string {
-	client := http.Client{Timeout: 10 * time.Second}
-	url := fmt.Sprintf(VulnsURL + "/index/vulns.json")
+	url := VulnsURL + "/index/vulns.json"
 
-	resp, err := client.Get(url)
+	req, err := http.NewRequestWithContext(result.ctx(), http.MethodGet, url, nil)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("Failed to create request for %s: %v", url, err))
+		return ""
+	}
+	resp, err := result.httpClient().Do(req)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to get response from %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
@@ -428,6 +634,7 @@ func fetchGoVulnID(result *Result) string {
 		}
 	}
 
+	result.progress(fmt.Sprintf("  ✓ Go vulnerability ID fetched: %s", result.GoCVE))
 	return ""
 }
 
@@ -455,38 +662,43 @@ func findMainGoFiles(res *Result) {
 		res.Errors = append(res.Errors, errMsg)
 	}
 
-	for _, modDir := range modDirs {
-		cmd := "go"
-		args := []string{"list", "-f", `{{if eq .Name "main"}}{{.Name}}: {{.Dir}}{{end}}`, "./..."}
-		out, err := cli.RunCommand(modDir, cmd, args...)
-		if err != nil {
-			errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), modDir, strings.TrimSpace(string(out)))
-			res.Errors = append(res.Errors, errMsg)
-			continue
-		}
+	cacheGoToolchainVersions(res, modDirs)
+	cacheModuleFiles(res, modDirs)
 
+	for _, modDir := range modDirs {
 		modKey, err := filepath.Rel(res.Directory, modDir)
 		if err != nil {
 			modKey = modDir
 		}
 
-		var sets [][]string
+		mainDirs := make(map[string]bool)
+		filepath.WalkDir(modDir, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() && (strings.HasPrefix(d.Name(), ".") || d.Name() == "vendor") {
+				return filepath.SkipDir
+			}
+			if d.IsDir() || !strings.HasSuffix(d.Name(), ".go") || strings.HasSuffix(d.Name(), "_test.go") {
+				return nil
+			}
+			fset := token.NewFileSet()
+			parsed, parseErr := parser.ParseFile(fset, path, nil, parser.PackageClauseOnly)
+			if parseErr != nil {
+				return nil
+			}
+			if parsed.Name.Name == "main" {
+				mainDirs[filepath.Dir(path)] = true
+			}
+			return nil
+		})
 
-		scanner := bufio.NewScanner(bytes.NewReader(out))
-		for scanner.Scan() {
-			line := scanner.Text()
-			if !strings.HasPrefix(line, "main") {
-				continue
-			}
-			parts := strings.SplitN(line, ": ", 2)
-			if len(parts) != 2 {
-				continue
-			}
-			dirPath := parts[1]
+		var sets [][]string
+		for dirPath := range mainDirs {
 			files, _ := filepath.Glob(filepath.Join(dirPath, "*.go"))
 			var group []string
 			for _, file := range files {
-				if strings.HasSuffix(file, "_test.go") || strings.Contains(filepath.Base(file), "windows") {
+				if strings.HasSuffix(file, "_test.go") {
 					continue
 				}
 				rel, _ := filepath.Rel(modDir, file)
@@ -501,15 +713,19 @@ func findMainGoFiles(res *Result) {
 		result[modKey] = sets
 	}
 
-	res.Files = make(map[string][][]string)
 	res.Files = result
+	res.progress("  ✓ Directory and fileset discovery complete")
 }
 
 func fetchAffectedSymbols(result *Result) {
-	client := http.Client{Timeout: 10 * time.Second}
 	url := fmt.Sprintf(VulnsURL+"/ID/%s.json", result.GoCVE)
 
-	resp, err := client.Get(url)
+	req, err := http.NewRequestWithContext(result.ctx(), http.MethodGet, url, nil)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("Failed to create request for %s: %v", url, err))
+		return
+	}
+	resp, err := result.httpClient().Do(req)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed HTTP request to %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
@@ -570,11 +786,18 @@ func fetchAffectedSymbols(result *Result) {
 	// Validate that we found at least one valid import with symbols
 	if !hasValidImports {
 		result.Errors = append(result.Errors, "No imports or symbols found in vulnerability data")
+		result.progress("  ✗ Error: No imports or symbols found in vulnerability data")
 		return
 	}
+
+	symbolCount := 0
+	for _, imp := range imports {
+		symbolCount += len(imp.Symbols)
+	}
+	result.progress(fmt.Sprintf("  ✓ Affected symbols fetched: %d symbols across %d packages", symbolCount, len(imports)))
 }
 
-func (r *Result) isSymbolUsed(pkg, dir string, symbols, files []string) string {
+func (r *Result) isSymbolUsed(pkg, dir, modDir string, symbols, files []string) string {
 	// Store original symbols for reflection analysis
 	originalSymbols := make([]string, len(symbols))
 	copy(originalSymbols, symbols)
@@ -601,7 +824,7 @@ func (r *Result) isSymbolUsed(pkg, dir string, symbols, files []string) string {
 	}
 
 	// Check for direct usage via call graph analysis
-	directUsage := r.checkDirectUsage(pkg, dir, symbols, files)
+	directUsage := r.checkDirectUsage(pkg, dir, modDir, symbols, files)
 
 	// Check for reflection-based usage
 	reflectionRisks := r.detectReflectionVulnerabilities(pkg, dir, originalSymbols, files)
@@ -620,147 +843,146 @@ func (r *Result) isSymbolUsed(pkg, dir string, symbols, files []string) string {
 }
 
 // checkDirectUsage handles the call graph analysis using BFS on the callgraph.Graph directly
-func (r *Result) checkDirectUsage(pkg, dir string, symbols []string, files []string) string {
+func (r *Result) checkDirectUsage(pkg, dir, modDir string, symbols []string, files []string) string {
 	progress := r.Progress
 
-	// Compute relative directory for progress messages
-	relDir := dir
-	if r.Directory != "" && strings.HasPrefix(dir, r.Directory) {
-		relDir = strings.TrimPrefix(dir, r.Directory)
-		relDir = strings.TrimPrefix(relDir, "/")
-		if relDir == "" {
-			relDir = "."
-		}
-	}
-
-	// Use callgraph library to build the graph directly
-	_, prog, cg, err := r.generateCallGraphWithLibInternal(dir, files)
-	if err != nil {
-		errMsg := fmt.Sprintf("Failed to generate call graph in %s: %v", dir, err)
-		r.Errors = append(r.Errors, errMsg)
-		if progress {
-			fmt.Fprintf(os.Stderr, "[%s] ✗ Failed: %v\n", relDir, err)
-		}
+	build := r.getSSABuild(dir)
+	if build == nil {
 		return "unknown"
 	}
 
-	r.SsaProg = prog
-	r.CgGraph = cg
-
-	// Get the module path for filtering entry points to repo code only
-	repoModulePath := getRepoModulePath(dir, r)
-
-	// Find entry points from the call graph (main, init, HTTP handlers, exported functions)
-	entryPoints := extractEntryPointNodes(cg, repoModulePath, false) // Don't show entry point stats
-	if len(entryPoints) == 0 {
+	if len(build.entryPoints) == 0 {
 		errMsg := fmt.Sprintf("No entry points found in call graph for %s", dir)
 		r.Errors = append(r.Errors, errMsg)
 		return "unknown"
 	}
 
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	foundAny := false
-	var allPaths [][]*callgraph.Node
-
-	for _, symbol := range symbols {
-		wg.Add(1)
-		go func(sym string) {
-			defer wg.Done()
-		if progress {
-			fmt.Fprintf(os.Stderr, "[%s] Scanning %s.%s...\n", relDir, pkg, sym)
-		}
-			// Use BFS to find path to symbol from any entry point
-			if path, found := findPathToSymbolFromAny(entryPoints, pkg, sym, progress); found {
-				r.Mu.Lock()
-				if r.UsedImports == nil {
-					r.UsedImports = make(map[string]UsedImportsDetails)
-				}
-				entry := r.UsedImports[pkg]
-				entry.Symbols = append(entry.Symbols, sym)
-				entry.Paths = append(entry.Paths, path)
-				r.UsedImports[pkg] = entry
-				r.Mu.Unlock()
-
-				mu.Lock()
-				foundAny = true
-				allPaths = append(allPaths, path)
-				mu.Unlock()
-			}
-		}(symbol)
+	relDir := modDir
+	if relDir == "" {
+		relDir = "."
 	}
 
-	wg.Wait()
+	if progress {
+		fmt.Fprintf(os.Stderr, "[%s] BFS: searching %d entry points for %d %s symbols...\n", relDir, len(build.entryPoints), len(symbols), pkg)
+	}
 
-	if foundAny {
+	found, visited := findAllSymbolsFromAny(build.entryPoints, pkg, symbols, r.ctx())
+
+	if progress {
+		fmt.Fprintf(os.Stderr, "[%s] BFS: visited %d nodes, found %d/%d %s symbols\n", relDir, visited, len(found), len(symbols), pkg)
+	}
+
+	if len(found) > 0 {
+		r.Mu.Lock()
+		if r.UsedImports == nil {
+			r.UsedImports = make(map[string]map[string]UsedImportsDetails)
+		}
+		if r.UsedImports[modDir] == nil {
+			r.UsedImports[modDir] = make(map[string]UsedImportsDetails)
+		}
+		entry := r.UsedImports[modDir][pkg]
+		for sym, path := range found {
+			entry.Symbols = append(entry.Symbols, sym)
+			entry.Paths = append(entry.Paths, path)
+		}
+		r.UsedImports[modDir][pkg] = entry
+		r.Mu.Unlock()
 		return "true"
 	}
+
+	if warnings := checkIgnoredFiles(build.loadedPkgs, pkg); len(warnings) > 0 {
+		r.Mu.Lock()
+		r.Errors = append(r.Errors, warnings...)
+		r.Mu.Unlock()
+		return "unknown"
+	}
+
 	return "false"
 }
 
-// getRepoModulePath extracts the module path from go.mod in the given directory
-func getRepoModulePath(dir string, result *Result) string {
-	cmd := "go"
-	args := []string{"mod", "edit", "-json"}
-	out, err := cli.RunCommandStdout(dir, cmd, args...)
-	if err != nil {
-		return "" // Return empty string to skip filtering
+// checkIgnoredFiles parses files excluded by build constraints and returns
+// warnings for any that import the vulnerable package.
+func checkIgnoredFiles(pkgs []*packages.Package, vulnPkg string) []string {
+	var warnings []string
+	seen := make(map[string]bool)
+	for _, pkg := range pkgs {
+		for _, f := range pkg.IgnoredFiles {
+			if seen[f] {
+				continue
+			}
+			seen[f] = true
+			fset := token.NewFileSet()
+			parsed, err := parser.ParseFile(fset, f, nil, parser.ImportsOnly)
+			if err != nil {
+				continue
+			}
+			for _, imp := range parsed.Imports {
+				importPath := strings.Trim(imp.Path.Value, `"`)
+				if importPath == vulnPkg || strings.HasPrefix(importPath, vulnPkg+"/") {
+					warnings = append(warnings, fmt.Sprintf(
+						"File %s imports %s but was excluded by build constraints. Need manual analysis",
+						f, importPath))
+				}
+			}
+		}
 	}
+	return warnings
+}
 
-	// GoModEdit doesn't have Module field, so we need to parse manually
-	type modInfo struct {
-		Module struct {
-			Path string `json:"Path"`
-		} `json:"Module"`
-	}
-	var info modInfo
-	if err := json.Unmarshal(out, &info); err != nil {
+func getRepoModulePath(dir string, result *Result) string {
+	data, err := result.readModFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
 		return ""
 	}
-
-	return info.Module.Path
+	f, err := modfile.Parse("go.mod", data, nil)
+	if err != nil {
+		return ""
+	}
+	if f.Module != nil {
+		return f.Module.Mod.Path
+	}
+	return ""
 }
 
 // GenerateCallGraphForVisualization is a public wrapper for call graph generation for visualization
 func (r *Result) GenerateCallGraphForVisualization(dir string, files []string) (string, error) {
-	output, _, _, err := r.generateCallGraphWithLibInternal(dir, files)
+	output, _, _, _, err := r.generateCallGraphWithLibInternal(dir, files)
 	return output, err
 }
 
 // GenerateCallGraphObject returns the callgraph.Graph object for direct manipulation
 func (r *Result) GenerateCallGraphObject(dir string, files []string) (*callgraph.Graph, error) {
-	_, _, cg, err := r.generateCallGraphWithLibInternal(dir, files)
+	_, _, cg, _, err := r.generateCallGraphWithLibInternal(dir, files)
 	return cg, err
 }
 
 // generateCallGraphWithLib creates a call graph using the callgraph library (backward compat wrapper)
 func (r *Result) generateCallGraphWithLib(dir string, files []string) (string, error) {
-	output, _, _, err := r.generateCallGraphWithLibInternal(dir, files)
+	output, _, _, _, err := r.generateCallGraphWithLibInternal(dir, files)
 	return output, err
 }
 
-// generateCallGraphWithLibInternal creates a call graph and returns string output, SSA program, and graph object
-func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (string, *ssa.Program, *callgraph.Graph, error) {
-	// Load packages with comprehensive mode to handle all dependencies
-	// Use "./..." to load all packages in the module - this is required for
-	// RTA to properly track reflection-based calls like reflect.ValueOf(func).Call()
+func (r *Result) packagesEnv(dir string) []string {
+	return append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off", "GOTOOLCHAIN=local")
+}
+
+func (r *Result) buildSSAAndCallGraph(dir string) (*ssa.Program, *callgraph.Graph, []*packages.Package, error) {
 	cfg := &packages.Config{
-		Mode: packages.LoadAllSyntax, // This loads everything needed for analysis
-		Dir:  dir,
-		Env:  append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off"),
+		Mode:    packages.LoadAllSyntax,
+		Dir:     dir,
+		Env:     r.packagesEnv(dir),
+		Context: r.ctx(),
 	}
 
-	// Load all packages in the module (like callgraph binary does by default)
 	pkgs, err := packages.Load(cfg, "./...")
 	if err != nil {
-		return "", nil, nil, fmt.Errorf("failed to load packages: %v", err)
+		return nil, nil, nil, fmt.Errorf("failed to load packages: %v", err)
 	}
 
 	if len(pkgs) == 0 {
-		return "", nil, nil, fmt.Errorf("no packages loaded")
+		return nil, nil, nil, fmt.Errorf("no packages loaded")
 	}
 
-	// Check for package errors and try to filter out packages with issues
 	var validPkgs []*packages.Package
 	for _, pkg := range pkgs {
 		if len(pkg.Errors) == 0 && pkg.Types != nil && pkg.TypesInfo != nil {
@@ -768,18 +990,17 @@ func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (s
 		}
 	}
 
-	// If no valid packages, try loading with less strict requirements
 	if len(validPkgs) == 0 {
-		// Try with just the module root pattern with less strict mode
 		cfg = &packages.Config{
-			Mode: packages.LoadSyntax,
-			Dir:  dir,
-			Env:  append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off"),
+			Mode:    packages.LoadSyntax,
+			Dir:     dir,
+			Env:     r.packagesEnv(dir),
+			Context: r.ctx(),
 		}
 
 		pkgs, err = packages.Load(cfg, "./...")
 		if err != nil {
-			return "", nil, nil, fmt.Errorf("failed to load packages with fallback: %v", err)
+			return nil, nil, nil, fmt.Errorf("failed to load packages with fallback: %v", err)
 		}
 
 		for _, pkg := range pkgs {
@@ -790,36 +1011,40 @@ func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (s
 	}
 
 	if len(validPkgs) == 0 {
-		return "", nil, nil, fmt.Errorf("no valid packages found after loading")
+		return nil, nil, nil, fmt.Errorf("no valid packages found after loading")
 	}
 
-	// Create SSA program with InstantiateGenerics for call graph analysis
 	prog, _ := ssautil.AllPackages(validPkgs, ssa.InstantiateGenerics)
 	prog.Build()
 
-	// Get the algorithm from environment variable and build call graph
 	algo := getCallGraphAlgorithm()
 	cg := buildCallGraph(prog, algo)
 
-	// Convert call graph to string format matching callgraph binary output
+	return prog, cg, pkgs, nil
+}
+
+func (r *Result) generateCallGraphWithLibInternal(dir string, files []string) (string, *ssa.Program, *callgraph.Graph, []*packages.Package, error) {
+	prog, cg, pkgs, err := r.buildSSAAndCallGraph(dir)
+	if err != nil {
+		return "", nil, nil, nil, err
+	}
+
 	var output strings.Builder
 	for _, node := range cg.Nodes {
 		if node.Func == nil {
 			continue
 		}
-
 		caller := node.Func.String()
 		for _, edge := range node.Out {
 			if edge.Callee == nil || edge.Callee.Func == nil {
 				continue
 			}
-
 			callee := edge.Callee.Func.String()
 			output.WriteString(fmt.Sprintf("%s %s\n", caller, callee))
 		}
 	}
 
-	return output.String(), prog, cg, nil
+	return output.String(), prog, cg, pkgs, nil
 }
 
 // extractEntryPoints finds all main functions in the call graph (string-based, for backward compat)
@@ -961,6 +1186,67 @@ func findPathToSymbolFromAny(entries []*callgraph.Node, pkg, symbol string, prog
 	return nil, false
 }
 
+// findAllSymbolsFromAny does multi-source BFS from all entry points simultaneously.
+// Each node is visited exactly once regardless of entry point count.
+// Returns a map of symbol -> path for each symbol found reachable, and total nodes visited.
+func findAllSymbolsFromAny(entries []*callgraph.Node, pkg string, symbols []string, ctx ...context.Context) (map[string][]*callgraph.Node, int) {
+	found := make(map[string][]*callgraph.Node)
+	parent := make(map[*callgraph.Node]*callgraph.Node, len(entries))
+	queue := make([]*callgraph.Node, 0, len(entries))
+
+	for _, entry := range entries {
+		if _, seen := parent[entry]; !seen {
+			parent[entry] = nil
+			queue = append(queue, entry)
+		}
+	}
+
+	remaining := make(map[string]bool, len(symbols))
+	for _, s := range symbols {
+		remaining[s] = true
+	}
+
+	var cancelCtx context.Context
+	if len(ctx) > 0 && ctx[0] != nil {
+		cancelCtx = ctx[0]
+	}
+
+	visited := 0
+	for len(queue) > 0 && len(remaining) > 0 {
+		if cancelCtx != nil && visited%1000 == 0 {
+			select {
+			case <-cancelCtx.Done():
+				return found, visited
+			default:
+			}
+		}
+
+		node := queue[0]
+		queue = queue[1:]
+		visited++
+
+		var matched []string
+		for sym := range remaining {
+			if matchesSymbol(node, pkg, sym) {
+				matched = append(matched, sym)
+			}
+		}
+		for _, sym := range matched {
+			found[sym] = reconstructPath(node, parent)
+			delete(remaining, sym)
+		}
+
+		for _, edge := range node.Out {
+			if _, seen := parent[edge.Callee]; !seen {
+				parent[edge.Callee] = node
+				queue = append(queue, edge.Callee)
+			}
+		}
+	}
+
+	return found, visited
+}
+
 // reconstructPath walks parent pointers backward to build the path from entry to target
 func reconstructPath(target *callgraph.Node, parent map[*callgraph.Node]*callgraph.Node) []*callgraph.Node {
 	var path []*callgraph.Node
@@ -1086,77 +1372,97 @@ func buildRTACallGraph(prog *ssa.Program, allFuncs map[*ssa.Function]bool) (resu
 	return static.CallGraph(prog)
 }
 
-func getCurrentVersion(pkg string, dir string, result *Result) string {
-	// Check if this is a stdlib package
+func getCurrentVersion(pkg string, dir string, modDir string, result *Result) string {
 	if result.AffectedImports != nil {
 		if details, exists := result.AffectedImports[pkg]; exists && details.Type == "stdlib" {
+			if v, ok := result.GoToolchainVersions[modDir]; ok {
+				return v
+			}
 			return getGoToolchainVersion(dir, result)
 		}
 	}
 
-	cmd := "go"
-	args := []string{"list", "-f", "{{if .Module}}{{.Module.Version}}{{end}}", pkg}
-	out, err := cli.RunCommandStdout(dir, cmd, args...)
-	if err != nil {
-		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
-		result.Errors = append(result.Errors, errMsg)
+	_, ver, found := result.findModuleInGoMod(pkg, dir)
+	if !found {
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	return ver
+}
+
+func cacheGoToolchainVersions(r *Result, modDirs []string) {
+	r.GoToolchainVersions = make(map[string]string)
+	for _, fullDir := range modDirs {
+		modKey, err := filepath.Rel(r.Directory, fullDir)
+		if err != nil {
+			modKey = fullDir
+		}
+		ver := getGoToolchainVersion(fullDir, r)
+		if ver != "" {
+			r.GoToolchainVersions[modKey] = ver
+		}
+	}
+}
+
+func cacheModuleFiles(r *Result, modDirs []string) {
+	r.moduleFiles = make(map[string][]byte)
+	for _, dir := range modDirs {
+		for _, name := range []string{"go.mod", "go.sum"} {
+			path := filepath.Join(dir, name)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			r.moduleFiles[path] = data
+		}
+	}
+}
+
+func (r *Result) readModFile(path string) ([]byte, error) {
+	if data, ok := r.moduleFiles[path]; ok {
+		return data, nil
+	}
+	return os.ReadFile(path)
 }
 
 func getGoToolchainVersion(dir string, result *Result) string {
-	cmd := "go"
-	args := []string{"mod", "edit", "-json"}
-	out, err := cli.RunCommandStdout(dir, cmd, args...)
+	data, err := result.readModFile(filepath.Join(dir, "go.mod"))
 	if err != nil {
-		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
-		result.Errors = append(result.Errors, errMsg)
+		result.Errors = append(result.Errors, fmt.Sprintf("Failed to read go.mod in %s: %v", dir, err))
 		return ""
 	}
 
-	var goModEdit GoModEdit
-	err = json.Unmarshal(out, &goModEdit)
+	f, err := modfile.Parse("go.mod", data, nil)
 	if err != nil {
-		errMsg := fmt.Sprintf("Failed to parse go.mod JSON in %s: %v", dir, err)
-		result.Errors = append(result.Errors, errMsg)
+		result.Errors = append(result.Errors, fmt.Sprintf("Failed to parse go.mod in %s: %v", dir, err))
 		return ""
 	}
 
-	// Get the Go version from go.mod
-	if goModEdit.Go != "" {
-		goVersion := goModEdit.Go
-		// Add 'v' prefix for semver compatibility if not present
-		if !strings.HasPrefix(goVersion, "v") {
-			goVersion = "v" + goVersion
+	if f.Go != nil && f.Go.Version != "" {
+		v := f.Go.Version
+		if !strings.HasPrefix(v, "v") {
+			v = "v" + v
 		}
-		return goVersion
+		return v
 	}
 
 	return ""
 }
 
 func getReplaceVersion(pkg string, dir string, result *Result) (string, string) {
-	cmd := "go"
-	args := []string{"mod", "edit", "-json"}
-	out, err := cli.RunCommandStdout(dir, cmd, args...)
+	data, err := result.readModFile(filepath.Join(dir, "go.mod"))
 	if err != nil {
-		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
-		result.Errors = append(result.Errors, errMsg)
+		result.Errors = append(result.Errors, fmt.Sprintf("Failed to read go.mod in %s: %v", dir, err))
 		return "", ""
 	}
 
-	var goModEdit GoModEdit
-	err = json.Unmarshal(out, &goModEdit)
+	f, err := modfile.Parse("go.mod", data, nil)
 	if err != nil {
 		return "", ""
 	}
 
-	for _, r := range goModEdit.Replace {
-		if r.Old.Path == pkg {
-			if r.New.Version != "" {
-				return r.New.Path, r.New.Version
-			}
+	for _, r := range f.Replace {
+		if r.Old.Path == pkg && r.New.Version != "" {
+			return r.New.Path, r.New.Version
 		}
 	}
 
@@ -1165,7 +1471,12 @@ func getReplaceVersion(pkg string, dir string, result *Result) (string, string) 
 
 func getFixedVersion(id, pkg string, result *Result) []string {
 	url := fmt.Sprintf(VulnsURL+"/ID/%s.json", id)
-	resp, err := http.Get(url)
+	req, err := http.NewRequestWithContext(result.ctx(), http.MethodGet, url, nil)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("Failed to create request for %s: %v", url, err))
+		return nil
+	}
+	resp, err := result.httpClient().Do(req)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to get response from %s: %v", url, err)
 		result.Errors = append(result.Errors, errMsg)
@@ -1187,16 +1498,22 @@ func getFixedVersion(id, pkg string, result *Result) []string {
 	}
 
 	for _, a := range detail.Affected {
-		if a.Package.Name == pkg {
+		if a.Package.Name == pkg || strings.HasPrefix(pkg, a.Package.Name+"/") {
 			for _, r := range a.Ranges {
 				if r.Type == "SEMVER" {
 					return formatIntroducedFixed(r.Events)
 				}
 			}
-		} else if a.Package.Name == "stdlib" {
-			for _, r := range a.Ranges {
-				if r.Type == "SEMVER" {
-					return formatIntroducedFixed(r.Events)
+		}
+	}
+
+	if pkg != "" {
+		for _, a := range detail.Affected {
+			if a.Package.Name == "stdlib" {
+				for _, r := range a.Ranges {
+					if r.Type == "SEMVER" {
+						return formatIntroducedFixed(r.Events)
+					}
 				}
 			}
 		}
@@ -1206,21 +1523,17 @@ func getFixedVersion(id, pkg string, result *Result) []string {
 }
 
 func getModPath(pkg, dir string, result *Result) string {
-	cmd := "go"
-	args := []string{"list", "-f", "{{if .Module}}{{.Module.Path}}{{end}}", pkg}
-	out, err := cli.RunCommandStdout(dir, cmd, args...)
-	if err != nil {
-		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), dir, strings.TrimSpace(string(out)))
-		result.Errors = append(result.Errors, errMsg)
+	path, _, found := result.findModuleInGoMod(pkg, dir)
+	if !found {
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	return path
 }
 
 func getGitBranch(result *Result) {
 	cmd := "git"
 	args := []string{"rev-parse", "--abbrev-ref", "HEAD"}
-	out, err := cli.RunCommandStdout(result.Directory, cmd, args...)
+	out, err := result.runner().RunCommandStdout(result.ctx(), result.Directory, cmd, args...)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), result.Directory, strings.TrimSpace(string(out)))
 		result.Errors = append(result.Errors, errMsg)
@@ -1234,7 +1547,7 @@ func getGitBranch(result *Result) {
 	if branchName == "HEAD" {
 		commitCmd := "git"
 		commitArgs := []string{"rev-parse", "HEAD"}
-		commitOut, err := cli.RunCommandStdout(result.Directory, commitCmd, commitArgs...)
+		commitOut, err := result.runner().RunCommandStdout(result.ctx(), result.Directory, commitCmd, commitArgs...)
 		if err != nil {
 			errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", commitCmd, strings.Join(commitArgs, " "), result.Directory, strings.TrimSpace(string(commitOut)))
 			result.Errors = append(result.Errors, errMsg)
@@ -1245,17 +1558,19 @@ func getGitBranch(result *Result) {
 	} else {
 		result.Branch = branchName
 	}
+	result.progress(fmt.Sprintf("  ✓ Git branch information retrieved: %s", result.Branch))
 }
 
 func getGitURL(result *Result) {
 	cmd := "git"
 	args := []string{"remote", "get-url", "origin"}
-	out, err := cli.RunCommandStdout(result.Directory, cmd, args...)
+	out, err := result.runner().RunCommandStdout(result.ctx(), result.Directory, cmd, args...)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to run %s %s in %s: %s", cmd, strings.Join(args, " "), result.Directory, strings.TrimSpace(string(out)))
 		result.Errors = append(result.Errors, errMsg)
 	}
 	result.Repository = strings.TrimSpace(string(out))
+	result.progress(fmt.Sprintf("  ✓ Git repository URL retrieved: %s", result.Repository))
 }
 
 func formatIntroducedFixed(events []Event) []string {
@@ -1274,7 +1589,7 @@ func formatIntroducedFixed(events []Event) []string {
 	}
 
 	if introduced != "" {
-		result = append(result, fmt.Sprintf("Introdued in %s - ", introduced))
+		result = append(result, fmt.Sprintf("Introduced in %s - ", introduced))
 	}
 
 	return result

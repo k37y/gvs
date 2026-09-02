@@ -33,6 +33,9 @@ jobs:
           go install golang.org/x/tools/cmd/digraph@latest
           go install golang.org/x/vuln/cmd/govulncheck@latest
 
+      - name: Run unit tests
+        run: make test
+
       - name: Build binaries
         run: make gvs cg
 

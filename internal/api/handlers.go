@@ -2,6 +2,7 @@ package api
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -25,6 +26,8 @@ var (
 	taskMutex       sync.Mutex
 	progressStreams = make(map[string]chan string)
 	progressMutex   sync.Mutex
+	taskCancels     = make(map[string]context.CancelFunc)
+	taskCancelMutex sync.Mutex
 	counterURL      = os.Getenv("GVS_COUNTER_URL")
 )
 
@@ -54,6 +57,7 @@ const (
 	StatusRunning   TaskStatus = "running"
 	StatusCompleted TaskStatus = "completed"
 	StatusFailed    TaskStatus = "failed"
+	StatusCancelled TaskStatus = "cancelled"
 )
 
 type TaskResult struct {
@@ -103,19 +107,27 @@ func ScanHandler(w http.ResponseWriter, r *http.Request) {
 	progressStreams[taskId] = make(chan string, 100)
 	progressMutex.Unlock()
 
+	ctx, cancel := context.WithCancel(context.Background())
+	taskCancelMutex.Lock()
+	taskCancels[taskId] = cancel
+	taskCancelMutex.Unlock()
+
 	go func(taskId string, scanRequest gvc.ScanRequest) {
 		defer func() {
 			requestMutex.Lock()
 			inProgress = false
 			requestMutex.Unlock()
 
-			// Always close progress stream
 			progressMutex.Lock()
 			if ch, exists := progressStreams[taskId]; exists {
 				close(ch)
 				delete(progressStreams, taskId)
 			}
 			progressMutex.Unlock()
+
+			taskCancelMutex.Lock()
+			delete(taskCancels, taskId)
+			taskCancelMutex.Unlock()
 		}()
 
 		updateStatus := func(status TaskStatus, output, errMsg string) {
@@ -130,7 +142,6 @@ func ScanHandler(w http.ResponseWriter, r *http.Request) {
 				select {
 				case ch <- message:
 				default:
-					// Channel full, skip message
 				}
 			}
 			progressMutex.Unlock()
@@ -160,7 +171,7 @@ func ScanHandler(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		log.Printf("[Task %s] Cloning repository %s (%s)...", taskId, scanRequest.Repo, scanRequest.BranchOrCommit)
 		sendProgress(fmt.Sprintf("Cloning repository %s (%s)...", scanRequest.Repo, scanRequest.BranchOrCommit))
-		err = common.CloneRepo(scanRequest.Repo, scanRequest.BranchOrCommit, cloneDir)
+		err = common.CloneRepo(ctx, scanRequest.Repo, scanRequest.BranchOrCommit, cloneDir)
 		if err != nil {
 			log.Printf("[Task %s] Clone failed for Repo: %s, Branch: %s, Error: %s", taskId, scanRequest.Repo, scanRequest.BranchOrCommit, err.Error())
 			updateStatus(StatusFailed, "", fmt.Sprintf("git clone failed: %v", err))
@@ -183,7 +194,7 @@ func ScanHandler(w http.ResponseWriter, r *http.Request) {
 
 		for i, modDir := range moduleDirs {
 			sendProgress(fmt.Sprintf("Running govulncheck on module %d/%d", i+1, len(moduleDirs)))
-			output, exitCode, err := runGovulncheckWithProgress(modDir, "./...", sendProgress)
+			output, exitCode, err := runGovulncheckWithProgress(ctx, modDir, "./...", sendProgress)
 			if exitCode > finalExitCode {
 				finalExitCode = exitCode
 			}
@@ -323,19 +334,27 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	baseURL := fmt.Sprintf("%s://%s", scheme, r.Host)
 
+	cgCtx, cgCancel := context.WithCancel(context.Background())
+	taskCancelMutex.Lock()
+	taskCancels[taskId] = cgCancel
+	taskCancelMutex.Unlock()
+
 	go func(taskId, repo, branchOrCommit, cve, library, symbol, fixversion, algo, baseURL string) {
 		defer func() {
 			requestMutex.Lock()
 			inProgress = false
 			requestMutex.Unlock()
 
-			// Always close progress stream
 			progressMutex.Lock()
 			if ch, exists := progressStreams[taskId]; exists {
 				close(ch)
 				delete(progressStreams, taskId)
 			}
 			progressMutex.Unlock()
+
+			taskCancelMutex.Lock()
+			delete(taskCancels, taskId)
+			taskCancelMutex.Unlock()
 		}()
 
 		updateStatus := func(status TaskStatus, output, errMsg string) {
@@ -350,7 +369,6 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 				select {
 				case ch <- message:
 				default:
-					// Channel full, skip message
 				}
 			}
 			progressMutex.Unlock()
@@ -377,7 +395,7 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		log.Printf("[Task %s] Cloning repository %s (%s) ...", taskId, repo, branchOrCommit)
 		sendProgress(fmt.Sprintf("Cloning repository %s (%s)...", repo, branchOrCommit))
-		if err := common.CloneRepo(repo, branchOrCommit, cloneDir); err != nil {
+		if err := common.CloneRepo(cgCtx, repo, branchOrCommit, cloneDir); err != nil {
 			updateStatus(StatusFailed, "", fmt.Sprintf("git clone failed: %v", err))
 			return
 		}
@@ -420,7 +438,7 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 			args = append(args, "-fixversion", fixversion)
 		}
 		args = append(args, cve, cloneDir)
-		cmd = exec.Command("cg", args...)
+		cmd = exec.CommandContext(cgCtx, "cg", args...)
 
 		output, progressLogs, err := runCgWithProgressCapture(cmd, sendProgress)
 
@@ -588,11 +606,10 @@ func runCgWithProgressCapture(cmd *exec.Cmd, sendProgress func(string)) (output 
 	return []byte(outputBuffer.String()), []byte(logsBuffer.String()), err
 }
 
-func runGovulncheckWithProgress(directory, target string, sendProgress func(string)) (string, int, error) {
+func runGovulncheckWithProgress(ctx context.Context, directory, target string, sendProgress func(string)) (string, int, error) {
 	sendProgress(fmt.Sprintf("Running govulncheck in %s", directory))
 
-	// Use the existing RunGovulncheck function
-	output, exitCode, err := common.RunGovulncheck(directory, target)
+	output, exitCode, err := common.RunGovulncheck(ctx, directory, target)
 
 	if err != nil && exitCode != 3 {
 		sendProgress(fmt.Sprintf("govulncheck completed with exit code %d", exitCode))
@@ -649,4 +666,50 @@ func convertGraphPathsToURLs(jsonOutput []byte, baseURL string) []byte {
 	}
 
 	return modifiedJSON
+}
+
+func CancelHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		TaskID string `json:"taskId"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TaskID == "" {
+		writeJSONError(w, http.StatusBadRequest, "Invalid or missing taskId")
+		return
+	}
+
+	taskMutex.Lock()
+	result, exists := taskStore[req.TaskID]
+	taskMutex.Unlock()
+
+	if !exists {
+		writeJSONError(w, http.StatusNotFound, "Task not found")
+		return
+	}
+
+	if result.Status != StatusRunning && result.Status != StatusPending {
+		writeJSONError(w, http.StatusBadRequest, "Task is not running")
+		return
+	}
+
+	taskCancelMutex.Lock()
+	cancelFn, hasCancel := taskCancels[req.TaskID]
+	taskCancelMutex.Unlock()
+
+	if !hasCancel {
+		writeJSONError(w, http.StatusBadRequest, "Task cannot be cancelled")
+		return
+	}
+
+	log.Printf("[Task %s] Cancellation requested", req.TaskID)
+	cancelFn()
+
+	taskMutex.Lock()
+	taskStore[req.TaskID] = &TaskResult{Status: StatusCancelled, Error: "Scan cancelled by user"}
+	taskMutex.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]string{"status": "cancelled"}); err != nil {
+		log.Printf("failed to write cancel response: %v", err)
+	}
 }
