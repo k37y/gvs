@@ -301,7 +301,7 @@ func Worker(jobs <-chan Job, results chan<- *Result, wg *sync.WaitGroup, result 
 	for job := range jobs {
 		select {
 		case <-result.ctx().Done():
-			results <- &Result{IsVulnerable: "false"}
+			results <- &Result{IsVulnerable: "unknown"}
 			continue
 		default:
 		}
@@ -352,6 +352,11 @@ func parseVersionRanges(rawFixVer []string) [][2]string {
 				introduced = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(parts[0]), "Introduced in"))
 				fixed = strings.TrimSpace(parts[1])
 			}
+		} else if strings.HasPrefix(strings.TrimSpace(entry), "Introduced in ") && strings.HasSuffix(strings.TrimSpace(entry), " -") {
+			introduced = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(entry), "Introduced in "), " -"))
+			if introduced != "" {
+				ranges = append(ranges, [2]string{common.SemVersion(introduced), ""})
+			}
 		} else {
 			fixed = strings.TrimSpace(entry)
 		}
@@ -369,7 +374,9 @@ func isVersionInVulnerableRange(version string, rawFixVer []string) (bool, strin
 	ranges := parseVersionRanges(rawFixVer)
 	for _, r := range ranges {
 		introduced, fixed := r[0], r[1]
-		if semver.Compare(version, introduced) >= 0 && semver.Compare(version, fixed) < 0 {
+		// In advisories, introduced "0" means every earlier version, including
+		// v0.0.0 pseudo-versions that sort before the v0.0.0 release.
+		if (introduced == "v0" || semver.Compare(version, introduced) >= 0) && (fixed == "" || semver.Compare(version, fixed) < 0) {
 			return true, fixed
 		}
 	}
@@ -401,7 +408,7 @@ func checkDirVulnerability(curVer, repVer string, used, unknown, isStdlib bool, 
 			compareVer = goToolchainVersion
 		}
 
-		if compareVer == "" {
+		if !semver.IsValid(common.SemVersion(compareVer)) {
 			vr.Status = "unknown"
 			vr.DirVulnerable = true
 		} else if len(rawFixVer) > 0 {
@@ -447,7 +454,7 @@ func checkDirVulnerability(curVer, repVer string, used, unknown, isStdlib bool, 
 
 	if repVer != "" {
 		vuln, matchedFix := isVersionInVulnerableRange(repVer, rawFixVer)
-		if vuln && semver.Compare(curVer, repVer) <= 0 {
+		if vuln {
 			vr.DirVulnerable = true
 			vr.NeedsReplaceFix = true
 			if vr.FixVersion == "" {
@@ -498,7 +505,9 @@ func (j Job) isVulnerable(result *Result) *Result {
 
 	var rawFixVer []string
 	result.Mu.Lock()
-	if existing, ok := result.AffectedImports[j.Package]; ok && len(existing.FixedVersion) > 0 {
+	if existing := result.AffectedImports[j.Package]; len(existing.versionRanges) > 0 {
+		rawFixVer = existing.versionRanges
+	} else if len(existing.FixedVersion) > 0 {
 		rawFixVer = existing.FixedVersion
 	} else {
 		fixPkg := modPath
@@ -516,7 +525,6 @@ func (j Job) isVulnerable(result *Result) *Result {
 	if len(fixVer) == 0 {
 		fixVer = rawFixVer
 	}
-	fv := common.SemVersion(strings.Join(fixVer, " "))
 
 	used := false
 	unknown := false
@@ -529,20 +537,21 @@ func (j Job) isVulnerable(result *Result) *Result {
 		unknown = true
 	}
 
-	result.Mu.Lock()
-	if result.AffectedImports == nil {
-		result.AffectedImports = make(map[string]AffectedImportsDetails)
-	}
-	aentry := result.AffectedImports[j.Package]
-	if len(aentry.FixedVersion) == 0 {
-		if result.AffectedImports[j.Package].Type != "stdlib" {
-			aentry.FixedVersion = strings.Split(common.SemVersion(fv), ",")
-		} else {
-			aentry.FixedVersion = fixVer
+	// packages.Load resolves the actual build list, including transitive upgrades.
+	// The original go.mod can declare an older version in an untidy module.
+	if result.AffectedImports[j.Package].Type != "stdlib" {
+		if build := result.getSSABuild(dir); build != nil {
+			packages.Visit(build.loadedPkgs, nil, func(p *packages.Package) {
+				if p.PkgPath == j.Package && p.Module != nil {
+					curVer, modPath = p.Module.Version, p.Module.Path
+					repPath, repVer = "", ""
+					if p.Module.Replace != nil && p.Module.Replace.Version != "" {
+						repPath, repVer = p.Module.Replace.Path, p.Module.Replace.Version
+					}
+				}
+			})
 		}
 	}
-	result.AffectedImports[j.Package] = aentry
-	result.Mu.Unlock()
 
 	goToolchainVersion := ""
 	if result.AffectedImports[j.Package].Type == "stdlib" {
@@ -557,7 +566,10 @@ func (j Job) isVulnerable(result *Result) *Result {
 		result.AffectedImports[j.Package].Type == "stdlib", goToolchainVersion, rawFixVer)
 
 	result.Mu.Lock()
-	result.IsVulnerable = vr.Status
+	if used && repPath != "" && repPath != modPath {
+		vr = VulnerabilityResult{Status: "unknown", DirVulnerable: true}
+		result.Errors = append(result.Errors, fmt.Sprintf("Replacement for %s uses different module %s; advisory versions cannot establish its vulnerability status", modPath, repPath))
+	}
 
 	if used || unknown {
 		if result.UsedImports == nil {
@@ -598,34 +610,45 @@ func (j Job) isVulnerable(result *Result) *Result {
 	}
 	result.Mu.Unlock()
 
-	return result
+	// Each worker must publish its own status; the shared result may already
+	// have been updated by another module when the collector reads it.
+	return &Result{IsVulnerable: vr.Status}
+}
+
+func readVulnerabilityJSON(result *Result, url string, target any) bool {
+	req, err := http.NewRequestWithContext(result.ctx(), http.MethodGet, url, nil)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("Failed to create request for %s: %v", url, err))
+		return false
+	}
+	resp, err := result.httpClient().Do(req)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("Failed HTTP request to %s: %v", url, err))
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		result.Errors = append(result.Errors, fmt.Sprintf("Failed HTTP request to %s: status %d", url, resp.StatusCode))
+		return false
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("Failed to read vulnerability response from %s: %v", url, err))
+		return false
+	}
+	if err := json.Unmarshal(body, target); err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("Failed to parse vulnerability JSON from %s: %v", url, err))
+		return false
+	}
+	return true
 }
 
 func fetchGoVulnID(result *Result) string {
 	url := VulnsURL + "/index/vulns.json"
 
-	req, err := http.NewRequestWithContext(result.ctx(), http.MethodGet, url, nil)
-	if err != nil {
-		result.Errors = append(result.Errors, fmt.Sprintf("Failed to create request for %s: %v", url, err))
-		return ""
-	}
-	resp, err := result.httpClient().Do(req)
-	if err != nil {
-		errMsg := fmt.Sprintf("Failed to get response from %s: %v", url, err)
-		result.Errors = append(result.Errors, errMsg)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		errMsg := fmt.Sprintf("Failed to read response body from %s: %v", url, err)
-		result.Errors = append(result.Errors, errMsg)
-	}
-
 	var vulns []VulnReport
-	if err := json.Unmarshal(body, &vulns); err != nil {
-		errMsg := fmt.Sprintf("Failed to marshal response body from %s: %v", url, err)
-		result.Errors = append(result.Errors, errMsg)
+	if !readVulnerabilityJSON(result, url, &vulns) {
+		return ""
 	}
 
 	for _, v := range vulns {
@@ -720,31 +743,9 @@ func findMainGoFiles(res *Result) {
 func fetchAffectedSymbols(result *Result) {
 	url := fmt.Sprintf(VulnsURL+"/ID/%s.json", result.GoCVE)
 
-	req, err := http.NewRequestWithContext(result.ctx(), http.MethodGet, url, nil)
-	if err != nil {
-		result.Errors = append(result.Errors, fmt.Sprintf("Failed to create request for %s: %v", url, err))
-		return
-	}
-	resp, err := result.httpClient().Do(req)
-	if err != nil {
-		errMsg := fmt.Sprintf("Failed HTTP request to %s: %v", url, err)
-		result.Errors = append(result.Errors, errMsg)
-
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		errMsg := fmt.Sprintf("Failed to connect %s: %s", url, resp.Status)
-		result.Errors = append(result.Errors, errMsg)
-
-	}
-
 	var detail VulnReport
-
-	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
-		errMsg := fmt.Sprintf("Failed to parse JSON: %v", err)
-		result.Errors = append(result.Errors, errMsg)
-
+	if !readVulnerabilityJSON(result, url, &detail) {
+		return
 	}
 
 	// Validate that required fields are not empty
@@ -776,6 +777,19 @@ func fetchAffectedSymbols(result *Result) {
 			entry := imports[imp.Path]
 			entry.Symbols = append(entry.Symbols, imp.Symbols...)
 			entry.Type = typ
+			for _, versionRange := range aff.Ranges {
+				if versionRange.Type == "SEMVER" {
+					entry.versionRanges = append(entry.versionRanges, formatIntroducedFixed(versionRange.Events)...)
+				}
+			}
+			fixes := common.ExtractFormattedFixedVersions(entry.versionRanges)
+			if len(fixes) == 0 {
+				entry.FixedVersion = slices.Clone(entry.versionRanges)
+			} else if typ == "stdlib" {
+				entry.FixedVersion = fixes
+			} else {
+				entry.FixedVersion = []string{common.SemVersion(strings.Join(fixes, " "))}
+			}
 			imports[imp.Path] = entry
 			hasValidImports = true
 		}
@@ -798,6 +812,8 @@ func fetchAffectedSymbols(result *Result) {
 }
 
 func (r *Result) isSymbolUsed(pkg, dir, modDir string, symbols, files []string) string {
+	symbols = slices.Clone(symbols)
+	files = slices.Clone(files)
 	// Store original symbols for reflection analysis
 	originalSymbols := make([]string, len(symbols))
 	copy(originalSymbols, symbols)
@@ -826,6 +842,17 @@ func (r *Result) isSymbolUsed(pkg, dir, modDir string, symbols, files []string) 
 	// Check for direct usage via call graph analysis
 	directUsage := r.checkDirectUsage(pkg, dir, modDir, symbols, files)
 
+	// Include loaded helper packages, not just files declaring package main.
+	if build := r.getSSABuild(dir); build != nil {
+		for _, p := range build.loadedPkgs {
+			for _, file := range p.CompiledGoFiles {
+				if rel, err := filepath.Rel(dir, file); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+					files = append(files, rel)
+				}
+			}
+		}
+		files = common.UniqueStrings(files)
+	}
 	// Check for reflection-based usage
 	reflectionRisks := r.detectReflectionVulnerabilities(pkg, dir, originalSymbols, files)
 
@@ -853,7 +880,9 @@ func (r *Result) checkDirectUsage(pkg, dir, modDir string, symbols []string, fil
 
 	if len(build.entryPoints) == 0 {
 		errMsg := fmt.Sprintf("No entry points found in call graph for %s", dir)
+		r.Mu.Lock()
 		r.Errors = append(r.Errors, errMsg)
+		r.Mu.Unlock()
 		return "unknown"
 	}
 
@@ -968,7 +997,7 @@ func (r *Result) packagesEnv(dir string) []string {
 
 func (r *Result) buildSSAAndCallGraph(dir string) (*ssa.Program, *callgraph.Graph, []*packages.Package, error) {
 	cfg := &packages.Config{
-		Mode:    packages.LoadAllSyntax,
+		Mode:    packages.LoadAllSyntax | packages.NeedModule,
 		Dir:     dir,
 		Env:     r.packagesEnv(dir),
 		Context: r.ctx(),
@@ -983,38 +1012,23 @@ func (r *Result) buildSSAAndCallGraph(dir string) (*ssa.Program, *callgraph.Grap
 		return nil, nil, nil, fmt.Errorf("no packages loaded")
 	}
 
-	var validPkgs []*packages.Package
+	var loadErrors []string
+	packages.Visit(pkgs, nil, func(pkg *packages.Package) {
+		for _, err := range pkg.Errors {
+			loadErrors = append(loadErrors, err.Error())
+		}
+	})
+	if len(loadErrors) > 0 {
+		sort.Strings(loadErrors)
+		return nil, nil, pkgs, fmt.Errorf("incomplete package load: %s", strings.Join(common.UniqueStrings(loadErrors), "; "))
+	}
 	for _, pkg := range pkgs {
-		if len(pkg.Errors) == 0 && pkg.Types != nil && pkg.TypesInfo != nil {
-			validPkgs = append(validPkgs, pkg)
+		if pkg.Types == nil || pkg.TypesInfo == nil || pkg.IllTyped {
+			return nil, nil, pkgs, fmt.Errorf("incomplete package load for %s", pkg.PkgPath)
 		}
 	}
 
-	if len(validPkgs) == 0 {
-		cfg = &packages.Config{
-			Mode:    packages.LoadSyntax,
-			Dir:     dir,
-			Env:     r.packagesEnv(dir),
-			Context: r.ctx(),
-		}
-
-		pkgs, err = packages.Load(cfg, "./...")
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("failed to load packages with fallback: %v", err)
-		}
-
-		for _, pkg := range pkgs {
-			if len(pkg.Errors) == 0 {
-				validPkgs = append(validPkgs, pkg)
-			}
-		}
-	}
-
-	if len(validPkgs) == 0 {
-		return nil, nil, nil, fmt.Errorf("no valid packages found after loading")
-	}
-
-	prog, _ := ssautil.AllPackages(validPkgs, ssa.InstantiateGenerics)
+	prog, _ := ssautil.AllPackages(pkgs, ssa.InstantiateGenerics)
 	prog.Build()
 
 	algo := getCallGraphAlgorithm()
@@ -1304,7 +1318,6 @@ func matchesSymbol(node *callgraph.Node, pkg, symbol string) bool {
 	return false
 }
 
-
 // getCallGraphAlgorithm returns the algorithm to use for call graph generation
 // based on the ALGO environment variable.
 // Supported algorithms: rta (default), cha, vta, static
@@ -1354,7 +1367,7 @@ func buildRTACallGraph(prog *ssa.Program, allFuncs map[*ssa.Function]bool) (resu
 
 	var roots []*ssa.Function
 	for fn := range allFuncs {
-		if fn.Pkg != nil && fn.Pkg.Pkg.Name() == "main" && fn.Name() == "main" {
+		if fn.Pkg != nil && fn.Pkg.Pkg.Name() == "main" && (fn.Name() == "main" || fn.Name() == "init") {
 			roots = append(roots, fn)
 		}
 	}
@@ -1471,30 +1484,9 @@ func getReplaceVersion(pkg string, dir string, result *Result) (string, string) 
 
 func getFixedVersion(id, pkg string, result *Result) []string {
 	url := fmt.Sprintf(VulnsURL+"/ID/%s.json", id)
-	req, err := http.NewRequestWithContext(result.ctx(), http.MethodGet, url, nil)
-	if err != nil {
-		result.Errors = append(result.Errors, fmt.Sprintf("Failed to create request for %s: %v", url, err))
-		return nil
-	}
-	resp, err := result.httpClient().Do(req)
-	if err != nil {
-		errMsg := fmt.Sprintf("Failed to get response from %s: %v", url, err)
-		result.Errors = append(result.Errors, errMsg)
-
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		errMsg := fmt.Sprintf("Failed to read response body from %s: %v", url, err)
-		result.Errors = append(result.Errors, errMsg)
-
-	}
-
 	var detail VulnReport
-	if err := json.Unmarshal(body, &detail); err != nil {
-		errMsg := fmt.Sprintf("Failed to unmarshal response body from %s: %v", url, err)
-		result.Errors = append(result.Errors, errMsg)
+	if !readVulnerabilityJSON(result, url, &detail) {
+		return nil
 	}
 
 	for _, a := range detail.Affected {
@@ -2430,4 +2422,3 @@ func (r *Result) isReflectTypeOf(call *ast.CallExpr, importedPackages map[string
 	}
 	return false
 }
-

@@ -3,10 +3,12 @@ package cg
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -168,6 +170,19 @@ func TestIsVersionInVulnerableRange(t *testing.T) {
 			rawFixVer: nil,
 			wantVuln:  false,
 		},
+		{name: "prerelease before final fix", version: "v1.2.0-rc.1", rawFixVer: []string{"v1.2.0"}, wantVuln: true, wantFixVer: "v1.2.0"},
+		{name: "at prerelease fix", version: "v1.2.0-rc.2", rawFixVer: []string{"v1.2.0-rc.2"}},
+		{name: "before prerelease introduction", version: "v1.2.0-beta.1", rawFixVer: []string{"Introduced in 1.2.0-rc.1 and fixed in 1.2.0"}},
+		{name: "at prerelease introduction", version: "v1.2.0-rc.1", rawFixVer: []string{"Introduced in 1.2.0-rc.1 and fixed in 1.2.0"}, wantVuln: true, wantFixVer: "v1.2.0"},
+		{name: "zero based pseudo version is included by introduced zero", version: "v0.0.0-20260101000000-abcdefabcdef", rawFixVer: []string{"Introduced in 0 and fixed in 1.0.0"}, wantVuln: true, wantFixVer: "v1.0.0"},
+		{name: "zero based pseudo version in unfixed range", version: "v0.0.0-20260101000000-abcdefabcdef", rawFixVer: []string{"Introduced in 0 - "}, wantVuln: true},
+
+		{name: "pseudo version before fix", version: "v1.0.1-0.20260101000000-abcdefabcdef", rawFixVer: []string{"v1.0.1-0.20260201000000-123456789abc"}, wantVuln: true, wantFixVer: "v1.0.1-0.20260201000000-123456789abc"},
+		{name: "pseudo version at fix", version: "v1.0.1-0.20260201000000-123456789abc", rawFixVer: []string{"v1.0.1-0.20260201000000-123456789abc"}},
+		{name: "open range before introduction", version: "v1.1.9", rawFixVer: []string{"Introduced in 1.2.0 - "}},
+		{name: "open range at introduction", version: "v1.2.0", rawFixVer: []string{"Introduced in 1.2.0 - "}, wantVuln: true},
+		{name: "open range after introduction", version: "v2.0.0", rawFixVer: []string{"Introduced in 1.2.0 - "}, wantVuln: true},
+
 		{
 			name:       "plain version format",
 			version:    "v0.23.0",
@@ -355,12 +370,12 @@ func TestCheckDirVulnerability(t *testing.T) {
 			wantStatus:         "true", wantDirVuln: true,
 		},
 		{
-			name:               "stdlib used, empty toolchain version",
-			curVer:             "v1.21.0",
-			used:               true,
-			isStdlib:           true,
-			rawFixVer:          []string{"Introduced in 0 and fixed in 1.21.8"},
-			wantStatus:         "unknown", wantDirVuln: true,
+			name:       "stdlib used, empty toolchain version",
+			curVer:     "v1.21.0",
+			used:       true,
+			isStdlib:   true,
+			rawFixVer:  []string{"Introduced in 0 and fixed in 1.21.8"},
+			wantStatus: "unknown", wantDirVuln: true,
 		},
 		{
 			name:       "stdlib used, no fix versions available",
@@ -389,6 +404,9 @@ func TestCheckDirVulnerability(t *testing.T) {
 			wantStatus:         "false", wantDirVuln: false,
 		},
 
+		{name: "open ended stdlib range", used: true, isStdlib: true, goToolchainVersion: "v1.23.0", rawFixVer: []string{"Introduced in 1.23.0 - "}, wantStatus: "true", wantDirVuln: true},
+		{name: "stdlib before open ended introduction", used: true, isStdlib: true, goToolchainVersion: "v1.22.0", rawFixVer: []string{"Introduced in 1.23.0 - "}, wantStatus: "false"},
+
 		// --- Real-world mod-dir scenarios ---
 		{
 			name:       "mod-dir root: require v0.23.0, replace v0.24.0, fix v0.33.0",
@@ -404,7 +422,7 @@ func TestCheckDirVulnerability(t *testing.T) {
 			repVer:     "v0.24.0",
 			rawFixVer:  []string{"Introduced in 0 and fixed in 0.33.0"},
 			used:       true,
-			wantStatus: "true", wantDirVuln: true,
+			wantStatus: "true", wantDirVuln: true, wantReplaceFix: true, wantFixVersion: "v0.33.0",
 		},
 		{
 			name:       "mod-dir foo: require v0.23.0, replace v0.33.0 (fixed), fix v0.33.0",
@@ -469,8 +487,8 @@ func TestGetMajorMinor(t *testing.T) {
 		{"v1.23.8", "v1.23"},
 		{"v1.21.0", "v1.21"},
 		{"v2.0.0", "v2.0"},
-		{"1.23.8", ""},  // missing v prefix
-		{"v1", ""},      // too few parts
+		{"1.23.8", ""}, // missing v prefix
+		{"v1", ""},     // too few parts
 		{"", ""},
 	}
 
@@ -2169,8 +2187,6 @@ func TestCheckDirectUsage_Found(t *testing.T) {
 	r := &Result{ScanConfig: ScanConfig{Directory: dir}}
 	t.Setenv("ALGO", "rta")
 
-
-
 	result := r.checkDirectUsage("fmt", dir, ".", []string{"fmt.Println"}, nil)
 	if result != "true" {
 		t.Errorf("expected 'true' for fmt.Println usage, got %q", result)
@@ -2181,8 +2197,6 @@ func TestCheckDirectUsage_NotFound(t *testing.T) {
 	dir := filepath.Join("testdata", "simple")
 	r := &Result{ScanConfig: ScanConfig{Directory: dir}}
 	t.Setenv("ALGO", "rta")
-
-
 
 	result := r.checkDirectUsage("crypto/tls", dir, ".", []string{"crypto/tls.Dial"}, nil)
 	if result == "true" {
@@ -2301,8 +2315,6 @@ func TestIsSymbolUsed(t *testing.T) {
 	r := &Result{ScanConfig: ScanConfig{Directory: dir}}
 	t.Setenv("ALGO", "rta")
 
-
-
 	result := r.isSymbolUsed("fmt", dir, ".", []string{"Println"}, []string{"main.go"})
 	if result != "true" {
 		t.Errorf("expected 'true' for fmt.Println usage, got %q", result)
@@ -2386,5 +2398,148 @@ func TestWorker(t *testing.T) {
 	res := <-results
 	if res == nil {
 		t.Fatal("expected non-nil result from worker")
+	}
+}
+
+func TestWorkerKeepsEachJobStatus(t *testing.T) {
+	t.Setenv("ALGO", "static")
+	dir := t.TempDir()
+	for name, source := range map[string]string{
+		"go.mod":  "module example.com/worker\n\ngo 1.22.0\n",
+		"main.go": "package main\nimport \"fmt\"\nfunc main() { fmt.Println(\"hello\") }\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(source), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result := &Result{
+		ScanConfig: ScanConfig{Directory: dir},
+		AffectedImports: map[string]AffectedImportsDetails{
+			"fmt": {Type: "stdlib", FixedVersion: []string{"1.22.2"}},
+		},
+	}
+	jobs := make(chan Job, 2)
+	results := make(chan *Result, 2)
+	jobs <- Job{Package: "fmt", Symbols: []string{"Println"}, Dir: "."}
+	jobs <- Job{Package: "fmt", Symbols: []string{"Nonexistent"}, Dir: "."}
+	close(jobs)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go Worker(jobs, results, &wg, result)
+	// Delay reading until both jobs have updated the shared scan result.
+	wg.Wait()
+	for _, want := range []string{"true", "false"} {
+		if got := (<-results).IsVulnerable; got != want {
+			t.Errorf("job status = %q, want %q", got, want)
+		}
+	}
+}
+
+type failingAdvisoryTransport func(*http.Request) (*http.Response, error)
+
+func (f failingAdvisoryTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type truncatedAdvisoryBody struct{}
+
+func (truncatedAdvisoryBody) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+func (truncatedAdvisoryBody) Close() error             { return nil }
+
+func TestAdvisoryFailures(t *testing.T) {
+	for _, failure := range []string{"transport", "timeout", "http status", "malformed JSON", "trailing JSON data", "truncated body"} {
+		for _, operation := range []string{"alias", "symbols", "versions", "scan setup"} {
+			t.Run(failure+"/"+operation, func(t *testing.T) {
+				client := &http.Client{Transport: failingAdvisoryTransport(func(req *http.Request) (*http.Response, error) {
+					switch failure {
+					case "transport":
+						return nil, errors.New("connection unavailable")
+					case "timeout":
+						return nil, context.DeadlineExceeded
+					case "truncated body":
+						return &http.Response{StatusCode: 200, Body: io.NopCloser(io.MultiReader(strings.NewReader(`{}`), truncatedAdvisoryBody{})), Header: make(http.Header)}, nil
+					case "trailing JSON data":
+						return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{} trailing`)), Header: make(http.Header)}, nil
+					case "http status":
+						return &http.Response{StatusCode: 503, Status: "503 Service Unavailable", Body: io.NopCloser(strings.NewReader(`{}`)), Header: make(http.Header)}, nil
+					default:
+						return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"affected":`)), Header: make(http.Header)}, nil
+					}
+				})}
+				r := &Result{ScanConfig: ScanConfig{CVE: "CVE-2024-12345", HTTP: client}}
+				switch operation {
+				case "alias":
+					fetchGoVulnID(r)
+				case "symbols":
+					r.GoCVE = "GO-2024-1234"
+					fetchAffectedSymbols(r)
+				case "versions":
+					if got := getFixedVersion("GO-2024-1234", "example.com/vulnerable", r); len(got) != 0 {
+						t.Errorf("versions = %v", got)
+					}
+				case "scan setup":
+					if !SetupCVEMode(r) && !Prepare(r) {
+						t.Fatal("scan continued after advisory failure")
+					}
+					if r.IsVulnerable != "unknown" {
+						t.Errorf("status = %q, want unknown", r.IsVulnerable)
+					}
+				}
+				if len(r.Errors) == 0 {
+					t.Fatal("advisory failure has no diagnostic")
+				}
+				if len(r.AffectedImports) != 0 {
+					t.Errorf("failed advisory produced findings: %v", r.AffectedImports)
+				}
+			})
+		}
+	}
+}
+
+func TestAdvisoryRangePreserved(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		events          []Event
+		version, status string
+	}{
+		{"unfixed vulnerability", []Event{{Introduced: "1.0.0"}}, "v1.2.0", "true"},
+		{"before unfixed vulnerability", []Event{{Introduced: "1.0.0"}}, "v0.9.0", "false"},
+		{"between affected ranges", []Event{{Introduced: "0"}, {Fixed: "1.0.0"}, {Introduced: "1.2.0"}, {Fixed: "1.3.0"}}, "v1.1.0", "false"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report := VulnReport{Affected: []Affected{{Package: Package{Name: "example.com/vulnerable"}, Ranges: []Range{{Type: "SEMVER", Events: tc.events}}, EcosystemSpecific: EcosystemSpecific{Imports: []Import{{Path: "example.com/vulnerable", Symbols: []string{"Danger"}}}}}}}
+			body, err := json.Marshal(report)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := &Result{ScanConfig: ScanConfig{HTTP: &http.Client{Transport: failingAdvisoryTransport(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(body)))}, nil
+			})}}}
+			fetchAffectedSymbols(r)
+			if len(r.Errors) != 0 {
+				t.Fatal(r.Errors)
+			}
+			details := r.AffectedImports["example.com/vulnerable"]
+			verdict := checkDirVulnerability(tc.version, "", true, false, false, "", details.versionRanges)
+			if verdict.Status != tc.status {
+				t.Errorf("status = %s, want %s", verdict.Status, tc.status)
+			}
+			if tc.name == "unfixed vulnerability" && verdict.FixVersion != "" {
+				t.Errorf("invented fix: %q", verdict.FixVersion)
+			}
+		})
+	}
+}
+
+func TestCancelledWorkerCannotReportSafe(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result := &Result{ScanConfig: ScanConfig{Ctx: ctx}}
+	jobs, results := make(chan Job, 1), make(chan *Result, 1)
+	jobs <- Job{Package: "example.com/vulnerable", Symbols: []string{"Danger"}, Dir: "."}
+	close(jobs)
+	var workers sync.WaitGroup
+	workers.Add(1)
+	Worker(jobs, results, &workers, result)
+	if got := (<-results).IsVulnerable; got != "unknown" {
+		t.Errorf("cancelled scan status = %q, want unknown", got)
 	}
 }

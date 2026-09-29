@@ -76,6 +76,28 @@ flowchart TD
     API_URL=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent
     API_KEY=<your-api-key>
     ```
+## Tests
+
+Run unit tests with race detection using `make test`. Both test targets require
+Go and a C compiler for `-race`. Run the API and scanner integration suite with
+`make test-integration`; it additionally requires Git, Graphviz (`sfdp`), and
+network access to GitHub and vuln.go.dev.
+
+Scanner fixtures come from [k37y/gvs-testdata](https://github.com/k37y/gvs-testdata).
+The tests cover CVE and manual scans, all four algorithms, unreachable and
+test-only calls, initialization, goroutines, deferred and generic calls, reflection
+in helper packages, resolved dependency versions, replacement modules, version
+boundaries, incomplete analysis, graph paths, and scan lifecycle behavior.
+`make test-integration` enables `-race` for both the API test process and the
+scanner subprocess. The suite checks multiple modules and affected packages
+with 1, 4, and 8 workers. See [the test data notes](internal/api/testdata/README.md)
+for validating fixture changes in a local checkout.
+
+Scans compare dependency versions selected by Go, including transitive upgrades.
+Incomplete package loading produces an unknown result. A reachable symbol in a
+versioned replacement from a different module also produces unknown, because
+the original module’s advisory versions do not establish whether the fork is fixed.
+
 ## Usage
 ### Build and run as a container image
 ```bash

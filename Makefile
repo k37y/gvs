@@ -41,13 +41,13 @@ run: gvs cg
 .PHONY: test
 
 test:
-	go test -v -count=1 ./...
+	go test -race -v -count=1 ./...
 
 .PHONY: test-integration
 
 test-integration:
 	@echo "Running integration tests..."
-	go test -v -count=1 -tags integration ./internal/api -run "TestCallgraphIntegration|TestCgBinaryValidation" -timeout 25m
+	go test -race -v -count=1 -tags integration ./internal/api -run "TestCallgraph.*Integration|TestCgBinaryValidation" -timeout 45m
 
 .PHONY: gvs
 

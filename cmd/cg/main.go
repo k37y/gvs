@@ -200,7 +200,6 @@ func main() {
 	var totalJobs int64
 	var completedJobs int64
 	var progressDone = make(chan bool)
-	var lastPrintedPercentage float64 = -1
 
 	workerCount := defaultWorkers
 
@@ -218,11 +217,7 @@ func main() {
 					total := atomic.LoadInt64(&totalJobs)
 					if total > 0 && completed > 0 {
 						percentage := float64(completed) / float64(total) * 100
-						// Only print if percentage has changed
-						if percentage != lastPrintedPercentage {
-							fmt.Fprintf(os.Stderr, "Progress: %d/%d jobs completed (%.1f%%)\n", completed, total, percentage)
-							lastPrintedPercentage = percentage
-						}
+						fmt.Fprintf(os.Stderr, "Progress: %d/%d jobs completed (%.1f%%)\n", completed, total, percentage)
 					}
 				}
 			}
@@ -240,6 +235,11 @@ func main() {
 			if len(mainFiles) == 0 {
 				continue
 			}
+			var files []string
+			for _, set := range mainFiles {
+				files = append(files, set...)
+			}
+			files = common.UniqueStrings(files)
 			for pkg, syms := range result.AffectedImports {
 				key := modDir + "\x00" + pkg
 				if seen[key] {
@@ -247,7 +247,7 @@ func main() {
 				}
 				seen[key] = true
 				atomic.AddInt64(&totalJobs, 1)
-				jobs <- cg.Job{Package: pkg, Symbols: syms.Symbols, Dir: modDir}
+				jobs <- cg.Job{Package: pkg, Symbols: syms.Symbols, Dir: modDir, Files: files}
 			}
 		}
 		close(jobs)
@@ -271,7 +271,6 @@ func main() {
 			if total > 0 {
 				percentage := float64(completed) / float64(total) * 100
 				fmt.Fprintf(os.Stderr, "Progress: %d/%d jobs completed (%.1f%%)\n", completed, total, percentage)
-				lastPrintedPercentage = percentage
 			}
 		}
 
@@ -288,34 +287,10 @@ func main() {
 		close(progressDone)
 		completed := atomic.LoadInt64(&completedJobs)
 		total := atomic.LoadInt64(&totalJobs)
-		if lastPrintedPercentage != 100.0 {
-			fmt.Fprintf(os.Stderr, "Progress: %d/%d jobs completed (100.0%%)\n", completed, total)
-		}
+		fmt.Fprintf(os.Stderr, "Progress: %d/%d jobs completed (100.0%%)\n", completed, total)
 	}
 
-	// Deduplicate and normalize symbols within each dir/pkg entry
-	for dir, pkgs := range result.UsedImports {
-		for pkg, details := range pkgs {
-			for i, sym := range details.Symbols {
-				if strings.HasPrefix(sym, pkg+".") {
-					details.Symbols[i] = strings.TrimPrefix(sym, pkg+".")
-				}
-			}
-			deduped := common.UniqueStrings(details.Symbols)
-			if len(deduped) == 0 && details.CurrentVersion == "" && details.ReplaceVersion == "" {
-				delete(pkgs, pkg)
-				continue
-			}
-			if len(deduped) > 0 {
-				sort.Strings(deduped)
-				details.Symbols = deduped
-			}
-			pkgs[pkg] = details
-		}
-		if len(pkgs) == 0 {
-			delete(result.UsedImports, dir)
-		}
-	}
+	normalizeUsedImports(result)
 
 	if hasVulnerable {
 		result.IsVulnerable = "true"
@@ -336,7 +311,7 @@ func main() {
 			if *progress {
 				fmt.Fprintf(os.Stderr, "✗ %s\n", errMsg)
 			}
-	} else if result.IsVulnerable == "true" && len(result.UsedImports) > 0 {
+		} else if result.IsVulnerable == "true" && len(result.UsedImports) > 0 {
 			if *progress {
 				fmt.Fprintf(os.Stderr, "Generating call graph visualizations for affected symbols...\n")
 			}
@@ -368,7 +343,12 @@ func main() {
 
 			// Generate a graph for each vulnerable symbol
 			result.GraphPaths = []string{}
-			for _, pkgs := range result.UsedImports {
+			for modDir, pkgs := range result.UsedImports {
+				moduleOutputDir := filepath.Join(outputDir, modDir)
+				if err := os.MkdirAll(moduleOutputDir, 0755); err != nil {
+					result.Errors = append(result.Errors, fmt.Sprintf("Failed to create graph directory: %v", err))
+					continue
+				}
 				for pkg, details := range pkgs {
 					for _, symbol := range details.Symbols {
 						sanitizedLib := strings.ReplaceAll(pkg, "/", "-")
@@ -379,13 +359,13 @@ func main() {
 						sanitizedSymbol = strings.ReplaceAll(sanitizedSymbol, ")", "")
 
 						filename := fmt.Sprintf("%s-%s.svg", sanitizedLib, sanitizedSymbol)
-						outputPath := filepath.Join(outputDir, filename)
+						outputPath := filepath.Join(moduleOutputDir, filename)
 
 						if *progress {
 							fmt.Fprintf(os.Stderr, "  Generating graph for %s.%s...\n", pkg, symbol)
 						}
 
-						svgPath, err := generateCallGraphSVGForSymbol(result, directory, pkg, symbol, outputPath, *progress)
+						svgPath, err := generateCallGraphSVGForSymbol(result, directory, modDir, pkg, symbol, outputPath, *progress)
 						if err != nil {
 							errMsg := fmt.Sprintf("Failed to generate call graph for %s.%s: %v", pkg, symbol, err)
 							result.Errors = append(result.Errors, errMsg)
@@ -422,6 +402,40 @@ func main() {
 		result.Errors = append(result.Errors, errMsg)
 	} else {
 		fmt.Println(string(jsonOutput))
+	}
+}
+
+func normalizeUsedImports(result *cg.Result) {
+	// Deduplicate and normalize symbols within each dir/pkg entry
+	for dir, pkgs := range result.UsedImports {
+		for pkg, details := range pkgs {
+			pathsBySymbol := make(map[string][]*callgraph.Node)
+			for i, sym := range details.Symbols {
+				if strings.HasPrefix(sym, pkg+".") {
+					details.Symbols[i] = strings.TrimPrefix(sym, pkg+".")
+				}
+				if i < len(details.Paths) && len(details.Paths[i]) > 0 {
+					pathsBySymbol[details.Symbols[i]] = details.Paths[i]
+				}
+			}
+			deduped := common.UniqueStrings(details.Symbols)
+			if len(deduped) == 0 && details.CurrentVersion == "" && details.ReplaceVersion == "" {
+				delete(pkgs, pkg)
+				continue
+			}
+			if len(deduped) > 0 {
+				sort.Strings(deduped)
+				details.Symbols = deduped
+				details.Paths = nil
+				for _, symbol := range deduped {
+					details.Paths = append(details.Paths, pathsBySymbol[symbol])
+				}
+			}
+			pkgs[pkg] = details
+		}
+		if len(pkgs) == 0 {
+			delete(result.UsedImports, dir)
+		}
 	}
 }
 
@@ -472,9 +486,9 @@ func pathToDOT(path []*callgraph.Node) string {
 }
 
 // generateCallGraphSVGForSymbol generates an SVG visualization of the call graph for a specific symbol
-func generateCallGraphSVGForSymbol(result *cg.Result, directory, pkg, symbol, outputPath string, showProgress bool) (string, error) {
+func generateCallGraphSVGForSymbol(result *cg.Result, directory, modDir, pkg, symbol, outputPath string, showProgress bool) (string, error) {
 	// Try to use the stored path from the result first (most efficient)
-	for _, pkgs := range result.UsedImports {
+	if pkgs, ok := result.UsedImports[modDir]; ok {
 		if details, ok := pkgs[pkg]; ok && len(details.Paths) > 0 {
 			for i, sym := range details.Symbols {
 				if sym == symbol && i < len(details.Paths) {
@@ -487,12 +501,6 @@ func generateCallGraphSVGForSymbol(result *cg.Result, directory, pkg, symbol, ou
 					}
 				}
 			}
-			if len(details.Paths[0]) > 0 {
-				if showProgress {
-					fmt.Fprintf(os.Stderr, "    Using first available path (%d nodes)...\n", len(details.Paths[0]))
-				}
-				return generateSVGFromPath(details.Paths[0], outputPath, showProgress)
-			}
 		}
 	}
 
@@ -503,13 +511,10 @@ func generateCallGraphSVGForSymbol(result *cg.Result, directory, pkg, symbol, ou
 
 	// Get the first main file set to generate the call graph
 	var files []string
-	var modDir string
 
-	for dir, sets := range result.Files {
+	if sets, ok := result.Files[modDir]; ok {
 		if len(sets) > 0 && len(sets[0]) > 0 {
 			files = sets[0]
-			modDir = dir
-			break
 		}
 	}
 
@@ -598,4 +603,3 @@ func generateSVGFromPath(path []*callgraph.Node, outputPath string, showProgress
 
 	return outputPath, nil
 }
-

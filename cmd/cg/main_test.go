@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/hex"
+	"github.com/k37y/gvs/pkg/cmd/cg"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -62,5 +64,25 @@ func TestIsFlagPassed(t *testing.T) {
 	// Since we don't call flag.Parse in tests, no flags are "passed".
 	if isFlagPassed("nonexistent") {
 		t.Error("expected false for unset flag")
+	}
+}
+
+func TestNormalizeUsedImportsKeepsSymbolPaths(t *testing.T) {
+	alpha, zed := &callgraph.Node{ID: 1}, &callgraph.Node{ID: 2}
+	result := &cg.Result{UsedImports: map[string]map[string]cg.UsedImportsDetails{
+		"a": {"example.com/lib": {Symbols: []string{"Zed", "example.com/lib.Alpha", "example.com/lib.Zed"}, Paths: [][]*callgraph.Node{{zed}, {alpha}, {zed}}}},
+		"b": {"example.com/lib": {Symbols: []string{"Zed"}, Paths: [][]*callgraph.Node{{alpha, zed}}}},
+	}}
+	normalizeUsedImports(result)
+	first := result.UsedImports["a"]["example.com/lib"]
+	if !reflect.DeepEqual(first.Symbols, []string{"Alpha", "Zed"}) {
+		t.Fatalf("symbols = %v", first.Symbols)
+	}
+	if !reflect.DeepEqual(first.Paths, [][]*callgraph.Node{{alpha}, {zed}}) {
+		t.Errorf("sorting or deduplication changed symbol-path association: %v", first.Paths)
+	}
+	second := result.UsedImports["b"]["example.com/lib"]
+	if !reflect.DeepEqual(second.Paths, [][]*callgraph.Node{{alpha, zed}}) {
+		t.Errorf("module path overwritten: %v", second.Paths)
 	}
 }

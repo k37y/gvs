@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/k37y/gvs/internal/common"
@@ -133,6 +134,9 @@ func ScanHandler(w http.ResponseWriter, r *http.Request) {
 		updateStatus := func(status TaskStatus, output, errMsg string) {
 			taskMutex.Lock()
 			defer taskMutex.Unlock()
+			if current := taskStore[taskId]; current != nil && current.Status == StatusCancelled {
+				return
+			}
 			taskStore[taskId] = &TaskResult{Status: status, Output: output, Error: errMsg}
 		}
 
@@ -360,6 +364,9 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 		updateStatus := func(status TaskStatus, output, errMsg string) {
 			taskMutex.Lock()
 			defer taskMutex.Unlock()
+			if current := taskStore[taskId]; current != nil && current.Status == StatusCancelled {
+				return
+			}
 			taskStore[taskId] = &TaskResult{Status: status, Output: output, Error: errMsg}
 		}
 
@@ -380,7 +387,9 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 		if cachedData, err := RetrieveCacheFromDisk(cacheKey); err == nil {
 			cachedLogs, _ := RetrieveCacheLogFromDisk(cacheKey)
 			taskMutex.Lock()
-			taskStore[taskId] = &TaskResult{Status: StatusCompleted, Output: string(cachedData), Logs: string(cachedLogs)}
+			if current := taskStore[taskId]; current == nil || current.Status != StatusCancelled {
+				taskStore[taskId] = &TaskResult{Status: StatusCompleted, Output: string(cachedData), Logs: string(cachedLogs)}
+			}
 			taskMutex.Unlock()
 			log.Printf("[Task %s] Retrieved callgraph from cache", taskId)
 			return
@@ -439,8 +448,15 @@ func CallgraphHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		args = append(args, cve, cloneDir)
 		cmd = exec.CommandContext(cgCtx, "cg", args...)
+		// Let cg cancel its own Go subprocesses before enforcing a hard stop.
+		cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+		cmd.WaitDelay = 5 * time.Second
 
 		output, progressLogs, err := runCgWithProgressCapture(cmd, sendProgress)
+		if cgCtx.Err() != nil {
+			updateStatus(StatusCancelled, "", "Scan cancelled by user")
+			return
+		}
 
 		if err != nil {
 			log.Printf("[Task %s] cg execution failed: %v", taskId, err)
@@ -600,8 +616,8 @@ func runCgWithProgressCapture(cmd *exec.Cmd, sendProgress func(string)) (output 
 		}
 	}()
 
-	err = cmd.Wait()
 	wg.Wait()
+	err = cmd.Wait()
 
 	return []byte(outputBuffer.String()), []byte(logsBuffer.String()), err
 }

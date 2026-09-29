@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 )
 
@@ -37,11 +38,16 @@ func TestRunCommand_Error(t *testing.T) {
 }
 
 func TestRunCommand_Dir(t *testing.T) {
-	out, err := RunCommand(context.Background(), "/tmp", "pwd")
+	dir := t.TempDir()
+	want, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := RunCommand(context.Background(), dir, "pwd")
 	if err != nil {
 		t.Fatalf("RunCommand failed: %v", err)
 	}
-	if got := string(out); got != "/tmp\n" {
-		t.Errorf("RunCommand = %q, want %q", got, "/tmp\n")
+	if got := string(out); got != want+"\n" {
+		t.Errorf("RunCommand = %q, want %q", got, want+"\n")
 	}
 }

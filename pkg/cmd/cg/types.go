@@ -25,9 +25,10 @@ type Job struct {
 }
 
 type AffectedImportsDetails struct {
-	Symbols      []string
-	Type         string
-	FixedVersion []string
+	versionRanges []string // Original advisory ranges, immutable during worker execution.
+	Symbols       []string
+	Type          string
+	FixedVersion  []string
 }
 
 type UsedImportsDetails struct {
@@ -61,24 +62,24 @@ type ScanConfig struct {
 
 type Result struct {
 	ScanConfig
-	IsVulnerable       string
-	UsedImports        map[string]map[string]UsedImportsDetails
-	Files              map[string][][]string
-	AffectedImports    map[string]AffectedImportsDetails
-	GoCVE              string
-	Repository         string
-	Branch             string
-	Errors             []string            `json:"Errors"`
-	Unsafe             bool                `json:"unsafe"`
-	Reflect            bool                `json:"reflect"`
-	ReflectionRisks    []ReflectionRisk    `json:"reflection_risks,omitempty"`
-	GraphPaths         []string            `json:"GraphPaths,omitempty"`
-	ClaudeVerification *ClaudeVerification `json:"ClaudeVerification,omitempty"`
-	GoToolchainVersions map[string]string   `json:"-"`
-	Mu                 sync.Mutex          `json:"-"`
-	Progress           bool                `json:"-"`
-	ssaBuilds          map[string]*ssaBuild      `json:"-"`
-	moduleFiles        map[string][]byte         `json:"-"`
+	IsVulnerable        string
+	UsedImports         map[string]map[string]UsedImportsDetails
+	Files               map[string][][]string
+	AffectedImports     map[string]AffectedImportsDetails
+	GoCVE               string
+	Repository          string
+	Branch              string
+	Errors              []string             `json:"Errors"`
+	Unsafe              bool                 `json:"unsafe"`
+	Reflect             bool                 `json:"reflect"`
+	ReflectionRisks     []ReflectionRisk     `json:"reflection_risks,omitempty"`
+	GraphPaths          []string             `json:"GraphPaths,omitempty"`
+	ClaudeVerification  *ClaudeVerification  `json:"ClaudeVerification,omitempty"`
+	GoToolchainVersions map[string]string    `json:"-"`
+	Mu                  sync.Mutex           `json:"-"`
+	Progress            bool                 `json:"-"`
+	ssaBuilds           map[string]*ssaBuild `json:"-"`
+	moduleFiles         map[string][]byte    `json:"-"`
 }
 
 type VulnReport struct {
@@ -135,7 +136,7 @@ type Require struct {
 
 type GoModEdit struct {
 	Module  struct{ Path string } `json:"Module"`
-	Go      string               `json:"Go"`
-	Require []Require            `json:"Require"`
-	Replace []Replace            `json:"Replace"`
+	Go      string                `json:"Go"`
+	Require []Require             `json:"Require"`
+	Replace []Replace             `json:"Replace"`
 }
