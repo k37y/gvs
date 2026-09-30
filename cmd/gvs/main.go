@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/k37y/gvs/internal/api"
-	cg "github.com/k37y/gvs/pkg/cmd/cg"
 	"github.com/k37y/gvs/pkg/cmd/gvs"
 )
 
@@ -64,14 +63,13 @@ func main() {
 	log.Printf("Using cache directory: %s", cacheDir)
 	log.Printf("Graph cache: %s", graphCacheDir)
 
-	cg.LogClaudeStatus()
-
 	http.Handle("/graph/", gvs.LogFileAccess(http.StripPrefix("/graph/", http.FileServer(http.Dir(graphCacheDir)))))
 	http.Handle("/", http.FileServer(http.Dir("./site")))
 	http.HandleFunc("/scan", api.CORSMiddleware(api.ScanHandler))
 	http.HandleFunc("/healthz", api.CORSMiddleware(api.HealthHandler))
 	http.HandleFunc("/callgraph", api.CORSMiddleware(api.CallgraphHandler))
 	http.HandleFunc("/status", api.CORSMiddleware(api.StatusHandler))
+	http.HandleFunc("/cancel", api.CORSMiddleware(api.CancelHandler))
 	http.HandleFunc("/progress/", api.CORSMiddleware(api.ProgressHandler))
 
 	srv := &http.Server{Addr: ":" + port}

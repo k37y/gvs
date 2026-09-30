@@ -6,7 +6,10 @@ VERSION = $(shell git describe --tags --long --dirty 2>/dev/null)
 IMAGE = quay.io/k37y/${NAME}:${VERSION}
 PORT ?= 8082
 ALGO ?= vta
-CLAUDE_CONF = $(HOME)/.claude.conf
+# Optional runtime environment file; credentials are never baked into the image.
+AI_ENV_FILE ?= $(HOME)/.config/gvs/gvs.env
+AI_ENV_VARS = GVS_AI GVS_AI_PROVIDER GVS_AI_MODEL GVS_AI_API_KEY GVS_AI_BASE_URL \
+              GVS_AI_PROJECT_ID GVS_AI_LOCATION GVS_AI_MAX_ITERATIONS GVS_AI_MAX_TOKENS GVS_AI_CONTEXT_TOKENS GVS_AI_TIMEOUT GVS_AI_PRICING
 ADC_CREDS = $(HOME)/.config/gcloud/application_default_credentials.json
 PREFIX ?= /usr
 BINDIR ?= $(PREFIX)/bin
@@ -16,16 +19,30 @@ BINS = gvs cg
 USERNAME ?= gvs
 GROUPNAME ?= $(USERNAME)
 
+# Install test tools in plain UBI; Go selects the module's toolchain automatically.
+PODMAN_TEST_IMAGE ?= registry.access.redhat.com/ubi9/ubi
+# Keep build/module caches between disposable test containers.
+PODMAN_TEST_CACHE ?= gvs-test-cache
+# Override to select packages, test names, or a different timeout.
+PODMAN_TEST_ARGS ?= -race -v -count=1 -timeout=120s ./...
+# Match the host integration suite, with an override for focused runs.
+PODMAN_INTEGRATION_TEST_ARGS ?= -race -v -count=1 -tags integration ./internal/api -run "TestCallgraph.*Integration|TestCgBinaryValidation" -timeout 45m
+
+# Share the read-only checkout and persistent Go caches across both test targets.
+PODMAN_TEST_RUN = podman run --rm --security-opt label=disable --user 0 \
+	--volume "$(CURDIR):/workspace:ro" \
+	--volume "$(PODMAN_TEST_CACHE):/cache" \
+	--workdir /workspace \
+	--env CGO_ENABLED=1 --env GOTOOLCHAIN=auto \
+	--env GOCACHE=/cache/build --env GOMODCACHE=/cache/mod \
+	--env GOFLAGS=-buildvcs=false
+
 RUN_OPTS := --security-opt label=disable \
             --rm --detach \
             --name $(NAME)-$(VERSION) \
             --tty \
 	    --interactive \
             --publish $(PORT):8082
-
-ifdef VOLUME_EXISTS
-    VOLUME_OPT := --volume $(CLAUDE_CONF):/root/.claude.conf
-endif
 
 ifeq ($(shell id -u),0)
 	SUDO :=
@@ -38,11 +55,30 @@ endif
 run: gvs cg
 	./bin/gvs
 
+.PHONY: test
+
+test:
+	go test -race -v -count=1 ./...
+
+# Run race tests without requiring Go, CGO, or a C compiler on the host.
+.PHONY: test-podman
+
+test-podman:
+	$(PODMAN_TEST_RUN) "$(PODMAN_TEST_IMAGE)" sh -c \
+		'dnf install -y golang gcc git && exec go test "$$@"' sh $(PODMAN_TEST_ARGS)
+
 .PHONY: test-integration
 
 test-integration:
 	@echo "Running integration tests..."
-	go test -v -count=1 ./internal/api -run TestCallgraphIntegration -timeout 25m
+	go test -race -v -count=1 -tags integration ./internal/api -run "TestCallgraph.*Integration|TestCgBinaryValidation" -timeout 45m
+
+# Install integration dependencies in UBI without requiring host development tools.
+.PHONY: test-integration-podman
+
+test-integration-podman:
+	$(PODMAN_TEST_RUN) "$(PODMAN_TEST_IMAGE)" sh -c \
+		'dnf install -y golang gcc git graphviz && exec go test "$$@"' sh $(PODMAN_INTEGRATION_TEST_ARGS)
 
 .PHONY: gvs
 
@@ -83,20 +119,19 @@ image:
 
 image-run: image
 	-podman kill ${RUNNING_CONTAINER} && podman wait ${RUNNING_CONTAINER}
-	@VOLUME_OPT=""; \
-	if [ -f "$(CLAUDE_CONF)" ]; then \
-		echo "Claude config found. Mounting volume ..."; \
-		VOLUME_OPT="$$VOLUME_OPT --volume $(CLAUDE_CONF):/root/.claude.conf"; \
-	else \
-		echo "Claude config not found. Skipping ..."; \
+	@set --; \
+	if [ -f "$(AI_ENV_FILE)" ]; then \
+		set -- "$$@" --env-file "$(AI_ENV_FILE)"; \
 	fi; \
+	for name in $(AI_ENV_VARS); do \
+		if printenv "$$name" >/dev/null; then \
+			set -- "$$@" --env "$$name"; \
+		fi; \
+	done; \
 	if [ -f "$(ADC_CREDS)" ]; then \
-		echo "ADC credentials found. Mounting volume ..."; \
-		VOLUME_OPT="$$VOLUME_OPT --volume $(ADC_CREDS):/root/.config/gcloud/application_default_credentials.json"; \
-	else \
-		echo "ADC credentials not found. Skipping ..."; \
+		set -- "$$@" --volume "$(ADC_CREDS):/root/.config/gcloud/application_default_credentials.json:ro"; \
 	fi; \
-	podman run $(RUN_OPTS) $$VOLUME_OPT $(IMAGE)
+	podman run $(RUN_OPTS) "$$@" $(IMAGE)
 
 .PHONY: image-push
 
@@ -205,6 +240,10 @@ install-user: gvs cg
 		echo "# ALGO=vta" >> $(USER_CONFDIR)/gvs.env; \
 		echo "# CORS_ALLOWED_ORIGINS=" >> $(USER_CONFDIR)/gvs.env; \
 		echo "# GVS_COUNTER_URL=" >> $(USER_CONFDIR)/gvs.env; \
+		echo "# GVS_AI=1" >> $(USER_CONFDIR)/gvs.env; \
+		echo "# GVS_AI_PROVIDER=openai-compatible" >> $(USER_CONFDIR)/gvs.env; \
+		echo "# GVS_AI_MODEL=" >> $(USER_CONFDIR)/gvs.env; \
+		echo "# GVS_AI_API_KEY=" >> $(USER_CONFDIR)/gvs.env; \
 	fi
 	@echo "Reloading systemd user daemon..."
 	systemctl --user daemon-reload

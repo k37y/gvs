@@ -1,4 +1,5 @@
 let scanInProgress = false;
+let currentTaskId = null;
 
 // API Configuration
 const API_BASE_URL = (window.GVS_CONFIG && window.GVS_CONFIG.API_BASE_URL) || '';
@@ -58,7 +59,11 @@ class FormHistoryManager {
 			history = history.slice(0, this.maxHistoryItems);
 		}
 		
-		localStorage.setItem(storageKey, JSON.stringify(history));
+		try {
+			localStorage.setItem(storageKey, JSON.stringify(history));
+		} catch (e) {
+			console.warn('Could not save form history:', e);
+		}
 	}
 	
 	getHistory(fieldId) {
@@ -123,21 +128,55 @@ function showHistoryView(event) { showView('history', event); }
 function showResultView(event) { showView('result', event); }
 
 // Scan history management
+function getScanHistory() {
+	try {
+		const history = JSON.parse(localStorage.getItem('gvs-scan-history') || '[]');
+		return Array.isArray(history) ? history.filter(item => item && typeof item === 'object') : [];
+	} catch (e) {
+		console.warn('Could not read scan history:', e);
+		return [];
+	}
+}
+
+function writeScanHistory(history) {
+	history = history.slice(0, 50);
+	while (history.length) {
+		try {
+			localStorage.setItem('gvs-scan-history', JSON.stringify(history));
+			return true;
+		} catch (e) {
+			if (e.name !== 'QuotaExceededError' && e.name !== 'NS_ERROR_DOM_QUOTA_REACHED') {
+				console.warn('Could not save scan history:', e);
+				return false;
+			}
+			if (history.length === 1) {
+				console.warn('Scan is too large to save in browser history:', e);
+				return false;
+			}
+			history.pop();
+		}
+	}
+	return false;
+}
+
 function saveScanToHistory(scanData) {
-	let history = JSON.parse(localStorage.getItem('gvs-scan-history') || '[]');
+	const history = getScanHistory();
 	history.unshift({ ...scanData, timestamp: new Date().toISOString() });
-	if (history.length > 50) history = history.slice(0, 50);
-	localStorage.setItem('gvs-scan-history', JSON.stringify(history));
+	return writeScanHistory(history);
 }
 
 function clearScanHistory() {
-	localStorage.removeItem('gvs-scan-history');
+	try {
+		localStorage.removeItem('gvs-scan-history');
+	} catch (e) {
+		console.warn('Could not clear scan history:', e);
+	}
 	renderScanHistory();
 }
 
 function renderScanHistory() {
 	const body = document.getElementById('historyCardBody');
-	const history = JSON.parse(localStorage.getItem('gvs-scan-history') || '[]');
+	const history = getScanHistory();
 	if (!history.length) {
 		body.innerHTML = '<div class="pf-v6-c-empty-state"><div class="pf-v6-c-empty-state__content"><div class="pf-v6-c-empty-state__body">No scan history yet. Run a scan to see results here.</div></div></div>';
 		return;
@@ -152,7 +191,7 @@ function renderScanHistory() {
 		let label = '<span class="gvs-label gvs-label-warning">unknown</span>';
 		if (vuln === 'true') label = '<span class="gvs-label gvs-label-danger">true</span>';
 		else if (vuln === 'false') label = '<span class="gvs-label gvs-label-success">false</span>';
-		const cv = item.output?.ClaudeVerification;
+		const cv = item.output?.AIVerification;
 		let aiLabel = '<span class="gvs-label gvs-label-warning">-</span>';
 		if (cv && cv.IsVulnerable) {
 			const aiVuln = String(cv.IsVulnerable).toLowerCase();
@@ -168,7 +207,7 @@ function renderScanHistory() {
 }
 
 function loadHistoryScan(index) {
-	const history = JSON.parse(localStorage.getItem('gvs-scan-history') || '[]');
+	const history = getScanHistory();
 	const item = history[index];
 	if (!item) return;
 	showResultView();
@@ -275,26 +314,24 @@ function syntaxHighlight(json) {
 
 function highlightLog(line) {
 	var s = line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-	if (/^\[claude\].*(?:Failed|ERROR|WARNING)/.test(line))
+	if (/^\[ai\].*(?:Failed|ERROR|WARNING)/.test(line))
 		return '<span class="log-error">' + s + '</span>';
-	if (/^\[claude\].*tool_call /.test(line))
+	if (/^\[ai\].*tool_call /.test(line))
 		return s.replace(/(tool_call )(\w+)/, '$1<span class="log-tool">$2</span>');
-	if (/^\[claude\]/.test(line))
-		return '<span class="log-claude">' + s + '</span>';
+	if (/^\[ai\]/.test(line))
+		return '<span class="log-ai">' + s + '</span>';
 	if (/✓/.test(line))
 		return '<span class="log-success">' + s + '</span>';
 	if (/✗|Failed|ERROR|^Error:|^Network Error:/.test(line))
 		return '<span class="log-error">' + s + '</span>';
 	if (/WARNING:/.test(line))
 		return '<span class="log-warn">' + s + '</span>';
-	if (/^Scan Completed/.test(line))
-		return '<span class="log-success">' + s + '</span>';
-	if (/^(Scan (?:Started|Failed)|Initializing)/.test(line))
+	if (/^(Scan Failed|Initializing)/.test(line))
 		return '<span class="log-status">' + s + '</span>';
 	if (/^(Cloning|Clone successful|Running |Found |Discovering)/.test(line))
 		return '<span class="log-info">' + s + '</span>';
-	if (/^Claude verification:/.test(line))
-		return '<span class="log-claude">' + s + '</span>';
+	if (/^AI verification:/.test(line))
+		return '<span class="log-ai">' + s + '</span>';
 	return s;
 }
 
@@ -397,11 +434,9 @@ function runScan() {
 	document.getElementById("reportContainer").style.display = "none";
 	
 	// Clear previous progress output and initialize new scan
-	const timestamp = new Date().toLocaleTimeString();
-	progressContent.innerHTML = highlightLog(`Scan Started at ${timestamp}`) + '\n' + highlightLog('Initializing scan...') + '\n';
+	progressContent.innerHTML = highlightLog('Initializing scan...') + '\n';
 	
-	scanButton.disabled = true;
-	scanButton.innerText = "Scanning...";
+	scanButton.innerText = "Cancel Scan";
 	
 	// Save form values to history when scan starts
 	if (repo) {
@@ -455,12 +490,13 @@ function runScan() {
 				}
 
 				const taskId = data.taskId;
+				currentTaskId = taskId;
 				pollStatus(taskId, true);
 			})
 			.catch(err => {
 				outputDiv.innerHTML += `<strong>Network Error:</strong> ${err.message}<br>`;
 				outputDiv.classList.add("alert-danger");
-				
+
 				progressContent.innerHTML += highlightLog(`Network Error: ${err.message}`) + '\n';
 				progressContent.scrollTop = progressContent.scrollHeight;
 			});
@@ -492,6 +528,7 @@ function runScan() {
 				}
 
 				const taskId = data.taskId;
+				currentTaskId = taskId;
 				pollStatus(taskId, true);
 			})
 			.catch(error => {
@@ -539,6 +576,15 @@ function runScan() {
 						return;
 					}
 
+					if (statusData.status === "cancelled") {
+						outputDiv.innerHTML = '<strong>Scan cancelled.</strong>';
+						progressContent.innerHTML += highlightLog('Scan cancelled by user.') + '\n';
+						progressContent.scrollTop = progressContent.scrollHeight;
+						clearInterval(intervalId);
+						cleanup();
+						return;
+					}
+
 					if (statusData.status === "completed") {
 						outputDiv.innerHTML = `<pre>${syntaxHighlight(JSON.stringify(statusData.output, null, 2))}</pre>`;
 						clearInterval(intervalId);
@@ -553,11 +599,9 @@ function runScan() {
 							progressContent.innerHTML += logLines.join('\n') + '\n';
 						}
 
-						const timestamp = new Date().toLocaleTimeString();
-						progressContent.innerHTML += highlightLog(`Scan Completed Successfully at ${timestamp}`) + '\n';
 						progressContent.scrollTop = progressContent.scrollHeight;
 
-					saveScanToHistory({
+					const historySaved = saveScanToHistory({
 						repo: document.getElementById("repo").value.trim(),
 						branchOrCommit: document.getElementById("branchOrCommit").value.trim(),
 						cve: document.getElementById("cve").value.trim(),
@@ -566,6 +610,9 @@ function runScan() {
 						output: statusData.output,
 						logs: progressContent.innerHTML
 					});
+					if (!historySaved) {
+						progressContent.innerHTML += highlightLog('Scan completed, but this result could not be saved in browser history.') + '\n';
+					}
 						
 						// Close progress stream if active
 						if (window.currentProgressStream) {
@@ -596,16 +643,41 @@ function runScan() {
 		scanButton.disabled = false;
 		scanButton.innerText = "Run Scan";
 		scanInProgress = false;
-		
-		// Close progress stream if active
+		currentTaskId = null;
+
 		if (window.currentProgressStream) {
 			window.currentProgressStream.close();
 			window.currentProgressStream = null;
 		}
-		
-		// Keep progress output visible after scan completion
-		// Don't reset the progress card here
 	}
+}
+
+function handleScanButton() {
+	if (scanInProgress) {
+		cancelScan();
+	} else {
+		runScan();
+	}
+}
+
+function cancelScan() {
+	if (!currentTaskId) return;
+
+	const scanButton = document.getElementById("scanButton");
+	scanButton.disabled = true;
+	scanButton.innerText = "Cancelling...";
+
+	const progressContent = document.getElementById("resultProgressContent");
+	progressContent.innerHTML += highlightLog('Cancelling scan...') + '\n';
+	progressContent.scrollTop = progressContent.scrollHeight;
+
+	fetch(`${API_BASE_URL}/cancel`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ taskId: currentTaskId })
+	}).catch(err => {
+		console.error('Cancel request failed:', err);
+	});
 }
 
 function startProgressStream(taskId) {
@@ -643,19 +715,19 @@ function closeFeedbackModal(event) {
 
 function submitFeedback(choice) {
 	document.getElementById('feedbackModal').style.display = 'none';
-	const feedbackLabels = { gvs_only: 'GVS was right', claude_only: 'Claude was right', both: 'Both were right' };
+	const feedbackLabels = { gvs_only: 'GVS was right', ai_only: 'AI was right', both: 'Both were right' };
 	const feedbackText = feedbackLabels[choice] || choice;
 
-	let history = JSON.parse(localStorage.getItem('gvs-scan-history') || '[]');
+	const history = getScanHistory();
 	if (history.length > 0) {
 		history[0].feedback = feedbackText;
-		localStorage.setItem('gvs-scan-history', JSON.stringify(history));
+		writeScanHistory(history);
 	}
 
 	const repo = document.getElementById("repo").value.trim();
 	const cve = document.getElementById("cve").value.trim();
-	const labels = { gvs_only: 'gvs-correct', claude_only: 'claude-correct', both: 'both-correct' };
-	const title = `Claude Feedback: ${cve || repo} - ${feedbackText}`;
+	const labels = { gvs_only: 'gvs-correct', ai_only: 'ai-correct', both: 'both-correct' };
+	const title = `AI Feedback: ${cve || repo} - ${feedbackText}`;
 	const body = `## Feedback\n- **Choice**: ${feedbackText}\n- **Repository**: ${repo}\n- **CVE**: ${cve || 'N/A'}`;
 	const url = `https://github.com/k37y/gvs/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}&labels=${labels[choice]}`;
 	window.open(url, '_blank');

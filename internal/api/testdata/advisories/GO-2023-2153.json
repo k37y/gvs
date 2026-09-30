@@ -1,0 +1,10 @@
+{
+  "google.golang.org/grpc/internal/transport": [
+    "NewServerTransport"
+  ],
+  "google.golang.org/grpc": [
+    "NewServer",
+    "Server.Serve",
+    "Server.initServerWorkers"
+  ]
+}

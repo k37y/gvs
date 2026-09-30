@@ -1,15 +1,21 @@
 package cg
 
 import (
+	"context"
+	"net/http"
 	"sync"
 
 	"golang.org/x/tools/go/callgraph"
-	"golang.org/x/tools/go/ssa"
+
+	"github.com/k37y/gvs/internal/cli"
 )
 
-const (
-	VulnsURL = "https://vuln.go.dev"
-)
+type HTTPClient interface {
+	Get(url string) (*http.Response, error)
+	Do(req *http.Request) (*http.Response, error)
+}
+
+var VulnsURL = "https://vuln.go.dev"
 
 type Job struct {
 	Package string
@@ -19,9 +25,10 @@ type Job struct {
 }
 
 type AffectedImportsDetails struct {
-	Symbols      []string
-	Type         string
-	FixedVersion []string
+	versionRanges []string // Original advisory ranges, immutable during worker execution.
+	Symbols       []string
+	Type          string
+	FixedVersion  []string
 }
 
 type UsedImportsDetails struct {
@@ -30,48 +37,52 @@ type UsedImportsDetails struct {
 	ReplaceModule  string              `json:"ReplaceModule,omitempty"`
 	ReplaceVersion string              `json:"ReplaceVersion,omitempty"`
 	FixCommands    []string            `json:"FixCommands,omitempty"`
-	Dir            []string            `json:"Dir,omitempty"`
-	Paths          [][]*callgraph.Node `json:"-"` // For visualization, not serialized
+	Paths          [][]*callgraph.Node `json:"-"`
 }
 
-// ReflectionRisk represents a potential vulnerability through reflection usage
+// ReflectionRisk records target-linked evidence or an unresolved dynamic operation.
+// It does not establish runtime reachability or vulnerability.
 type ReflectionRisk struct {
-	Type       string   `json:"type"`       // "method_by_name", "value_of", "string_literal", "function_registry"
-	Confidence string   `json:"confidence"` // "high", "medium", "low"
-	Location   string   `json:"location"`   // file:line
-	Evidence   []string `json:"evidence"`   // What was found
-	Symbol     string   `json:"symbol"`     // The vulnerable symbol detected
-	Package    string   `json:"package"`    // The package containing the symbol
+	Association string   `json:"association"`       // target_linked or unresolved
+	Type        string   `json:"type"`              // reflection_call, method_lookup, value_of, function_registry, unsafe_pointer, analysis_incomplete
+	Confidence  string   `json:"confidence"`        // "high", "medium", "low"
+	Location    string   `json:"location"`          // file:line
+	Evidence    []string `json:"evidence"`          // What was found
+	Symbol      string   `json:"symbol,omitempty"`  // Exact affected symbol, when linked
+	Package     string   `json:"package,omitempty"` // Defining package, when linked
 }
 
-// ClaudeVerification holds the independent AI audit of the scan result
-type ClaudeVerification struct {
-	IsVulnerable string   `json:"IsVulnerable"`
-	Confidence   string   `json:"confidence"`
-	Reasoning    string   `json:"reasoning"`
-	Evidence     []string `json:"evidence"`
+// ScanConfig holds the input configuration for a scan.
+type ScanConfig struct {
+	CVE          string            `json:"CVE,omitempty"`
+	Directory    string            `json:"Directory,omitempty"`
+	Ctx          context.Context   `json:"-"`
+	ProgressFunc func(string)      `json:"-"`
+	Runner       cli.CommandRunner `json:"-"`
+	HTTP         HTTPClient        `json:"-"`
 }
 
 type Result struct {
-	IsVulnerable       string
-	UsedImports        map[string]UsedImportsDetails
-	Files              map[string][][]string
-	AffectedImports    map[string]AffectedImportsDetails
-	GoCVE              string
-	CVE                string
-	Repository         string
-	Branch             string
-	Directory          string
-	Errors             []string            `json:"Errors"`
-	Unsafe             bool                `json:"unsafe"`
-	Reflect            bool                `json:"reflect"`
-	ReflectionRisks    []ReflectionRisk    `json:"reflection_risks,omitempty"`
-	GraphPaths         []string            `json:"GraphPaths,omitempty"`
-	ClaudeVerification *ClaudeVerification `json:"ClaudeVerification,omitempty"`
-	Mu                 sync.Mutex          `json:"-"`
-	Progress           bool                `json:"-"`
-	SsaProg            *ssa.Program        `json:"-"`
-	CgGraph            *callgraph.Graph    `json:"-"`
+	ScanConfig
+	IsVulnerable        string
+	UsedImports         map[string]map[string]UsedImportsDetails
+	Files               map[string][][]string
+	AffectedImports     map[string]AffectedImportsDetails
+	GoCVE               string
+	Repository          string
+	Branch              string
+	Errors              []string                    `json:"Errors"`
+	Unsafe              bool                        `json:"unsafe"`
+	Reflect             bool                        `json:"reflect"`
+	ReflectionRisks     []ReflectionRisk            `json:"reflection_risks,omitempty"`
+	GraphPaths          []string                    `json:"GraphPaths,omitempty"`
+	AIVerification      *AIVerification             `json:"AIVerification,omitempty"`
+	GoToolchainVersions map[string]string           `json:"-"`
+	Mu                  sync.Mutex                  `json:"-"`
+	Progress            bool                        `json:"-"`
+	reflectionBuilds    map[string]*reflectionBuild `json:"-"`
+	ssaBuilds           map[string]*ssaBuild        `json:"-"`
+	moduleFiles         map[string][]byte           `json:"-"`
 }
 
 type VulnReport struct {
@@ -128,7 +139,7 @@ type Require struct {
 
 type GoModEdit struct {
 	Module  struct{ Path string } `json:"Module"`
-	Go      string               `json:"Go"`
-	Require []Require            `json:"Require"`
-	Replace []Replace            `json:"Replace"`
+	Go      string                `json:"Go"`
+	Require []Require             `json:"Require"`
+	Replace []Replace             `json:"Replace"`
 }

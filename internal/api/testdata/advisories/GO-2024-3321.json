@@ -1,0 +1,7 @@
+{
+  "golang.org/x/crypto/ssh": [
+    "NewServerConn",
+    "ServerConfig.PublicKeyCallback",
+    "connection.serverAuthenticate"
+  ]
+}

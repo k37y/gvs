@@ -349,7 +349,7 @@ html, body {
 .highlight-value { color: var(--gvs-highlight-value) !important; font-weight: bold; }
 
 /* === Log syntax highlighting === */
-.log-claude { color: var(--pf-t--global--color--status--info--default, #0066cc); }
+.log-ai { color: var(--pf-t--global--color--status--info--default, #0066cc); }
 .log-success { color: var(--pf-t--global--color--status--success--default, #3e8635); }
 .log-error { color: var(--pf-t--global--color--status--danger--default, #c9190b); }
 .log-warn { color: var(--pf-t--global--color--status--warning--default, #f0ab00); }
