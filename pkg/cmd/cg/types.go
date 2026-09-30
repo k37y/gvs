@@ -40,14 +40,16 @@ type UsedImportsDetails struct {
 	Paths          [][]*callgraph.Node `json:"-"`
 }
 
-// ReflectionRisk represents a potential vulnerability through reflection usage
+// ReflectionRisk records target-linked evidence or an unresolved dynamic operation.
+// It does not establish runtime reachability or vulnerability.
 type ReflectionRisk struct {
-	Type       string   `json:"type"`       // "method_by_name", "value_of", "string_literal", "function_registry"
-	Confidence string   `json:"confidence"` // "high", "medium", "low"
-	Location   string   `json:"location"`   // file:line
-	Evidence   []string `json:"evidence"`   // What was found
-	Symbol     string   `json:"symbol"`     // The vulnerable symbol detected
-	Package    string   `json:"package"`    // The package containing the symbol
+	Association string   `json:"association"`       // target_linked or unresolved
+	Type        string   `json:"type"`              // reflection_call, method_lookup, value_of, function_registry, unsafe_pointer, analysis_incomplete
+	Confidence  string   `json:"confidence"`        // "high", "medium", "low"
+	Location    string   `json:"location"`          // file:line
+	Evidence    []string `json:"evidence"`          // What was found
+	Symbol      string   `json:"symbol,omitempty"`  // Exact affected symbol, when linked
+	Package     string   `json:"package,omitempty"` // Defining package, when linked
 }
 
 // ScanConfig holds the input configuration for a scan.
@@ -69,17 +71,18 @@ type Result struct {
 	GoCVE               string
 	Repository          string
 	Branch              string
-	Errors              []string             `json:"Errors"`
-	Unsafe              bool                 `json:"unsafe"`
-	Reflect             bool                 `json:"reflect"`
-	ReflectionRisks     []ReflectionRisk     `json:"reflection_risks,omitempty"`
-	GraphPaths          []string             `json:"GraphPaths,omitempty"`
-	ClaudeVerification  *ClaudeVerification  `json:"ClaudeVerification,omitempty"`
-	GoToolchainVersions map[string]string    `json:"-"`
-	Mu                  sync.Mutex           `json:"-"`
-	Progress            bool                 `json:"-"`
-	ssaBuilds           map[string]*ssaBuild `json:"-"`
-	moduleFiles         map[string][]byte    `json:"-"`
+	Errors              []string                    `json:"Errors"`
+	Unsafe              bool                        `json:"unsafe"`
+	Reflect             bool                        `json:"reflect"`
+	ReflectionRisks     []ReflectionRisk            `json:"reflection_risks,omitempty"`
+	GraphPaths          []string                    `json:"GraphPaths,omitempty"`
+	AIVerification      *AIVerification             `json:"AIVerification,omitempty"`
+	GoToolchainVersions map[string]string           `json:"-"`
+	Mu                  sync.Mutex                  `json:"-"`
+	Progress            bool                        `json:"-"`
+	reflectionBuilds    map[string]*reflectionBuild `json:"-"`
+	ssaBuilds           map[string]*ssaBuild        `json:"-"`
+	moduleFiles         map[string][]byte           `json:"-"`
 }
 
 type VulnReport struct {

@@ -92,7 +92,7 @@ func startTestServer(t *testing.T) {
 	}
 	binary := buildIntegrationCG(t)
 	t.Setenv("PATH", filepath.Dir(binary)+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("GVS_CLAUDE", "0")
+	t.Setenv("GVS_AI", "0")
 	t.Setenv("WORKER_COUNT", "2")
 	t.Setenv("GORACE", "halt_on_error=1")
 	t.Setenv("GVS_GRAPH_CACHE", t.TempDir())
@@ -1214,14 +1214,21 @@ func TestCallgraphFixturesIntegration(t *testing.T) {
 						t.Errorf("unreachable symbol reported as used: %v", out.UsedImports)
 					}
 					if tc.scenario == "reflection" {
-						found := false
+						found := map[string]bool{}
 						for _, risk := range out.ReflectionRisks {
-							if risk.Type == "value_of" && risk.Symbol == "Danger" && risk.Package == fixtureLibrary && risk.Confidence == "high" && (strings.Contains(risk.Location, "main.go:") || strings.Contains(risk.Location, "helper.go:")) && slices.Contains(risk.Evidence, "reflect.ValueOf(Danger)") {
-								found = true
+							if risk.Association != "target_linked" || risk.Symbol != "Danger" || risk.Package != fixtureLibrary || risk.Confidence != "medium" {
+								t.Errorf("incorrect reflection target or confidence: %+v", risk)
 							}
+							if !(strings.Contains(risk.Location, "main.go:") || strings.Contains(risk.Location, "helper.go:")) || len(risk.Evidence) == 0 {
+								t.Errorf("reflection evidence missing source attribution: %+v", risk)
+							}
+							if found[risk.Type] {
+								t.Errorf("duplicate reflection observation: %+v", risk)
+							}
+							found[risk.Type] = true
 						}
-						if !found {
-							t.Errorf("missing reflection evidence: %+v", out.ReflectionRisks)
+						if len(out.ReflectionRisks) != 2 || !found["value_of"] || !found["reflection_call"] {
+							t.Errorf("expected affected value reference and reflected invocation: %+v", out.ReflectionRisks)
 						}
 					} else if len(out.ReflectionRisks) != 0 {
 						t.Errorf("unexpected reflection risks: %v", out.ReflectionRisks)

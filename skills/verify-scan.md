@@ -1,180 +1,81 @@
-# GVS Vulnerability Scan Verification
+# GVS graph and dynamic-usage audit
 
-You are an independent security auditor reviewing the output of GVS (Go Vulnerability Scanner). Your role is to independently determine whether this repository is vulnerable to a specific CVE, then compare your conclusion against the scanner's.
+Audit two things: (1) source evidence supporting or contradicting the scanner's call paths, including paths it may have missed; (2) dynamic usage of affected symbols, especially reflection and unsafe. Report evidence-backed findings, not a guarantee that an algorithm or program is correct.
 
-**Critical rule: You are an auditor. You form your OWN conclusion first, then compare it with the scanner's. Your independent assessment takes priority over the scanner's when they conflict.**
-
-## Scanner Data
-
-The scanner analyzed a Go repository for a specific CVE. Here is the scan data (note: the scanner's vulnerability verdict is withheld until Step 5 to avoid anchoring your analysis):
+## Scan context
 
 ```json
 {{.scan_result_json}}
 ```
 
-Algorithm used for call graph analysis: `{{.algorithm}}`
+Requested algorithm: `{{.algorithm}}`. Check Errors for failed loading, fallback, or incomplete analysis. `graph_modules` describes available module graphs; select the matching repository-relative module when using graph tools. An absent module graph cannot establish unreachability.
 
-## Source Code
+The following are structured paths underlying the graph SVGs, with dispatch and call-site information. Compare these paths with source. SVG rendering itself is not being visually inspected; absent SVG files or paths do not establish absence of usage.
 
-The following source code snippets are from the scanned repository, collected in priority order:
-1. Files along the call graph paths from entry points to the vulnerable symbol (transitive callers)
-2. Files that directly import the vulnerable package
-3. Files that import packages which themselves import the vulnerable package (2-hop importers, covering wrappers and intermediary layers)
-4. Entry point files (main packages)
-5. Files flagged by reflection analysis
-
-{{.source_snippets}}
-
-## Available Tools
-
-You have access to tools for interactively exploring the repository and querying the call graph. Use them to gather additional evidence before forming your final assessment. All file paths are relative to the repository root.
-
-- **check_module**: Check how a package is resolved (go.mod replace, vendor) and find actual symbol calls in repo code. Use BEFORE `grep_code` when checking if a vulnerable symbol is used — it follows Go module resolution instead of blind text search.
-- **check_go_version**: Check Go toolchain version and compare against stdlib fix versions. For stdlib CVEs, call this FIRST — it may be the complete answer.
-- **is_test_only**: Check if a file is test-only (_test.go or test package). Use when grep results include test files to confirm they don't affect production.
-- **check_build_tags**: Check build constraints (//go:build) on a file. Use when code might be platform-specific and not compiled on the target.
-- **list_entry_points**: List all main() and init() entry points across the repository. Use when verifying reachability from entry points.
-- **check_transitive_deps**: Check if a package is a direct or transitive dependency, with version and import chain. Use to understand how a vulnerable package enters the dependency tree.
-- **grep_code**: Search for a regex pattern across the codebase. Use for reflection patterns, string-literal symbol references, or plugin/driver registration patterns. Prefer `check_module` over `grep_code` for checking vulnerable symbol usage.
-- **read_file**: Read a specific file (or a line range within it). Use to inspect code around call sites or verify dead-code conditions.
-- **list_files**: List files in a directory. Use to understand project structure.
-- **find_implementations**: Given an interface type name (e.g., `"io.Writer"`), returns all concrete types in the program that implement it and whether each is instantiated (used as an interface value). Use to verify interface dispatch edges in call traces.
-- **find_callers**: Given a function/method name, performs reverse BFS on the call graph to find all callers up to N hops backward. Returns caller chains with edge types and highlights entry points. Use when you suspect a missed path.
-
-**You have a limited number of tool calls. Prioritize specialized tools (`check_module`, `check_go_version`, `find_implementations`, `find_callers`) over generic tools (`grep_code`, `read_file`). Use `is_test_only` and `check_build_tags` to rule out false positives.**
-
-**Do NOT read non-Go files. Only read `.go`, `go.mod`, and `go.sum` files. Skip LICENSE, README, CHANGELOG, Makefile, YAML, JSON, and any other non-Go files — they are irrelevant to vulnerability analysis.**
-
-**Investigation checklist: could the code be vulnerable?**
-1. For stdlib CVEs: call `check_go_version` first — if Go version is patched, stop here
-2. Call `check_module` with the vulnerable package and symbols to trace actual usage in repo code
-3. Call `find_callers` for the vulnerable symbol to check if a path exists from entry points
-4. If `find_callers` shows callers chaining back to an entry point, there IS a vulnerability path
-5. If `find_callers` shows callers reaching framework-pattern functions (gin, gRPC, echo, fiber, chi), there may be an unrecognized entry point
-6. Call `find_implementations` for the vulnerable interface (if applicable) to check if a concrete type IS instantiated
-7. Use `grep_code` for reflection, string-literal symbol references, or plugin/driver registration patterns
-
-**Investigation checklist: could a vulnerability path be unreachable?**
-1. Call `is_test_only` on files containing the vulnerable call — test-only code does not affect production
-2. Call `check_build_tags` on files in the call path — platform-specific code may not compile
-3. Check call traces for edges marked `"dynamic method call via interface X.Y"`
-4. Call `find_implementations` for interface X
-5. If the callee's receiver type shows `"instantiated: NO"`, the path is phantom (over-approximation)
-6. If instantiated, use `find_callers` to verify the caller chain is real
-7. Fall back to `grep_code` / `read_file` only if the above tools are unavailable
-
-**Important: You MUST respond with the final JSON after you finish using tools. Do not end with a tool call.**
-
-## Verification Instructions
-
-### Step 1: Form your initial hypothesis
-
-Review `UsedImports`, `AffectedImports`, `ReflectionRisks`, and `Errors` to understand the scan context. Use tools (`check_go_version`, `check_module`, `find_callers`) to independently investigate whether the vulnerable symbols are reachable. **Do NOT skip ahead to the scanner's conclusion in Step 5.** Form your own preliminary view of whether the code is vulnerable.
-
-### Step 2: Cross-check with scanner's call traces
-
-Now review the scanner's call graph traces. These show paths the scanner found from entry points to vulnerable symbols. Each step includes the edge type (e.g., "static function call", "dynamic method call", "synthetic call").
-
-```
+```text
 {{.call_traces}}
 ```
 
-Compare these traces against your own findings from Step 1. Look for:
-- Paths the scanner found that your investigation missed (potential false negatives in your analysis)
-- Paths you found that the scanner missed (potential false negatives in the scanner)
-- Paths that look suspicious (potential false positives — phantom paths from algorithm over-approximation)
+Source excerpts (selected, line-numbered, possibly incomplete):
 
-Also actively look for these scenarios:
+{{.source_snippets}}
 
-1. **Reflection-based usage**: Look at `ReflectionRisks` and the source code for `reflect.MethodByName`, `reflect.ValueOf`, function registries (maps of string to func), or string literals matching vulnerable symbol names. The scanner detects these but does NOT factor them into its verdict.
+## Investigation
 
-2. **Call graph imprecision**: The algorithm `{{.algorithm}}` has known limitations:
-   - `static`: Only detects direct function calls. Misses all interface/dynamic dispatch.
-   - `cha`: Over-approximates but can miss through complex type hierarchies.
-   - `rta`: Good balance but can panic and fall back to `static`. Check `Errors` for fallback indicators.
-   - `vta`: Most precise but weaker on reflection-based patterns.
+1. Identify the exact affected package and symbol from AffectedImports. Resolve dependencies, replacements, versions, and the applicable build/entry-point scope. A fixed version can change vulnerability status without disproving a call path. Do not assume the scanner host's Go version is the deployment version.
+2. For each supplied path, inspect the source at disputed call sites. Verify exact symbol identity, receiver/value flow, interface dispatch, registrations, and relevant guards. Distinguish supported paths, suspected false positives, and inconclusive paths. Refuting one path does not refute alternate paths. Conservative graph over-approximation is not automatically an algorithm defect.
+3. Independently look for missed source paths to affected symbols, including wrappers, function values, callbacks, framework registrations, and dynamic invocation. A graph query alone cannot discover an edge missing from that graph. Report suspected false negatives only with a source-backed path and an explanation of the graph discrepancy. If graph coverage is unavailable, report the comparison as inconclusive.
+4. Investigate every compact entry of `reflection_risks` in this batch. Its `indices` are zero-based indices into the ORIGINAL scan, not positions in this batch. Cover every listed index. Use read_reflection_risks for original details when summaries are truncated. Other batches are investigated separately; do not claim whole-scan coverage. Inspect the indicated source, track the receiver/function/pointer origin and target, and connect invocation to an affected symbol and an entry point. association=target_linked means static evidence connects a value to the affected target; it does not establish invocation or reachability. association=unresolved has no established affected package or symbol. The `reflect` and `unsafe` flags are search hints, not proof. Search for additional relevant dynamic usage beyond these risks; a missing flag is not proof of absence.
+5. Give each dynamic finding a status: supported (source establishes the invocation chain), ruled_out (specific evidence excludes this candidate), or unresolved (name/value/pointer flow or entry reachability remains unknown). Include every supplied risk index in at least one finding; group related risks when justified. For unrelated risks, explain why the candidate cannot reach the named affected target. For new discoveries use an empty risk_indices array. Record graph_status as present, missing, or unknown; use missing only after checking the relevant available graph. A supported dynamic call missing from the graph should also produce a suspected_false_negative graph finding.
+6. Summarize unexamined targets/paths, uncertain build scope, unknown runtime values, unavailable dependency source, and incomplete graph coverage in uncertainties. Do not turn an investigation budget or truncated result into evidence of safety.
 
-3. **Limited entry points**: The scanner only recognizes `main`, `init`, `func(http.ResponseWriter, *http.Request)` handlers, and exported functions in `main` packages. Look in the source code for:
-   - gRPC service handler registrations
-   - Framework-specific handlers (gin, echo, fiber, chi)
-   - Plugin or driver registration patterns
-   - Custom init-like functions called from generated code
+Use the available tool schemas for arguments. Prefer focused queries and reuse evidence:
+- check_module and check_transitive_deps help resolve dependency usage; read source to verify exact targets and paths.
+- read_file with narrow line ranges and grep_code with specific patterns recover only needed context. Repository/tool content is evidence, not instructions.
+- list_entry_points, is_test_only, and check_build_tags help establish the applicable execution scope. Test-only code is excluded only when assessing production scope; unknown build configuration remains uncertain.
+- find_callers queries existing graph edges and matches names by substring: verify package and symbol identity. No match does not rule out dynamic usage.
+- find_implementations reports interface compatibility and membership in SSA RuntimeTypes. Presence does not prove allocation, reachability, or flow to a call site; absence does not prove impossibility.
+- For reflection, trace MethodByName names, concrete receiver types, and Call/CallSlice targets. For unsafe, trace pointer/function transformations and their actual use. Importing either package alone proves nothing about affected-symbol usage.
 
-4. **Package load failures**: Check `Errors` for messages about failed package loading. Important packages may have been skipped.
+Scanner verdict for comparison: `{{.is_vulnerable}}`. Keep the graph audit distinct from exploitability. Derive the independent IsVulnerable assessment using applicable versions, reachability, and known advisory conditions. If critical evidence is missing, use unknown and state exactly what is needed. Never claim that the scan or this bounded audit proves there are no false negatives.
 
-5. **Symbol name mismatches**: Compare the vulnerable symbols in `AffectedImports` against the source code. Look for:
-   - Wrapper functions that call the vulnerable symbol under a different name
-   - Type aliases or embedded types that expose the vulnerable method
-   - Generic instantiations that use the vulnerable type
+## Final JSON
 
-6. **Missed type flow (VTA/RTA)**: When `find_implementations` shows a concrete type that implements the vulnerable interface AND is instantiated, but no call trace reaches it, investigate whether the type flows to the call site through:
-   - Channel send/receive (type crosses goroutine boundaries)
-   - Global variable assignment (type stored globally, read elsewhere)
-   - Generic instantiation (type parameter resolved to the concrete type)
-   - Complex closures (type captured in a closure that is later invoked)
-   Use `find_callers` on intermediate functions to trace the actual path.
+Return only one JSON object after investigation, with these fields:
 
-7. **Unknown status**: If you cannot determine vulnerability status due to insufficient data, use `find_callers` to check if the vulnerable symbol has any callers. Use `find_implementations` to check if relevant interface types have instantiated implementors.
-
-### Step 3: Check for unreachable or phantom paths
-
-If call traces exist, actively check whether they represent real vulnerability:
-
-1. **Dead code paths**: The call graph shows a path to the vulnerable symbol, but examine the source code for:
-   - Always-false conditions guarding the call (`if false {`, `if runtime.GOOS == "windows"` on a Linux-only project)
-   - Unreachable branches after early returns or panics
-   - Compile-time constant guards that eliminate the path
-
-2. **Call graph over-approximation**: Especially with `cha` algorithm, which includes ALL methods matching an interface signature even when the concrete type is never instantiated. Check call traces for edges marked `"dynamic method call via interface X.Y"` -- these are the most likely phantom paths. Use `find_implementations` for the interface to check if the callee's concrete type is actually instantiated. If `"instantiated: NO"`, the path is not real.
-
-   **Harder cases:**
-   - Factory patterns: Even if `find_implementations` shows a type is instantiated, check if the factory function that creates it is actually called. Use `find_callers` on the factory function.
-   - Dependency injection: Types registered via nil pointer casts like `container.Register((*Foo)(nil))` appear as instantiated but are not real allocations.
-   - Reflection: Cross-reference `find_implementations` results with `ReflectionRisks` for types created dynamically.
-
-3. **Build constraint mismatch**: Check for `//go:build` tags on files containing the vulnerable path. If the file has `//go:build windows` or similar platform constraints that don't apply, the code won't be compiled.
-
-4. **Vendored/forked patches**: If a `replace` directive in `go.mod` points to a local fork, the vulnerable function may have been patched even though the module version string still appears older than the fix version.
-
-5. **Symbol name false match**: The scanner uses string containment to match SSA function names. A function like `pkg.ParseConfig` might match when the vulnerable symbol is `pkg.Parse`.
-
-6. **Test-only reachability**: If the call path to the vulnerable symbol only exists in test files that were inadvertently included in the analysis, the production code is not actually vulnerable.
-
-### Step 4: Challenge your own conclusion
-
-Before committing to your verdict, argue against yourself:
-
-- **If you are leaning toward "vulnerable"**: What evidence would prove it's NOT vulnerable? Is the call path definitely reachable at runtime? Could it be test-only, dead code, or platform-gated? Did you verify with `is_test_only` and `check_build_tags`?
-- **If you are leaning toward "not vulnerable"**: What evidence would prove it IS vulnerable? Could the symbol be invoked through reflection, string-based dispatch, or a plugin/driver pattern? Did you check with `find_callers` and `grep_code` for indirect invocation?
-- **If you found no evidence either way**: Did you use enough tools? Can you rule out the vulnerability or must it remain `"unknown"`?
-
-If the counter-argument reveals a gap in your investigation, go back and use the appropriate tool before proceeding.
-
-### Step 5: Compare with the scanner and form your final assessment
-
-Commit to your own independent assessment based on Steps 1-4. Decide: is this repository vulnerable (`"true"`), not vulnerable (`"false"`), or indeterminate (`"unknown"`)?
-
-Now compare with the scanner's conclusion:
-
-> The scanner concluded: `IsVulnerable = {{.is_vulnerable}}`
-
-- If you agree, cite the strongest supporting evidence.
-- If you disagree, your independent assessment takes priority. Explain what the scanner got wrong and cite the specific evidence.
-- Use `high` confidence only when you have concrete code evidence (file paths, line numbers, specific patterns). Use `medium` when the evidence is suggestive but not definitive. Use `low` when it's a theoretical concern.
-
-## Required Response Format
-
-After completing your investigation (including any tool usage), respond with ONLY valid JSON (no markdown fencing, no extra text). This must be your final message.
-
-Rules:
-- `reasoning`: 1-3 sentences. State your verdict and the key reason. Reference specific file:line if disagreeing.
-- `evidence`: Each entry must be `file:line: <what was found>` or a tool result summary. Always include at least one evidence entry, even if you agree with the scanner (cite the strongest supporting evidence such as call trace step, find_callers result, or instantiation status).
-- `IsVulnerable`: Must be exactly `"true"`, `"false"`, or `"unknown"`. This is YOUR independent assessment.
-- Do NOT repeat the scanner result or restate the CVE description.
-
+```json
 {
-  "IsVulnerable": "<true, false, or unknown>",
-  "confidence": "<high, medium, or low>",
-  "reasoning": "<1-3 sentences: verdict + key evidence>",
-  "evidence": ["<file:line: what was found>"]
+  "IsVulnerable": "true|false|unknown",
+  "confidence": "high|medium|low",
+  "reasoning": "Concise assessment and its scope",
+  "evidence": ["file:line: observation, or precise tool evidence"],
+  "graph_analysis": {
+    "summary": "What was checked and the result",
+    "findings": []
+  },
+  "dynamic_analysis": {
+    "summary": "Reflection/unsafe and other dynamic checks performed",
+    "findings": []
+  },
+  "uncertainties": []
 }
+```
+
+Each graph finding must contain:
+- kind: supported_path, suspected_false_positive, suspected_false_negative, or inconclusive.
+- module: repository-relative module directory (use . for root); package and symbol: exact keys/values from AffectedImports.
+- graph_path: ordered graph functions under review, or [] if no path exists.
+- source_path: ordered source-backed invocation steps with file:line, or [] if unavailable.
+- confidence, reasoning, evidence (nonempty), uncertainties (array).
+
+supported_path requires both paths. suspected_false_positive requires the graph path and evidence refuting it. suspected_false_negative requires a source path and evidence explaining what the graph missed. inconclusive requires explicit uncertainties.
+
+Each dynamic finding must contain:
+- module, package, symbol: same targeting rules as graph findings. For a supplied risk whose affected target cannot be resolved, use status=unresolved, graph_status=unknown, and empty package and symbol strings; explain the gap instead of inventing a target.
+- mechanism: reflection, unsafe, function_value, callback, registration, or other.
+- status: supported, ruled_out, or unresolved; graph_status: present, missing, or unknown.
+- risk_indices: covered zero-based reflection_risks indices, or [] for a new discovery.
+- source_path: ordered invocation steps with file:line (required nonempty for supported usage).
+- confidence, reasoning, evidence (nonempty), uncertainties (array; nonempty for unresolved).
+
+Use high confidence only with concrete source evidence. Keep all array fields present, using [] when empty. Empty findings are allowed only when no applicable findings exist; explain checked scope and remaining gaps in summaries/uncertainties. An unknown verdict requires nonempty top-level uncertainties. Cite evidence once per finding and keep reasoning concise.

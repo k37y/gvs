@@ -2,6 +2,7 @@ package cg
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,12 +10,17 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/vertex"
@@ -22,28 +28,68 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-type ClaudeVerification struct {
-	IsVulnerable string   `json:"IsVulnerable"`
-	Confidence   string   `json:"confidence"`
-	Reasoning    string   `json:"reasoning"`
-	Evidence     []string `json:"evidence"`
+type AIVerification struct {
+	Coverage        *AIAuditCoverage  `json:"coverage,omitempty"`
+	Provider        string            `json:"provider"`
+	Model           string            `json:"model"`
+	IsVulnerable    string            `json:"IsVulnerable"`
+	Confidence      string            `json:"confidence"`
+	Reasoning       string            `json:"reasoning"`
+	Evidence        []string          `json:"evidence"`
+	GraphAnalysis   AIGraphAnalysis   `json:"graph_analysis"`
+	DynamicAnalysis AIDynamicAnalysis `json:"dynamic_analysis"`
+	Uncertainties   []string          `json:"uncertainties"`
 }
 
-type claudeConfig struct {
-	ProjectID     string
-	Location      string
-	Model         string
-	MaxIterations int
+type AIGraphAnalysis struct {
+	Summary  string           `json:"summary"`
+	Findings []AIGraphFinding `json:"findings"`
 }
 
-type claudeResponse struct {
-	IsVulnerableRaw json.RawMessage `json:"IsVulnerable"`
-	Confidence      string          `json:"confidence"`
-	Reasoning       string          `json:"reasoning"`
-	Evidence        []string        `json:"evidence"`
+type AIGraphFinding struct {
+	Kind          string   `json:"kind"`
+	Module        string   `json:"module"`
+	Package       string   `json:"package"`
+	Symbol        string   `json:"symbol"`
+	GraphPath     []string `json:"graph_path"`
+	SourcePath    []string `json:"source_path"`
+	Confidence    string   `json:"confidence"`
+	Reasoning     string   `json:"reasoning"`
+	Evidence      []string `json:"evidence"`
+	Uncertainties []string `json:"uncertainties"`
 }
 
-func (r *claudeResponse) GetIsVulnerable() string {
+type AIDynamicAnalysis struct {
+	Summary  string             `json:"summary"`
+	Findings []AIDynamicFinding `json:"findings"`
+}
+
+type AIDynamicFinding struct {
+	Module        string   `json:"module"`
+	Package       string   `json:"package"`
+	Symbol        string   `json:"symbol"`
+	Mechanism     string   `json:"mechanism"`
+	Status        string   `json:"status"`
+	GraphStatus   string   `json:"graph_status"`
+	RiskIndices   []int    `json:"risk_indices"`
+	SourcePath    []string `json:"source_path"`
+	Confidence    string   `json:"confidence"`
+	Reasoning     string   `json:"reasoning"`
+	Evidence      []string `json:"evidence"`
+	Uncertainties []string `json:"uncertainties"`
+}
+
+type verificationResponse struct {
+	IsVulnerableRaw json.RawMessage    `json:"IsVulnerable"`
+	Confidence      string             `json:"confidence"`
+	Reasoning       string             `json:"reasoning"`
+	Evidence        []string           `json:"evidence"`
+	GraphAnalysis   *AIGraphAnalysis   `json:"graph_analysis"`
+	DynamicAnalysis *AIDynamicAnalysis `json:"dynamic_analysis"`
+	Uncertainties   []string           `json:"uncertainties"`
+}
+
+func (r *verificationResponse) GetIsVulnerable() string {
 	raw := strings.TrimSpace(string(r.IsVulnerableRaw))
 	raw = strings.Trim(raw, `"`)
 	switch strings.ToLower(raw) {
@@ -56,41 +102,254 @@ func (r *claudeResponse) GetIsVulnerable() string {
 	}
 }
 
-func VerifyAndSummarizeWithClaude(result *Result, repoDir string) {
-	if os.Getenv("GVS_CLAUDE") != "1" {
+func VerifyAndSummarize(result *Result, repoDir string) {
+	cfg, enabled, err := loadAIConfig()
+	logAIStatus(cfg, enabled, err, result.ProgressFunc)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("AI configuration: %v", err))
 		return
 	}
-	cfg, found := loadClaudeConfig()
-	if !found {
+	if !enabled {
 		return
 	}
+	ctx, cancel := context.WithTimeout(result.ctx(), cfg.Timeout)
+	defer cancel()
+	agent := newAgent(ctx, cfg, result.ProgressFunc)
+	verifyWithAgent(ctx, result, repoDir, cfg, agent)
+}
 
+// verificationRisk is a compact view, retaining indices into the original scan.
+// Details stay available through read_reflection_risks; they are never discarded.
+type verificationRisk struct {
+	Indices     []int  `json:"indices"`
+	Association string `json:"association,omitempty"`
+	Type        string `json:"type"`
+	Location    string `json:"location"`
+	Package     string `json:"package,omitempty"`
+	Symbol      string `json:"symbol,omitempty"`
+	Evidence    string `json:"evidence"`
+}
+type AIAuditCoverage struct {
+	TotalRisks         int   `json:"total_risks"`
+	ReviewedRisks      int   `json:"reviewed_risks"`
+	PendingRiskIndices []int `json:"pending_risk_indices"`
+}
+
+const maxRiskBatchBytes = 6 * 1024
+const maxRiskBatchEntries = 16
+
+func verificationRiskBatches(result *Result, repoDir string) [][]verificationRisk {
+	var groups []verificationRisk
+	byKey := make(map[string]int)
+	for i, risk := range result.ReflectionRisks {
+		location := risk.Location
+		if rel, err := filepath.Rel(repoDir, location); err == nil && !strings.HasPrefix(rel, "..") {
+			location = filepath.ToSlash(rel)
+		}
+		key := risk.Type + "\x00" + risk.Location + "\x00" + risk.Package + "\x00" + risk.Symbol + "\x00" + risk.Association + "\x00" + strings.Join(risk.Evidence, "\x00")
+		if index, ok := byKey[key]; ok && len(groups[index].Indices) < maxRiskBatchEntries {
+			groups[index].Indices = append(groups[index].Indices, i)
+			continue
+		}
+		byKey[key] = len(groups)
+		groups = append(groups, verificationRisk{Indices: []int{i}, Association: boundedVerificationText(risk.Association, 32, "..."), Type: boundedVerificationText(risk.Type, 128, "..."), Location: boundedVerificationText(location, 512, " [truncated; read_reflection_risks]"), Package: boundedVerificationText(risk.Package, 256, " [truncated]"), Symbol: boundedVerificationText(risk.Symbol, 128, " [truncated]"), Evidence: boundedVerificationText(strings.Join(risk.Evidence, "; "), 512, " [truncated; read_reflection_risks]")})
+	}
+	sort.SliceStable(groups, func(i, j int) bool {
+		return groups[i].Association == "target_linked" && groups[j].Association != "target_linked"
+	})
+	batches := [][]verificationRisk{{}}
+	for _, group := range groups {
+		// JSON escaping can expand a byte sixfold; bound the serialized group too.
+		if encoded, _ := json.Marshal(group); len(encoded) > maxRiskBatchBytes-64 {
+			group.Association = boundedVerificationText(group.Association, 32, "...")
+			group.Type = boundedVerificationText(group.Type, 64, "...")
+			group.Location = boundedVerificationText(group.Location, 128, " [truncated]")
+			group.Package = boundedVerificationText(group.Package, 128, " [truncated]")
+			group.Symbol = boundedVerificationText(group.Symbol, 64, " [truncated]")
+			group.Evidence = boundedVerificationText(group.Evidence, 128, " [truncated; read_reflection_risks]")
+		}
+		last := len(batches) - 1
+		candidate := append(append([]verificationRisk(nil), batches[last]...), group)
+		encoded, _ := json.Marshal(candidate)
+		indices := 0
+		for _, g := range candidate {
+			indices += len(g.Indices)
+		}
+		if len(batches[last]) > 0 && (len(encoded) > maxRiskBatchBytes || indices > maxRiskBatchEntries) {
+			batches = append(batches, []verificationRisk{group})
+		} else {
+			batches[last] = candidate
+		}
+	}
+	return batches
+}
+
+func verifyWithAgent(ctx context.Context, result *Result, repoDir string, cfg aiConfig, agent verificationAgent) {
 	skillPrompt, found := loadSkillPrompt(result)
 	if !found {
+		result.Errors = append(result.Errors, "AI verification: verify-scan.md not found (set GVS_SKILLS_DIR)")
 		return
 	}
+	batches := verificationRiskBatches(result, repoDir)
+	var parts []*AIVerification
+	reviewed := make(map[int]bool)
+	var gaps []string
+	for number, batch := range batches {
+		if ctx.Err() != nil {
+			gaps = append(gaps, ctx.Err().Error())
+			break
+		}
+		var indices []int
+		for _, group := range batch {
+			indices = append(indices, group.Indices...)
+		}
+		result.progress(fmt.Sprintf("[ai] Investigation %d/%d: %d reflection risks", number+1, len(batches), len(indices)))
+		part, err := verifyRiskBatch(ctx, result, repoDir, cfg, agent, skillPrompt, batch, indices)
+		if err != nil {
+			result.Errors = append(result.Errors, err.Error())
+			gaps = append(gaps, err.Error())
+			continue
+		}
+		parts = append(parts, part)
+		for _, index := range indices {
+			reviewed[index] = true
+		}
+	}
+	if len(parts) == 0 && len(result.ReflectionRisks) == 0 {
+		return
+	}
+	assessment := mergeVerificationAssessments(parts, gaps)
+	assessment.Provider, assessment.Model = cfg.Provider, cfg.Model
+	assessment.Coverage = &AIAuditCoverage{TotalRisks: len(result.ReflectionRisks), ReviewedRisks: len(reviewed), PendingRiskIndices: []int{}}
+	for index := range result.ReflectionRisks {
+		if !reviewed[index] {
+			assessment.Coverage.PendingRiskIndices = append(assessment.Coverage.PendingRiskIndices, index)
+		}
+	}
+	if len(assessment.Coverage.PendingRiskIndices) > 0 {
+		assessment.IsVulnerable = "unknown"
+		assessment.Confidence = "low"
+		assessment.Uncertainties = append(assessment.Uncertainties, fmt.Sprintf("%d reflection risk candidates remain unreviewed; see coverage.pending_risk_indices", len(assessment.Coverage.PendingRiskIndices)))
+	}
+	result.AIVerification = assessment
+	result.progress(fmt.Sprintf("[ai] Result: scanner=%s ai=%s reviewed_risks=%d/%d", result.IsVulnerable, assessment.IsVulnerable, len(reviewed), len(result.ReflectionRisks)))
+}
 
-	result.progress("[claude] Collecting source code from repository...")
-	sourceSnippets := collectRelevantSource(result, repoDir)
-	result.progress(fmt.Sprintf("[claude] Collected %d source files", len(sourceSnippets)))
-
-	prompt, err := buildVerificationPrompt(result, skillPrompt, sourceSnippets)
+func verifyRiskBatch(ctx context.Context, result *Result, repoDir string, cfg aiConfig, agent verificationAgent, template string, batch []verificationRisk, indices []int) (*AIVerification, error) {
+	// Copy only source-selection inputs; never copy Result's mutex.
+	scope := &Result{ScanConfig: result.ScanConfig, UsedImports: result.UsedImports, AffectedImports: result.AffectedImports}
+	for _, index := range indices {
+		scope.ReflectionRisks = append(scope.ReflectionRisks, result.ReflectionRisks[index])
+	}
+	snippets := collectRelevantSource(scope, repoDir)
+	prompt, err := buildVerificationPromptForRisks(result, template, snippets, batch)
 	if err != nil {
-		result.Errors = append(result.Errors, fmt.Sprintf("Failed to build Claude verification prompt: %v", err))
-		return
+		return nil, fmt.Errorf("Failed to build AI verification prompt: %w", err)
 	}
+	result.progress(fmt.Sprintf("[ai] Initial prompt: %d bytes (source excerpts: %d bytes; tool schemas excluded)", len(prompt), sourceBytes(snippets)))
+	response, err := agent.Run(ctx, prompt, verificationTools(result, repoDir))
+	if err != nil {
+		return nil, fmt.Errorf("AI verification failed: %w", err)
+	}
+	assessment, err := parseAssessment(response)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to parse AI assessment: %w", err)
+	}
+	if err := validateAuditBatch(result, assessment, indices); err != nil {
+		return nil, fmt.Errorf("Invalid AI audit: %w", err)
+	}
+	return assessment, nil
+}
 
-	result.progress(fmt.Sprintf("[claude] REQUEST >>>\n%s\n[claude] <<< REQUEST", prompt))
-	result.progress(fmt.Sprintf("[claude] Calling Vertex AI agentic loop (project=%s, location=%s, model=%s, max_iterations=%d)...",
-		cfg.ProjectID, cfg.Location, cfg.Model, cfg.MaxIterations))
+func mergeVerificationAssessments(parts []*AIVerification, gaps []string) *AIVerification {
+	if len(parts) == 1 && len(gaps) == 0 {
+		return parts[0]
+	}
+	a := &AIVerification{IsVulnerable: "unknown", Confidence: "low", Reasoning: fmt.Sprintf("Combined %d bounded investigations; consult findings and coverage for scope.", len(parts)), Evidence: []string{}, GraphAnalysis: AIGraphAnalysis{Summary: "Graph findings from bounded investigations.", Findings: []AIGraphFinding{}}, DynamicAnalysis: AIDynamicAnalysis{Summary: "Dynamic findings from bounded investigations.", Findings: []AIDynamicFinding{}}, Uncertainties: append([]string{}, gaps...)}
+	verdict := ""
+	consistent := len(parts) > 0 && len(gaps) == 0
+	for _, part := range parts {
+		if verdict == "" {
+			verdict = part.IsVulnerable
+		} else if verdict != part.IsVulnerable {
+			consistent = false
+		}
+		a.Evidence = append(a.Evidence, part.Evidence...)
+		a.GraphAnalysis.Findings = append(a.GraphAnalysis.Findings, part.GraphAnalysis.Findings...)
+		a.DynamicAnalysis.Findings = append(a.DynamicAnalysis.Findings, part.DynamicAnalysis.Findings...)
+		a.Uncertainties = append(a.Uncertainties, part.Uncertainties...)
+	}
+	if consistent {
+		a.IsVulnerable = verdict
+	}
+	if a.IsVulnerable == "unknown" && len(a.Uncertainties) == 0 {
+		a.Uncertainties = append(a.Uncertainties, "Investigations disagree or did not establish a complete verdict")
+	}
+	if len(a.Evidence) == 0 {
+		a.Evidence = append(a.Evidence, "Verifier: no complete validated AI investigation available")
+	}
+	return a
+}
 
-	ctx := result.ctx()
-	client := anthropic.NewClient(
-		vertex.WithGoogleAuth(ctx, cfg.Location, cfg.ProjectID),
-	)
+type reflectionRisksTool struct{ risks []ReflectionRisk }
 
+func (t *reflectionRisksTool) Name() string { return "read_reflection_risks" }
+func (t *reflectionRisksTool) Description() string {
+	return "Read original reflection risk evidence by scan index. Request at most 8 indices. Compact prompt summaries may omit evidence; indices refer to the original scan, not positions in the current batch. Large results are paginated as JSON text; pass the returned next_offset to continue."
+}
+func (t *reflectionRisksTool) InputSchema() verificationToolSchema {
+	return verificationToolSchema{Properties: map[string]any{"indices": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "maxItems": 8}, "offset": map[string]any{"type": "integer", "minimum": 0, "description": "Byte offset into original JSON, from next_offset"}}, Required: []string{"indices"}}
+}
+func (t *reflectionRisksTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
+	var params struct {
+		Indices []int `json:"indices"`
+		Offset  int   `json:"offset"`
+	}
+	if err := json.Unmarshal(input, &params); err != nil {
+		return "", err
+	}
+	if len(params.Indices) == 0 || len(params.Indices) > 8 {
+		return "", fmt.Errorf("request 1 to 8 risk indices")
+	}
+	type entry struct {
+		Index int            `json:"index"`
+		Risk  ReflectionRisk `json:"risk"`
+	}
+	values := make([]entry, 0, len(params.Indices))
+	for _, index := range params.Indices {
+		if index < 0 || index >= len(t.risks) {
+			return "", fmt.Errorf("invalid risk index %d", index)
+		}
+		values = append(values, entry{index, t.risks[index]})
+	}
+	data, err := json.Marshal(values)
+	if err != nil {
+		return "", err
+	}
+	if params.Offset < 0 || params.Offset > len(data) {
+		return "", fmt.Errorf("invalid evidence offset")
+	}
+	start := params.Offset
+	for start < len(data) && !utf8.RuneStart(data[start]) {
+		start++
+	}
+	end := min(start+6*1024, len(data))
+	for end < len(data) && end > start && !utf8.RuneStart(data[end]) {
+		end--
+	}
+	if start == 0 && end == len(data) {
+		return string(data), nil
+	}
+	next := "complete"
+	if end < len(data) {
+		next = strconv.Itoa(end)
+	}
+	return fmt.Sprintf("Original risk JSON bytes %d:%d of %d; next_offset=%s\n%s", start, end, len(data), next, data[start:end]), nil
+}
+
+func verificationTools(result *Result, repoDir string) []verificationTool {
 	pf := result.ProgressFunc
-	tools := []anthropic.BetaTool{
+	tools := []verificationTool{
 		&grepCodeTool{repoDir: repoDir, progressFunc: pf},
 		&readFileTool{repoDir: repoDir, progressFunc: pf},
 		&listFilesTool{repoDir: repoDir, progressFunc: pf},
@@ -101,113 +360,226 @@ func VerifyAndSummarizeWithClaude(result *Result, repoDir string) {
 		&listEntryPointsTool{repoDir: repoDir, progressFunc: pf},
 		&checkTransitiveDepsTool{repoDir: repoDir, progressFunc: pf},
 	}
-	if build := result.firstSSABuild(); build != nil {
-		tools = append(tools, &findImplementationsTool{prog: build.prog, progressFunc: pf})
-		modPath := readModulePath(repoDir)
-		tools = append(tools, &findCallersTool{graph: build.cg, repoModulePath: modPath, progressFunc: pf})
+	if len(result.ReflectionRisks) > 0 {
+		tools = append(tools, &reflectionRisksTool{risks: result.ReflectionRisks})
 	}
-
-	runner := client.Beta.Messages.NewToolRunner(tools, anthropic.BetaToolRunnerParams{
-		BetaMessageNewParams: anthropic.BetaMessageNewParams{
-			Model:     cfg.Model,
-			MaxTokens: 16384,
-			Messages: []anthropic.BetaMessageParam{
-				anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(prompt)),
-			},
-		},
-		MaxIterations: cfg.MaxIterations,
-	})
-
-	start := time.Now()
-	iteration := 0
-
-	for message, err := range runner.All(ctx) {
-		if err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("Claude API call failed: %v", err))
-			result.progress(fmt.Sprintf("[claude] API call failed: %v", err))
-			return
+	implementations, callers := make(map[string]verificationTool), make(map[string]verificationTool)
+	for _, dir := range verificationKeys(result.ssaBuilds) {
+		build := result.ssaBuilds[dir]
+		if build == nil || build.err != nil {
+			continue
 		}
-		iteration++
-		for _, block := range message.Content {
-			switch block.Type {
-			case "tool_use":
-				result.progress(fmt.Sprintf("[claude] Iteration %d: tool_call %s(%s)", iteration, block.Name, string(block.Input)))
-			case "text":
-				if block.Text != "" {
-					result.progress(fmt.Sprintf("[claude] Iteration %d: text response (%d chars)", iteration, len(block.Text)))
-				}
+		module := verificationModule(repoDir, dir)
+		if build.prog != nil {
+			implementations[module] = &findImplementationsTool{prog: build.prog, progressFunc: pf}
+		}
+		if build.cg != nil {
+			callers[module] = &findCallersTool{graph: build.cg, repoModulePath: readModulePath(dir), progressFunc: pf}
+		}
+	}
+	if len(implementations) > 0 {
+		tools = append(tools, &moduleGraphTool{tools: implementations})
+	}
+	if len(callers) > 0 {
+		tools = append(tools, &moduleGraphTool{tools: callers})
+	}
+	return tools
+}
+
+func verificationModule(repoDir, dir string) string {
+	if filepath.IsAbs(dir) {
+		root, err := filepath.Abs(repoDir)
+		if err == nil {
+			if rel, err := filepath.Rel(root, dir); err == nil {
+				return filepath.ToSlash(rel)
 			}
 		}
 	}
+	return filepath.ToSlash(filepath.Clean(dir))
+}
 
-	elapsed := time.Since(start)
-	result.progress(fmt.Sprintf("[claude] Agentic loop completed in %d iterations (%.1fs)", iteration, elapsed.Seconds()))
+// Graph tools must query the selected module, not an arbitrary cached build.
+type moduleGraphTool struct{ tools map[string]verificationTool }
 
-	lastMsg := runner.LastMessage()
-	if lastMsg == nil {
-		result.Errors = append(result.Errors, "Claude returned no response")
-		return
+func (t *moduleGraphTool) first() verificationTool { return t.tools[verificationKeys(t.tools)[0]] }
+func (t *moduleGraphTool) Name() string            { return t.first().Name() }
+func (t *moduleGraphTool) Description() string {
+	return t.first().Description() + " Select the repository-relative module directory with module. Missing graph evidence does not rule out a dynamic call."
+}
+func (t *moduleGraphTool) InputSchema() verificationToolSchema {
+	schema := t.first().InputSchema()
+	schema.Properties["module"] = map[string]any{"type": "string", "enum": verificationKeys(t.tools), "description": "Repository-relative module directory; required when multiple module graphs are available"}
+	if len(t.tools) > 1 {
+		schema.Required = append(schema.Required, "module")
 	}
+	return schema
+}
+func (t *moduleGraphTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
+	var params struct {
+		Module string `json:"module"`
+	}
+	if err := json.Unmarshal(input, &params); err != nil {
+		return "", err
+	}
+	if params.Module == "" && len(t.tools) == 1 {
+		params.Module = verificationKeys(t.tools)[0]
+	}
+	tool, ok := t.tools[params.Module]
+	if !ok {
+		return "", fmt.Errorf("select module from %v; an unavailable module graph is not evidence of unreachability", verificationKeys(t.tools))
+	}
+	output, err := tool.Execute(ctx, input)
+	return "Module: " + params.Module + "\n" + output, err
+}
 
-	// If the loop ended while Claude still wanted to use tools (hit MaxIterations),
-	// make one final call forcing it to produce the JSON answer.
-	if lastMsg.StopReason == anthropic.BetaStopReasonToolUse {
-		result.progress("[claude] Loop ended mid-tool-use (iteration limit). Requesting final answer...")
-		finalMessages := append(runner.Params.Messages,
-			anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(
-				"You have reached the investigation limit. Stop using tools. Based on everything you have found so far, respond with your final JSON assessment now.",
-			)),
-		)
-		finalMsg, err := client.Beta.Messages.New(ctx, anthropic.BetaMessageNewParams{
-			Model:     cfg.Model,
-			MaxTokens: 4096,
-			Messages:  finalMessages,
-		})
-		if err != nil {
-			result.progress(fmt.Sprintf("[claude] Final answer call failed: %v", err))
-			result.Errors = append(result.Errors, fmt.Sprintf("Claude final answer call failed: %v", err))
-			return
+func parseAssessment(text string) (*AIVerification, error) {
+	var resp verificationResponse
+	if err := json.Unmarshal([]byte(cleanJSONResponse(text)), &resp); err != nil {
+		return nil, err
+	}
+	verdict := strings.TrimSpace(string(resp.IsVulnerableRaw))
+	if verdict != "true" && verdict != "false" && verdict != `"true"` && verdict != `"false"` && verdict != `"unknown"` {
+		return nil, fmt.Errorf("IsVulnerable must be true, false, or unknown")
+	}
+	if resp.Confidence != "high" && resp.Confidence != "medium" && resp.Confidence != "low" {
+		return nil, fmt.Errorf("confidence must be high, medium, or low")
+	}
+	if strings.TrimSpace(resp.Reasoning) == "" || len(resp.Evidence) == 0 {
+		return nil, fmt.Errorf("reasoning and evidence are required")
+	}
+	for _, evidence := range resp.Evidence {
+		if strings.TrimSpace(evidence) == "" {
+			return nil, fmt.Errorf("evidence entries must not be empty")
 		}
-		lastMsg = finalMsg
-		result.progress(fmt.Sprintf("[claude] Final answer received (stop_reason=%s)", lastMsg.StopReason))
 	}
-
-	if lastMsg.StopReason == anthropic.BetaStopReasonMaxTokens {
-		result.progress("[claude] WARNING: response truncated (max_tokens reached)")
+	if resp.GraphAnalysis == nil || resp.DynamicAnalysis == nil || resp.Uncertainties == nil {
+		return nil, fmt.Errorf("graph_analysis, dynamic_analysis, and uncertainties are required")
 	}
-
-	var responseText string
-	for _, block := range lastMsg.Content {
-		if block.Type == "text" {
-			responseText += block.Text
+	if strings.TrimSpace(resp.GraphAnalysis.Summary) == "" || resp.GraphAnalysis.Findings == nil ||
+		strings.TrimSpace(resp.DynamicAnalysis.Summary) == "" || resp.DynamicAnalysis.Findings == nil {
+		return nil, fmt.Errorf("each analysis requires a summary and a findings array")
+	}
+	for _, finding := range resp.GraphAnalysis.Findings {
+		if !oneOf(finding.Kind, "supported_path", "suspected_false_positive", "suspected_false_negative", "inconclusive") {
+			return nil, fmt.Errorf("invalid graph finding kind %q", finding.Kind)
+		}
+		if err := validateFinding(finding.Module, finding.Package, finding.Symbol, finding.Confidence, finding.Reasoning, finding.Evidence, finding.Uncertainties); err != nil {
+			return nil, err
+		}
+		if finding.GraphPath == nil || finding.SourcePath == nil {
+			return nil, fmt.Errorf("graph findings require graph_path and source_path arrays")
+		}
+		if oneOf(finding.Kind, "supported_path", "suspected_false_positive") && len(finding.GraphPath) == 0 {
+			return nil, fmt.Errorf("%s requires the graph path being reviewed", finding.Kind)
+		}
+		if oneOf(finding.Kind, "supported_path", "suspected_false_negative") && len(finding.SourcePath) == 0 {
+			return nil, fmt.Errorf("%s requires a source-backed path", finding.Kind)
+		}
+		if finding.Kind == "inconclusive" && len(finding.Uncertainties) == 0 {
+			return nil, fmt.Errorf("inconclusive graph finding requires uncertainties")
 		}
 	}
+	for _, finding := range resp.DynamicAnalysis.Findings {
+		if !oneOf(finding.Status, "supported", "ruled_out", "unresolved") || !oneOf(finding.GraphStatus, "present", "missing", "unknown") {
+			return nil, fmt.Errorf("invalid dynamic finding status")
+		}
+		if !oneOf(finding.Mechanism, "reflection", "unsafe", "function_value", "callback", "registration", "other") {
+			return nil, fmt.Errorf("invalid dynamic mechanism %q", finding.Mechanism)
+		}
+		pkg, symbol := finding.Package, finding.Symbol
+		if pkg == "" && symbol == "" && finding.Status == "unresolved" && finding.GraphStatus == "unknown" && len(finding.RiskIndices) > 0 {
+			pkg, symbol = "unresolved", "unresolved"
+		}
+		if err := validateFinding(finding.Module, pkg, symbol, finding.Confidence, finding.Reasoning, finding.Evidence, finding.Uncertainties); err != nil {
+			return nil, err
+		}
+		if finding.RiskIndices == nil || finding.SourcePath == nil {
+			return nil, fmt.Errorf("dynamic findings require risk_indices and source_path arrays")
+		}
+		if finding.Status == "supported" && len(finding.SourcePath) == 0 {
+			return nil, fmt.Errorf("supported dynamic usage requires a source-backed path")
+		}
+		if finding.Status == "unresolved" && len(finding.Uncertainties) == 0 {
+			return nil, fmt.Errorf("unresolved dynamic finding requires uncertainties")
+		}
+	}
+	if resp.GetIsVulnerable() == "unknown" && len(resp.Uncertainties) == 0 {
+		return nil, fmt.Errorf("unknown verdict requires uncertainties")
+	}
+	return &AIVerification{IsVulnerable: resp.GetIsVulnerable(), Confidence: resp.Confidence,
+		Reasoning: resp.Reasoning, Evidence: resp.Evidence, GraphAnalysis: *resp.GraphAnalysis,
+		DynamicAnalysis: *resp.DynamicAnalysis, Uncertainties: resp.Uncertainties}, nil
+}
 
-	result.progress(fmt.Sprintf("[claude] RESPONSE (stop_reason=%s) >>>\n%s\n[claude] <<< RESPONSE", lastMsg.StopReason, responseText))
+func oneOf(value string, allowed ...string) bool {
+	for _, candidate := range allowed {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
+}
 
-	var resp claudeResponse
-	cleaned := cleanJSONResponse(responseText)
-	if err := json.Unmarshal([]byte(cleaned), &resp); err != nil {
-		result.Errors = append(result.Errors, fmt.Sprintf("Failed to parse Claude response: %v", err))
-		result.progress(fmt.Sprintf("[claude] Failed to parse response JSON: %v", err))
-		return
+func validateFinding(module, pkg, symbol, confidence, reasoning string, evidence, uncertainties []string) error {
+	if strings.TrimSpace(module) == "" || strings.TrimSpace(pkg) == "" || strings.TrimSpace(symbol) == "" || strings.TrimSpace(reasoning) == "" {
+		return fmt.Errorf("findings require module, package, symbol, and reasoning")
+	}
+	if !oneOf(confidence, "high", "medium", "low") || len(evidence) == 0 || uncertainties == nil {
+		return fmt.Errorf("findings require valid confidence, evidence, and uncertainties")
+	}
+	for _, item := range append(append([]string(nil), evidence...), uncertainties...) {
+		if strings.TrimSpace(item) == "" {
+			return fmt.Errorf("finding evidence/uncertainties must not contain empty entries")
+		}
+	}
+	return nil
+}
+
+func validateAuditTargets(result *Result, assessment *AIVerification) error {
+	indices := make([]int, len(result.ReflectionRisks))
+	for i := range indices {
+		indices[i] = i
+	}
+	return validateAuditBatch(result, assessment, indices)
+}
+func validateAuditBatch(result *Result, assessment *AIVerification, indices []int) error {
+	allowed := make(map[int]bool, len(indices))
+	for _, index := range indices {
+		allowed[index] = true
 	}
 
-	isVuln := resp.GetIsVulnerable()
-	result.ClaudeVerification = &ClaudeVerification{
-		IsVulnerable: isVuln,
-		Confidence:   resp.Confidence,
-		Reasoning:    resp.Reasoning,
-		Evidence:     resp.Evidence,
+	checkSymbol := func(pkg, symbol string) error {
+		affected, ok := result.AffectedImports[pkg]
+		if !ok || !oneOf(symbol, affected.Symbols...) {
+			return fmt.Errorf("finding refers to an unlisted affected symbol %s.%s", pkg, symbol)
+		}
+		return nil
 	}
-
-	if isVuln == result.IsVulnerable {
-		result.progress(fmt.Sprintf("[claude] Result: agrees with scanner (confidence: %s, IsVulnerable=%s)",
-			resp.Confidence, isVuln))
-	} else {
-		result.progress(fmt.Sprintf("[claude] Result: disagrees with scanner (confidence: %s, scanner=%s, claude=%s)",
-			resp.Confidence, result.IsVulnerable, isVuln))
+	for _, finding := range assessment.GraphAnalysis.Findings {
+		if err := checkSymbol(finding.Package, finding.Symbol); err != nil {
+			return err
+		}
 	}
+	covered := make(map[int]bool)
+	for _, finding := range assessment.DynamicAnalysis.Findings {
+		if finding.Package != "" || finding.Symbol != "" || finding.Status != "unresolved" {
+			if err := checkSymbol(finding.Package, finding.Symbol); err != nil {
+				return err
+			}
+		}
+		for _, index := range finding.RiskIndices {
+			if !allowed[index] {
+				return fmt.Errorf("invalid reflection risk index %d", index)
+			}
+			covered[index] = true
+		}
+	}
+	for _, index := range indices {
+		if !covered[index] {
+			return fmt.Errorf("reflection risk %d has no supported, ruled_out, or unresolved disposition", index)
+		}
+	}
+	return nil
 }
 
 func cleanJSONResponse(s string) string {
@@ -246,7 +618,7 @@ func cleanJSONResponse(s string) string {
 		}
 	}
 
-	// Find the LAST balanced { ... } object (Claude's final JSON is at the end)
+	// Find the LAST balanced { ... } object (the final JSON is at the end)
 	end := strings.LastIndexByte(s, '}')
 	if end < 0 {
 		return s
@@ -291,8 +663,10 @@ func FormatCallTraces(result *Result) string {
 	}
 
 	var b strings.Builder
-	for _, pkgs := range result.UsedImports {
-		for pkg, details := range pkgs {
+	for _, dir := range verificationKeys(result.UsedImports) {
+		pkgs := result.UsedImports[dir]
+		for _, pkg := range verificationKeys(pkgs) {
+			details := pkgs[pkg]
 			for i, sym := range details.Symbols {
 				if i >= len(details.Paths) {
 					continue
@@ -301,7 +675,7 @@ func FormatCallTraces(result *Result) string {
 				if len(path) == 0 {
 					continue
 				}
-				b.WriteString(fmt.Sprintf("Trace for %s.%s:\n", pkg, sym))
+				b.WriteString(fmt.Sprintf("Trace in module %s for %s.%s:\n", dir, pkg, sym))
 				for j, node := range path {
 					funcName := "unknown"
 					location := "unknown"
@@ -332,21 +706,950 @@ func FormatCallTraces(result *Result) string {
 }
 
 func findEdgeDescription(caller, callee *callgraph.Node) string {
+	if caller == nil || callee == nil {
+		return "unavailable edge"
+	}
+	var descriptions []string
 	for _, edge := range caller.Out {
-		if edge.Callee == callee {
-			desc := edge.Description()
-			if edge.Site != nil && edge.Site.Common().IsInvoke() {
+		if edge.Callee != callee {
+			continue
+		}
+		desc := edge.Description()
+		if edge.Site != nil {
+			if edge.Site.Common().IsInvoke() {
 				ifaceType := edge.Site.Common().Value.Type().String()
 				methodName := edge.Site.Common().Method.Name()
-				return fmt.Sprintf("%s via interface %s.%s", desc, ifaceType, methodName)
+				desc += fmt.Sprintf(" via interface %s.%s", ifaceType, methodName)
 			}
-			return desc
+			if caller.Func != nil && caller.Func.Prog != nil && caller.Func.Prog.Fset != nil {
+				if pos := caller.Func.Prog.Fset.Position(edge.Site.Pos()); pos.IsValid() {
+					desc += fmt.Sprintf("; call site %s:%d", pos.Filename, pos.Line)
+				}
+			}
 		}
+		descriptions = append(descriptions, desc)
 	}
-	return "unknown dispatch"
+	if len(descriptions) == 0 {
+		return "unknown dispatch"
+	}
+	sort.Strings(descriptions)
+	return boundedVerificationText(strings.Join(descriptions, "; alternative edge: "), 2048, " [additional call sites omitted]")
 }
 
-// --- Agentic tools for Claude ---
+func loadSkillPrompt(result *Result) (string, bool) {
+	// 1. Environment variable override
+	if dir := os.Getenv("GVS_SKILLS_DIR"); dir != "" {
+		path := filepath.Join(dir, "verify-scan.md")
+		if data, err := os.ReadFile(path); err == nil {
+			result.progress(fmt.Sprintf("[ai] Loading skill: %s", path))
+			return string(data), true
+		}
+	}
+
+	// 2. Relative to the binary location
+	if exe, err := os.Executable(); err == nil {
+		binDir := filepath.Dir(exe)
+		path := filepath.Join(binDir, "..", "skills", "verify-scan.md")
+		if data, err := os.ReadFile(path); err == nil {
+			result.progress(fmt.Sprintf("[ai] Loading skill: %s", path))
+			return string(data), true
+		}
+		// Also check same directory as binary (container layout)
+		path = filepath.Join(binDir, "skills", "verify-scan.md")
+		if data, err := os.ReadFile(path); err == nil {
+			result.progress(fmt.Sprintf("[ai] Loading skill: %s", path))
+			return string(data), true
+		}
+	}
+
+	// 3. User install location
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		path := filepath.Join(homeDir, ".local", "share", "gvs", "skills", "verify-scan.md")
+		if data, err := os.ReadFile(path); err == nil {
+			result.progress(fmt.Sprintf("[ai] Loading skill: %s", path))
+			return string(data), true
+		}
+	}
+
+	// 4. Current working directory (development)
+	path := filepath.Join("skills", "verify-scan.md")
+	if data, err := os.ReadFile(path); err == nil {
+		result.progress(fmt.Sprintf("[ai] Loading skill: %s", path))
+		return string(data), true
+	}
+
+	return "", false
+}
+
+func buildVerificationPrompt(result *Result, skillTemplate string, sourceSnippets map[string]string) (string, error) {
+	var risks []verificationRisk
+	for _, batch := range verificationRiskBatches(result, result.Directory) {
+		risks = append(risks, batch...)
+	}
+	return buildVerificationPromptForRisks(result, skillTemplate, sourceSnippets, risks)
+}
+func buildVerificationPromptForRisks(result *Result, skillTemplate string, sourceSnippets map[string]string, risks []verificationRisk) (string, error) {
+	type sanitizedUsedImports struct {
+		CurrentVersion string `json:"CurrentVersion,omitempty"`
+		ReplaceModule  string `json:"ReplaceModule,omitempty"`
+		ReplaceVersion string `json:"ReplaceVersion,omitempty"`
+	}
+	sanitized := make(map[string]map[string]sanitizedUsedImports)
+	for dir, pkgs := range result.UsedImports {
+		sanitized[dir] = make(map[string]sanitizedUsedImports)
+		for pkg, details := range pkgs {
+			sanitized[dir][pkg] = sanitizedUsedImports{
+				CurrentVersion: details.CurrentVersion,
+				ReplaceModule:  details.ReplaceModule,
+				ReplaceVersion: details.ReplaceVersion,
+			}
+		}
+	}
+
+	promptResult := struct {
+		UsedImports     map[string]map[string]sanitizedUsedImports `json:"UsedImports,omitempty"`
+		AffectedImports map[string]AffectedImportsDetails          `json:"AffectedImports,omitempty"`
+		GoCVE           string                                     `json:"GoCVE"`
+		CVE             string                                     `json:"CVE"`
+		Repository      string                                     `json:"Repository"`
+		Branch          string                                     `json:"Branch"`
+		ReflectionRisks []verificationRisk                         `json:"reflection_risks"`
+		Unsafe          bool                                       `json:"unsafe"`
+		Reflect         bool                                       `json:"reflect"`
+		GraphModules    map[string]string                          `json:"graph_modules"`
+		GraphPaths      []string                                   `json:"GraphPaths,omitempty"`
+		Errors          []string                                   `json:"Errors,omitempty"`
+	}{
+		UsedImports:     sanitized,
+		AffectedImports: result.AffectedImports,
+		GoCVE:           result.GoCVE,
+		CVE:             result.CVE,
+		Repository:      result.Repository,
+		Branch:          result.Branch,
+		ReflectionRisks: risks,
+		Unsafe:          result.Unsafe,
+		Reflect:         result.Reflect,
+		GraphPaths:      result.GraphPaths,
+		GraphModules:    make(map[string]string),
+		Errors:          result.Errors,
+	}
+	for dir, build := range result.ssaBuilds {
+		status := "available"
+		if build == nil || build.err != nil || build.cg == nil {
+			status = "unavailable or incomplete; do not infer unreachability"
+		}
+		promptResult.GraphModules[verificationModule(result.Directory, dir)] = status
+	}
+
+	resultJSON, err := json.Marshal(promptResult)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal scan result: %w", err)
+	}
+
+	var snippetBuilder strings.Builder
+	for _, path := range verificationKeys(sourceSnippets) {
+		content := sourceSnippets[path]
+		snippetBuilder.WriteString(fmt.Sprintf("### %s\n\n```go\n%s\n```\n\n", path, content))
+	}
+
+	algo := os.Getenv("ALGO")
+	if algo == "" {
+		algo = "rta"
+	}
+
+	callTraces := boundedVerificationText(FormatCallTraces(result), 16*1024, "\n[Graph traces truncated. Query find_callers by affected symbol and module. Unreviewed paths remain uncertain.]\n")
+
+	prompt := skillTemplate
+	prompt = strings.ReplaceAll(prompt, "{{.scan_result_json}}", string(resultJSON))
+	prompt = strings.ReplaceAll(prompt, "{{.source_snippets}}", snippetBuilder.String())
+	prompt = strings.ReplaceAll(prompt, "{{.algorithm}}", algo)
+	prompt = strings.ReplaceAll(prompt, "{{.is_vulnerable}}", result.IsVulnerable)
+	prompt = strings.ReplaceAll(prompt, "{{.call_traces}}", callTraces)
+
+	return verificationEvidenceInstructions + "\n\n" + prompt, nil
+}
+
+const (
+	maxSourceBytes     = 32 * 1024
+	maxSourceFileBytes = 4 * 1024
+	maxToolResultBytes = 8 * 1024
+)
+
+const verificationEvidenceInstructions = `Evidence handling rules:
+Source context contains selected line-numbered excerpts, not complete files. Missing or truncated text is NOT evidence of absence. Use read_file with narrow line ranges to recover needed context, and specialize searches rather than repeating broad queries. Before requesting a tool, identify the unresolved question that could change the verdict. A call-graph edge is a candidate path, not proof of exploitability: check versions, replacements, production reachability, dispatch, and advisory preconditions. If critical evidence is unavailable or the investigation limit is reached without resolving it, return IsVulnerable="unknown" and explain the gap. Cite concrete file:line or tool evidence. Stop when sufficient evidence establishes the assessment.`
+
+func verificationKeys[T any](values map[string]T) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sourceBytes(snippets map[string]string) int {
+	total := 0
+	for _, snippet := range snippets {
+		total += len(snippet)
+	}
+	return total
+}
+
+func collectRelevantSource(result *Result, repoDir string) map[string]string {
+	// Keep all anchors for a file before rendering it. In particular, a call far
+	// below its function declaration must not disappear behind a file-size cap.
+	anchors := make(map[string][]int)
+	var files []string
+	addFile := func(path string, lines ...int) {
+		if filepath.IsAbs(path) {
+			var err error
+			path, err = filepath.Rel(repoDir, path)
+			if err != nil {
+				return
+			}
+		}
+		path = filepath.Clean(path)
+		if _, err := safePath(repoDir, path); err != nil {
+			return
+		}
+		if _, exists := anchors[path]; !exists {
+			files = append(files, path)
+		}
+		anchors[path] = append(anchors[path], lines...)
+	}
+	addFile("go.mod")
+	for _, dir := range verificationKeys(result.UsedImports) {
+		for _, pkg := range verificationKeys(result.UsedImports[dir]) {
+			for _, path := range result.UsedImports[dir][pkg].Paths {
+				for i, node := range path {
+					if node == nil || node.Func == nil || node.Func.Prog == nil || node.Func.Prog.Fset == nil {
+						continue
+					}
+					fset := node.Func.Prog.Fset
+					if i+1 < len(path) {
+						for _, edge := range node.Out {
+							if edge.Callee == path[i+1] && edge.Site != nil {
+								pos := fset.Position(edge.Site.Pos())
+								if pos.IsValid() {
+									addFile(pos.Filename, pos.Line)
+								}
+							}
+						}
+					}
+					pos := fset.Position(node.Func.Pos())
+					if pos.IsValid() {
+						addFile(pos.Filename, pos.Line)
+					}
+				}
+			}
+		}
+	}
+	for _, risk := range result.ReflectionRisks {
+		parts := strings.SplitN(risk.Location, ":", 3)
+		line := 0
+		if len(parts) > 1 {
+			line, _ = strconv.Atoi(parts[1])
+		}
+		addFile(parts[0], line)
+	}
+
+	vulnPkgs := verificationKeys(result.AffectedImports)
+	modulePath := readModulePath(repoDir)
+	reverseImports := make(map[string][]string)
+	directImporters := make(map[string]bool)
+	if len(vulnPkgs) > 0 {
+		filepath.WalkDir(repoDir, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				name := d.Name()
+				if path != repoDir && (name == "vendor" || name == ".git" || strings.HasPrefix(name, ".")) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			rel, err := filepath.Rel(repoDir, path)
+			if err != nil {
+				return nil
+			}
+			f, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
+			if err != nil {
+				return nil
+			}
+			for _, imp := range f.Imports {
+				importPath := strings.Trim(imp.Path.Value, `"`)
+				reverseImports[importPath] = append(reverseImports[importPath], rel)
+				for _, pkg := range vulnPkgs {
+					if importPath == pkg || strings.HasPrefix(importPath, pkg+"/") {
+						addFile(rel)
+						if modulePath != "" {
+							pkgPath := modulePath
+							if dir := filepath.Dir(rel); dir != "." {
+								pkgPath += "/" + filepath.ToSlash(dir)
+							}
+							directImporters[pkgPath] = true
+						}
+					}
+				}
+			}
+			return nil
+		})
+	}
+	for _, pkg := range verificationKeys(directImporters) {
+		for _, path := range reverseImports[pkg] {
+			addFile(path)
+		}
+	}
+	for _, dir := range verificationKeys(result.Files) {
+		for _, set := range result.Files[dir] {
+			paths := append([]string(nil), set...)
+			sort.Strings(paths)
+			for _, path := range paths {
+				addFile(path)
+			}
+		}
+	}
+
+	symbols := make(map[string]bool)
+	for _, affected := range result.AffectedImports {
+		for _, symbol := range affected.Symbols {
+			parts := strings.Split(symbol, ".")
+			symbols[parts[len(parts)-1]] = true
+		}
+	}
+	snippets := make(map[string]string)
+	total := 0
+	for _, path := range files {
+		if maxSourceBytes-total < maxSourceFileBytes {
+			break
+		}
+		data, err := os.ReadFile(filepath.Join(repoDir, path))
+		if err != nil {
+			continue
+		}
+		points := append([]int(nil), anchors[path]...)
+		var fallback []int
+		if strings.HasSuffix(path, ".go") {
+			fset := token.NewFileSet()
+			if f, err := parser.ParseFile(fset, path, data, 0); err == nil {
+				ast.Inspect(f, func(node ast.Node) bool {
+					switch n := node.(type) {
+					case *ast.Ident:
+						if symbols[n.Name] {
+							points = append(points, fset.Position(n.Pos()).Line)
+						}
+					case *ast.FuncDecl:
+						if n.Name.Name == "main" || n.Name.Name == "init" {
+							fallback = append(fallback, fset.Position(n.Pos()).Line)
+						}
+					}
+					return true
+				})
+				for _, imp := range f.Imports {
+					fallback = append(fallback, fset.Position(imp.Pos()).Line)
+				}
+			}
+		}
+		points = append(points, fallback...)
+		// Include module metadata or the package/build-tag header after the
+		// vulnerability anchors, so large file headers cannot crowd those out.
+		points = append(points, 1)
+		snippet := sourceExcerpt(string(data), points, path == "go.mod")
+		snippets[path] = snippet
+		total += len(snippet)
+	}
+	return snippets
+}
+
+func sourceExcerpt(source string, anchors []int, module bool) string {
+	lines := strings.Split(source, "\n")
+	const header = "[Selected source lines; omitted text may contain relevant evidence. Use read_file for additional ranges.]\n"
+	const footer = "[Other lines omitted; absence from these excerpts is not evidence of absence.]\n"
+	selected := make(map[int]string)
+	size := len(header) + len(footer)
+	addLine := func(line int) {
+		if line < 1 || line > len(lines) {
+			return
+		}
+		if _, exists := selected[line]; exists {
+			return
+		}
+		row := fmt.Sprintf("%d|%s\n", line, boundedVerificationText(lines[line-1], 512, " ... [line truncated; use read_file]"))
+		if size+len(row) > maxSourceFileBytes {
+			return
+		}
+		selected[line] = row
+		size += len(row)
+	}
+	// Reserve the exact call/definition lines before adding surrounding context.
+	for _, center := range anchors {
+		addLine(center)
+	}
+	for _, center := range anchors {
+		if center < 1 || center > len(lines) {
+			continue
+		}
+		start, end := max(1, center-8), min(len(lines), center+8)
+		if module {
+			start, end = 1, len(lines)
+		}
+		for line := start; line <= end; line++ {
+			addLine(line)
+		}
+	}
+	order := make([]int, 0, len(selected))
+	for line := range selected {
+		order = append(order, line)
+	}
+	sort.Ints(order)
+	var b strings.Builder
+	b.WriteString(header)
+	for _, line := range order {
+		b.WriteString(selected[line])
+	}
+	if len(selected) < len(lines) {
+		b.WriteString(footer)
+	}
+	return b.String()
+}
+
+func boundedVerificationText(text string, limit int, notice string) string {
+	if len(text) <= limit {
+		return text
+	}
+	end := max(0, limit-len(notice))
+	for end > 0 && !utf8.RuneStart(text[end]) {
+		end--
+	}
+	if newline := strings.LastIndexByte(text[:end], '\n'); newline >= end/2 {
+		end = newline + 1
+	}
+	return text[:end] + notice
+}
+
+func readModulePath(repoDir string) string {
+	data, err := os.ReadFile(filepath.Join(repoDir, "go.mod"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "module ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "module"))
+		}
+	}
+	return ""
+}
+
+func importsAnyPackage(filePath string, packages []string) bool {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, filePath, nil, parser.ImportsOnly)
+	if err != nil {
+		return false
+	}
+	for _, imp := range f.Imports {
+		importPath := strings.Trim(imp.Path.Value, `"`)
+		for _, pkg := range packages {
+			if importPath == pkg || strings.HasPrefix(importPath, pkg+"/") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+type verificationToolSchema struct {
+	Type       string         `json:"type"`
+	Properties map[string]any `json:"properties"`
+	Required   []string       `json:"required,omitempty"`
+}
+
+// verificationTool exposes repository investigation without depending on a provider SDK.
+type verificationTool interface {
+	Name() string
+	Description() string
+	InputSchema() verificationToolSchema
+	Execute(context.Context, json.RawMessage) (string, error)
+}
+
+// verificationAgent owns the provider's tool conversation and returns the final assessment text.
+type verificationAgent interface {
+	Run(context.Context, string, []verificationTool) (string, error)
+}
+
+type aiConfig struct {
+	Provider      string
+	Model         string
+	BaseURL       string
+	APIKey        string
+	ProjectID     string
+	Location      string
+	MaxIterations int
+	MaxTokens     int
+	ContextTokens int
+	Timeout       time.Duration
+}
+
+// Input includes cache reads and writes for both protocols. Pointers preserve
+// the distinction between an unreported cache counter and a reported zero.
+type verificationTokenUsage struct {
+	Input, Output         int64
+	CacheRead, CacheWrite *int64
+}
+
+type verificationUsageLog struct {
+	progress                                     func(string)
+	requests, reports, readReports, writeReports int
+	total                                        verificationTokenUsage
+}
+
+func tokenCount(value *int64) string {
+	if value == nil {
+		return "unreported"
+	}
+	return strconv.FormatInt(*value, 10)
+}
+
+func (u *verificationUsageLog) record(usage *verificationTokenUsage) {
+	if usage == nil {
+		toolProgress(u.progress, fmt.Sprintf("[ai] Usage request=%d: unavailable (provider did not report complete usage)", u.requests))
+		return
+	}
+	u.reports++
+	u.total.Input += usage.Input
+	u.total.Output += usage.Output
+	if usage.CacheRead != nil {
+		u.readReports++
+		if u.total.CacheRead == nil {
+			u.total.CacheRead = new(int64)
+		}
+		*u.total.CacheRead += *usage.CacheRead
+	}
+	if usage.CacheWrite != nil {
+		u.writeReports++
+		if u.total.CacheWrite == nil {
+			u.total.CacheWrite = new(int64)
+		}
+		*u.total.CacheWrite += *usage.CacheWrite
+	}
+	uncached := "unreported"
+	if usage.CacheRead != nil && usage.CacheWrite != nil {
+		uncached = strconv.FormatInt(usage.Input-*usage.CacheRead-*usage.CacheWrite, 10)
+	}
+	toolProgress(u.progress, fmt.Sprintf("[ai] Usage request=%d: input=%d output=%d cache_read=%s cache_write=%s uncached=%s",
+		u.requests, usage.Input, usage.Output, tokenCount(usage.CacheRead), tokenCount(usage.CacheWrite), uncached))
+}
+
+func (u *verificationUsageLog) summary() {
+	if u.reports == 0 {
+		toolProgress(u.progress, fmt.Sprintf("[ai] Usage total: unavailable (requests=%d usage_reports=0)", u.requests))
+		return
+	}
+	toolProgress(u.progress, fmt.Sprintf("[ai] Usage reported totals: input=%d output=%d cache_read=%s cache_write=%s requests=%d usage_reports=%d cache_read_reports=%d cache_write_reports=%d",
+		u.total.Input, u.total.Output, tokenCount(u.total.CacheRead), tokenCount(u.total.CacheWrite), u.requests, u.reports, u.readReports, u.writeReports))
+}
+
+func anthropicTokenUsage(usage anthropic.BetaUsage) *verificationTokenUsage {
+	// Anthropic input_tokens excludes both cache categories, so all three
+	// input counters are needed before reporting a comparable input total.
+	if !usage.JSON.InputTokens.Valid() || !usage.JSON.OutputTokens.Valid() ||
+		!usage.JSON.CacheReadInputTokens.Valid() || !usage.JSON.CacheCreationInputTokens.Valid() {
+		return nil
+	}
+	result := &verificationTokenUsage{Input: usage.InputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens, Output: usage.OutputTokens}
+	if usage.JSON.CacheReadInputTokens.Valid() {
+		result.CacheRead = &usage.CacheReadInputTokens
+	}
+	if usage.JSON.CacheCreationInputTokens.Valid() {
+		result.CacheWrite = &usage.CacheCreationInputTokens
+	}
+	return result
+}
+
+type compatibleUsage struct {
+	PromptTokens     *int64 `json:"prompt_tokens"`
+	CompletionTokens *int64 `json:"completion_tokens"`
+	PromptDetails    struct {
+		CachedTokens     *int64 `json:"cached_tokens"`
+		CacheWriteTokens *int64 `json:"cache_write_tokens"`
+	} `json:"prompt_tokens_details"`
+}
+
+func (usage *compatibleUsage) normalized() *verificationTokenUsage {
+	if usage == nil || usage.PromptTokens == nil || usage.CompletionTokens == nil {
+		return nil
+	}
+	return &verificationTokenUsage{Input: *usage.PromptTokens, Output: *usage.CompletionTokens, CacheRead: usage.PromptDetails.CachedTokens, CacheWrite: usage.PromptDetails.CacheWriteTokens}
+}
+
+func loadAIConfig() (aiConfig, bool, error) {
+	cfg := aiConfig{MaxIterations: 20, MaxTokens: 16384, ContextTokens: 131072, Timeout: 10 * time.Minute}
+	if os.Getenv("GVS_AI") != "1" {
+		return cfg, false, nil
+	}
+	cfg.Provider = strings.ToLower(strings.TrimSpace(os.Getenv("GVS_AI_PROVIDER")))
+	cfg.Model = strings.TrimSpace(os.Getenv("GVS_AI_MODEL"))
+	cfg.APIKey = os.Getenv("GVS_AI_API_KEY")
+	cfg.BaseURL = strings.TrimRight(strings.TrimSpace(os.Getenv("GVS_AI_BASE_URL")), "/")
+	cfg.ProjectID = strings.TrimSpace(os.Getenv("GVS_AI_PROJECT_ID"))
+	cfg.Location = strings.TrimSpace(os.Getenv("GVS_AI_LOCATION"))
+	for name, target := range map[string]*int{
+		"GVS_AI_MAX_ITERATIONS": &cfg.MaxIterations,
+		"GVS_AI_MAX_TOKENS":     &cfg.MaxTokens,
+		"GVS_AI_CONTEXT_TOKENS": &cfg.ContextTokens,
+	} {
+		if value := os.Getenv(name); value != "" {
+			n, err := strconv.Atoi(value)
+			if err != nil || n <= 0 {
+				return cfg, true, fmt.Errorf("%s must be a positive integer", name)
+			}
+			*target = n
+		}
+	}
+	if cfg.ContextTokens <= cfg.MaxTokens+8192 {
+		return cfg, true, fmt.Errorf("GVS_AI_CONTEXT_TOKENS must exceed GVS_AI_MAX_TOKENS by more than 8192")
+	}
+	if value := os.Getenv("GVS_AI_TIMEOUT"); value != "" {
+		timeout, err := time.ParseDuration(value)
+		if err != nil || timeout <= 0 {
+			return cfg, true, fmt.Errorf("GVS_AI_TIMEOUT must be a positive duration, e.g. 10m")
+		}
+		cfg.Timeout = timeout
+	}
+	if cfg.Model == "" {
+		return cfg, true, fmt.Errorf("GVS_AI_MODEL is required")
+	}
+	switch cfg.Provider {
+	case "anthropic-vertex":
+		if cfg.ProjectID == "" {
+			return cfg, true, fmt.Errorf("GVS_AI_PROJECT_ID is required for anthropic-vertex")
+		}
+		if cfg.Location == "" {
+			cfg.Location = "global"
+		}
+	case "openai-compatible":
+		if cfg.BaseURL == "" {
+			cfg.BaseURL = "https://api.openai.com/v1"
+		}
+		u, err := url.Parse(cfg.BaseURL)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return cfg, true, fmt.Errorf("GVS_AI_BASE_URL must be an HTTP(S) base URL without credentials, query, or fragment")
+		}
+		if u.Hostname() == "api.openai.com" && cfg.APIKey == "" {
+			return cfg, true, fmt.Errorf("GVS_AI_API_KEY is required for api.openai.com")
+		}
+	default:
+		return cfg, true, fmt.Errorf("GVS_AI_PROVIDER must be anthropic-vertex or openai-compatible")
+	}
+	return cfg, true, nil
+}
+
+func newAgent(ctx context.Context, cfg aiConfig, progress func(string)) verificationAgent {
+	if cfg.Provider == "anthropic-vertex" {
+		return newAnthropicAgent(ctx, cfg, progress)
+	}
+	return &compatibleAgent{client: &http.Client{Timeout: cfg.Timeout}, cfg: cfg, progress: progress}
+}
+
+func logAIStatus(cfg aiConfig, enabled bool, err error, progress func(string)) {
+	if err != nil {
+		toolProgress(progress, fmt.Sprintf("AI verification: configuration error: %v", err))
+		return
+	}
+	if !enabled {
+		toolProgress(progress, "AI verification: disabled (set GVS_AI=1 to enable)")
+		return
+	}
+	toolProgress(progress, fmt.Sprintf("AI verification: enabled (provider=%s, model=%s, max_iterations=%d)", cfg.Provider, cfg.Model, cfg.MaxIterations))
+}
+
+const finalAssessmentPrompt = "You have reached the investigation limit. Stop using tools and respond with your final JSON assessment, including graph_analysis, dynamic_analysis, and uncertainties. Give every supplied reflection risk an explicit supported, ruled_out, or unresolved disposition. If critical evidence is missing or truncated, return IsVulnerable=unknown and explain what could not be established. The investigation limit is not evidence that the repository is safe."
+
+func executeTool(ctx context.Context, tools []verificationTool, name string, input json.RawMessage, progress func(string)) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	toolProgress(progress, fmt.Sprintf("[ai] tool_call %s(%s)", name, input))
+	if !json.Valid(input) {
+		return "", fmt.Errorf("invalid JSON arguments for tool %q", name)
+	}
+	for _, tool := range tools {
+		if tool.Name() == name {
+			output, err := tool.Execute(ctx, input)
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			if err != nil {
+				err = fmt.Errorf("%s", boundedVerificationText(err.Error(), maxToolResultBytes-7, "\n[Tool error truncated.]"))
+			}
+			bounded := boundedVerificationText(output, maxToolResultBytes, "\n[Tool output truncated. Narrow the query or use read_file with a later start_line; omitted evidence may change the verdict.]\n")
+			if len(bounded) != len(output) {
+				toolProgress(progress, fmt.Sprintf("[ai] %s output bounded: %d -> %d bytes", name, len(output), len(bounded)))
+			}
+			return bounded, err
+		}
+	}
+	return "", fmt.Errorf("unknown tool %q", name)
+}
+
+type anthropicAgent struct {
+	client   anthropic.Client
+	cfg      aiConfig
+	progress func(string)
+}
+
+func newAnthropicAgent(ctx context.Context, cfg aiConfig, progress func(string)) verificationAgent {
+	client := anthropic.NewClient(vertex.WithGoogleAuth(ctx, cfg.Location, cfg.ProjectID))
+	return &anthropicAgent{client: client, cfg: cfg, progress: progress}
+}
+
+// Serialized request bytes provide a conservative input-token estimate for the
+// supported protocols. This includes schemas and every history message. Reserve
+// output tokens and framing margin; configure the actual model context limit.
+func checkVerificationContext(cfg aiConfig, request any, headroom int) error {
+	limit := cfg.ContextTokens
+	if limit == 0 {
+		limit = 131072
+	}
+	output := cfg.MaxTokens
+	if output == 0 {
+		output = 16384
+	}
+	data, err := json.Marshal(request)
+	if err != nil {
+		return err
+	}
+	budget := limit - output - 4096 - headroom
+	if len(data) > budget {
+		return fmt.Errorf("AI context budget reached: request=%d bytes, conservative input budget=%d; investigation remains incomplete", len(data), budget)
+	}
+	return nil
+}
+
+func (a *anthropicAgent) Run(ctx context.Context, prompt string, tools []verificationTool) (string, error) {
+	usageLog := verificationUsageLog{progress: a.progress}
+	defer usageLog.summary()
+	params := anthropic.BetaMessageNewParams{
+		Model:     a.cfg.Model,
+		MaxTokens: int64(a.cfg.MaxTokens),
+		Messages:  []anthropic.BetaMessageParam{anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(prompt))},
+	}
+	for _, tool := range tools {
+		schema := tool.InputSchema()
+		params.Tools = append(params.Tools, anthropic.BetaToolUnionParam{OfTool: &anthropic.BetaToolParam{
+			Name: tool.Name(), Description: anthropic.String(tool.Description()),
+			InputSchema: anthropic.BetaToolInputSchemaParam{Properties: schema.Properties, Required: schema.Required},
+		}})
+	}
+	// Each investigation turn may call several tools. One additional turn is
+	// reserved for the final assessment, with tool use disabled.
+	for iteration := 0; iteration <= a.cfg.MaxIterations; iteration++ {
+		final := iteration == a.cfg.MaxIterations || checkVerificationContext(a.cfg, params, maxToolResultBytes) != nil
+		if final {
+			params.Messages = append(params.Messages, anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(finalAssessmentPrompt)))
+			params.ToolChoice = anthropic.BetaToolChoiceUnionParam{OfNone: &anthropic.BetaToolChoiceNoneParam{}}
+		}
+		toolProgress(a.progress, fmt.Sprintf("[ai] Iteration %d", iteration+1))
+		if err := checkVerificationContext(a.cfg, params, 0); err != nil {
+			return "", err
+		}
+		usageLog.requests++
+		message, err := a.client.Beta.Messages.New(ctx, params)
+		if err != nil {
+			return "", err
+		}
+		usageLog.record(anthropicTokenUsage(message.Usage))
+		if message.StopReason == anthropic.BetaStopReasonMaxTokens {
+			return "", fmt.Errorf("AI response truncated (max_tokens reached)")
+		}
+		params.Messages = append(params.Messages, message.ToParam())
+		var text strings.Builder
+		var results []anthropic.BetaContentBlockParamUnion
+		for _, block := range message.Content {
+			switch block.Type {
+			case "text":
+				text.WriteString(block.Text)
+			case "tool_use":
+				if final {
+					return "", fmt.Errorf("AI requested tools after the investigation limit")
+				}
+				output, err := executeTool(ctx, tools, block.Name, block.Input, a.progress)
+				if ctx.Err() != nil {
+					return "", ctx.Err()
+				}
+				if err != nil {
+					output = "error: " + err.Error()
+				}
+				results = append(results, anthropic.NewBetaToolResultBlock(block.ID, output, err != nil))
+			}
+		}
+		if len(results) == 0 {
+			if message.StopReason != anthropic.BetaStopReasonEndTurn || strings.TrimSpace(text.String()) == "" {
+				return "", fmt.Errorf("AI returned no complete assessment (stop_reason=%s)", message.StopReason)
+			}
+			return text.String(), nil
+		}
+		params.Messages = append(params.Messages, anthropic.NewBetaUserMessage(results...))
+	}
+	return "", fmt.Errorf("AI investigation limit reached without an assessment")
+}
+
+// compatibleAgent uses the Chat Completions function-calling protocol.
+// https://developers.openai.com/api/docs/guides/function-calling
+type compatibleAgent struct {
+	client   *http.Client
+	cfg      aiConfig
+	progress func(string)
+}
+
+type compatibleFunction struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	Parameters  verificationToolSchema `json:"parameters"`
+}
+
+type compatibleTool struct {
+	Type     string             `json:"type"`
+	Function compatibleFunction `json:"function"`
+}
+
+type compatibleRequest struct {
+	Model               string           `json:"model"`
+	Messages            []any            `json:"messages"`
+	Tools               []compatibleTool `json:"tools,omitempty"`
+	ToolChoice          string           `json:"tool_choice,omitempty"`
+	MaxCompletionTokens int              `json:"max_completion_tokens"`
+}
+
+type compatibleMessage struct {
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+	Refusal   string `json:"refusal"`
+	ToolCalls []struct {
+		ID       string `json:"id"`
+		Type     string `json:"type"`
+		Function struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function"`
+	} `json:"tool_calls"`
+}
+
+func (a *compatibleAgent) Run(ctx context.Context, prompt string, tools []verificationTool) (string, error) {
+	usageLog := verificationUsageLog{progress: a.progress}
+	defer usageLog.summary()
+	request := compatibleRequest{
+		Model: a.cfg.Model, MaxCompletionTokens: a.cfg.MaxTokens,
+		Messages: []any{map[string]string{"role": "user", "content": prompt}},
+	}
+	for _, tool := range tools {
+		request.Tools = append(request.Tools, compatibleTool{Type: "function", Function: compatibleFunction{
+			Name: tool.Name(), Description: tool.Description(), Parameters: tool.InputSchema(),
+		}})
+	}
+	for iteration := 0; iteration <= a.cfg.MaxIterations; iteration++ {
+		final := iteration == a.cfg.MaxIterations || checkVerificationContext(a.cfg, request, maxToolResultBytes) != nil
+		if final {
+			request.ToolChoice = "none"
+			request.Messages = append(request.Messages, map[string]string{"role": "user", "content": finalAssessmentPrompt})
+		}
+		toolProgress(a.progress, fmt.Sprintf("[ai] Iteration %d", iteration+1))
+		if err := checkVerificationContext(a.cfg, request, 0); err != nil {
+			return "", err
+		}
+		usageLog.requests++
+		raw, reason, usage, err := a.complete(ctx, request)
+		if usage != nil {
+			usageLog.record(usage)
+		}
+		if err != nil {
+			return "", err
+		}
+		if usage == nil {
+			usageLog.record(nil)
+		}
+		if reason != "stop" && reason != "tool_calls" {
+			return "", fmt.Errorf("AI returned no complete assessment (finish_reason=%s)", reason)
+		}
+		var message compatibleMessage
+		if err := json.Unmarshal(raw, &message); err != nil {
+			return "", fmt.Errorf("invalid AI message: %w", err)
+		}
+		if message.Role != "assistant" || message.Refusal != "" {
+			return "", fmt.Errorf("AI returned an invalid message or refused verification")
+		}
+		if len(message.ToolCalls) == 0 {
+			if reason != "stop" || strings.TrimSpace(message.Content) == "" {
+				return "", fmt.Errorf("AI returned an empty assessment")
+			}
+			return message.Content, nil
+		}
+		if final {
+			return "", fmt.Errorf("AI requested tools after the investigation limit")
+		}
+		// Keep the original assistant message, including provider-specific state.
+		request.Messages = append(request.Messages, raw)
+		for _, call := range message.ToolCalls {
+			if call.ID == "" || call.Type != "function" {
+				return "", fmt.Errorf("AI returned an invalid function call")
+			}
+			output, err := executeTool(ctx, tools, call.Function.Name, json.RawMessage(call.Function.Arguments), a.progress)
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			if err != nil {
+				output = "error: " + err.Error()
+			}
+			request.Messages = append(request.Messages, map[string]string{
+				"role": "tool", "tool_call_id": call.ID, "content": output,
+			})
+		}
+	}
+	return "", fmt.Errorf("AI investigation limit reached without an assessment")
+}
+
+func (a *compatibleAgent) complete(ctx context.Context, request compatibleRequest) (json.RawMessage, string, *verificationTokenUsage, error) {
+	body, err := json.Marshal(request)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.cfg.BaseURL+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return nil, "", nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if a.cfg.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+a.cfg.APIKey)
+	}
+	response, err := a.client.Do(req)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, "", nil, fmt.Errorf("AI endpoint returned HTTP %d", response.StatusCode)
+	}
+	var result struct {
+		Usage   *compatibleUsage `json:"usage"`
+		Choices []struct {
+			Message      json.RawMessage `json:"message"`
+			FinishReason string          `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 8<<20)).Decode(&result); err != nil {
+		return nil, "", nil, fmt.Errorf("invalid AI response: %w", err)
+	}
+	if len(result.Choices) != 1 {
+		return nil, "", result.Usage.normalized(), fmt.Errorf("AI endpoint must return one response choice")
+	}
+	return result.Choices[0].Message, result.Choices[0].FinishReason, result.Usage.normalized(), nil
+}
+
+// --- Repository tools ---
 
 func safePath(repoDir, relPath string) (string, error) {
 	cleaned := filepath.Clean(relPath)
@@ -356,10 +1659,8 @@ func safePath(repoDir, relPath string) (string, error) {
 	return filepath.Join(repoDir, cleaned), nil
 }
 
-func textResult(text string) ([]anthropic.BetaToolResultBlockParamContentUnion, error) {
-	return []anthropic.BetaToolResultBlockParamContentUnion{
-		{OfText: &anthropic.BetaTextBlockParam{Text: text}},
-	}, nil
+func textResult(text string) (string, error) {
+	return text, nil
 }
 
 func toolProgress(pf func(string), msg string) {
@@ -374,10 +1675,13 @@ type grepCodeTool struct {
 	progressFunc func(string)
 }
 
-func (t *grepCodeTool) Name() string        { return "grep_code" }
-func (t *grepCodeTool) Description() string  { return "Search for a regex pattern in the repository. Returns matching lines with file paths and line numbers." }
-func (t *grepCodeTool) InputSchema() anthropic.BetaToolInputSchemaParam {
-	return anthropic.BetaToolInputSchemaParam{
+func (t *grepCodeTool) Name() string { return "grep_code" }
+func (t *grepCodeTool) Description() string {
+	return "Search for a regex pattern in the repository. Returns matching lines with file paths and line numbers."
+}
+func (t *grepCodeTool) InputSchema() verificationToolSchema {
+	return verificationToolSchema{
+		Type: "object",
 		Properties: map[string]any{
 			"pattern": map[string]any{"type": "string", "description": "Regex pattern to search for"},
 			"glob":    map[string]any{"type": "string", "description": "File glob filter, e.g. *.go"},
@@ -386,7 +1690,7 @@ func (t *grepCodeTool) InputSchema() anthropic.BetaToolInputSchemaParam {
 	}
 }
 
-func (t *grepCodeTool) Execute(ctx context.Context, input json.RawMessage) ([]anthropic.BetaToolResultBlockParamContentUnion, error) {
+func (t *grepCodeTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	var params struct {
 		Pattern string `json:"pattern"`
 		Glob    string `json:"glob"`
@@ -410,7 +1714,7 @@ func (t *grepCodeTool) Execute(ctx context.Context, input json.RawMessage) ([]an
 	if len(lines) > 100 {
 		result = strings.Join(lines[:100], "\n") + "\n... (truncated)"
 	}
-	toolProgress(t.progressFunc, fmt.Sprintf("[claude] grep_code result: %d lines", len(lines)))
+	toolProgress(t.progressFunc, fmt.Sprintf("[ai] grep_code result: %d lines", len(lines)))
 	return textResult(result)
 }
 
@@ -420,10 +1724,13 @@ type readFileTool struct {
 	progressFunc func(string)
 }
 
-func (t *readFileTool) Name() string        { return "read_file" }
-func (t *readFileTool) Description() string  { return "Read a file from the repository. Optionally specify start and end line numbers." }
-func (t *readFileTool) InputSchema() anthropic.BetaToolInputSchemaParam {
-	return anthropic.BetaToolInputSchemaParam{
+func (t *readFileTool) Name() string { return "read_file" }
+func (t *readFileTool) Description() string {
+	return "Read a file from the repository. Optionally specify start and end line numbers."
+}
+func (t *readFileTool) InputSchema() verificationToolSchema {
+	return verificationToolSchema{
+		Type: "object",
 		Properties: map[string]any{
 			"path":       map[string]any{"type": "string", "description": "File path relative to repo root"},
 			"start_line": map[string]any{"type": "integer", "description": "Start line (1-based, optional)"},
@@ -433,7 +1740,7 @@ func (t *readFileTool) InputSchema() anthropic.BetaToolInputSchemaParam {
 	}
 }
 
-func (t *readFileTool) Execute(ctx context.Context, input json.RawMessage) ([]anthropic.BetaToolResultBlockParamContentUnion, error) {
+func (t *readFileTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	var params struct {
 		Path      string `json:"path"`
 		StartLine int    `json:"start_line"`
@@ -468,7 +1775,7 @@ func (t *readFileTool) Execute(ctx context.Context, input json.RawMessage) ([]an
 	for i := start; i < end && i < len(lines); i++ {
 		b.WriteString(fmt.Sprintf("%d|%s\n", i+1, lines[i]))
 	}
-	toolProgress(t.progressFunc, fmt.Sprintf("[claude] read_file result: %s (%d lines)", params.Path, end-start))
+	toolProgress(t.progressFunc, fmt.Sprintf("[ai] read_file result: %s (%d lines)", params.Path, end-start))
 	return textResult(b.String())
 }
 
@@ -478,10 +1785,13 @@ type listFilesTool struct {
 	progressFunc func(string)
 }
 
-func (t *listFilesTool) Name() string        { return "list_files" }
-func (t *listFilesTool) Description() string  { return "List files in a directory of the repository. Skips vendor/ and .git/." }
-func (t *listFilesTool) InputSchema() anthropic.BetaToolInputSchemaParam {
-	return anthropic.BetaToolInputSchemaParam{
+func (t *listFilesTool) Name() string { return "list_files" }
+func (t *listFilesTool) Description() string {
+	return "List files in a directory of the repository. Skips vendor/ and .git/."
+}
+func (t *listFilesTool) InputSchema() verificationToolSchema {
+	return verificationToolSchema{
+		Type: "object",
 		Properties: map[string]any{
 			"path": map[string]any{"type": "string", "description": "Directory path relative to repo root (default: root)"},
 			"glob": map[string]any{"type": "string", "description": "Glob pattern to filter files, e.g. **/*.go"},
@@ -489,7 +1799,7 @@ func (t *listFilesTool) InputSchema() anthropic.BetaToolInputSchemaParam {
 	}
 }
 
-func (t *listFilesTool) Execute(ctx context.Context, input json.RawMessage) ([]anthropic.BetaToolResultBlockParamContentUnion, error) {
+func (t *listFilesTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	var params struct {
 		Path string `json:"path"`
 		Glob string `json:"glob"`
@@ -533,7 +1843,7 @@ func (t *listFilesTool) Execute(ctx context.Context, input json.RawMessage) ([]a
 	if result == "" {
 		result = "No files found."
 	}
-	toolProgress(t.progressFunc, fmt.Sprintf("[claude] list_files result: %d files", len(files)))
+	toolProgress(t.progressFunc, fmt.Sprintf("[ai] list_files result: %d files", len(files)))
 	return textResult(result)
 }
 
@@ -545,10 +1855,11 @@ type findImplementationsTool struct {
 
 func (t *findImplementationsTool) Name() string { return "find_implementations" }
 func (t *findImplementationsTool) Description() string {
-	return "Given an interface type name (e.g. \"io.Writer\"), find all concrete types in the program that implement it and report whether each is instantiated (used as an interface value). Helps detect CHA false positives where a type implements an interface but is never allocated."
+	return "Given an interface type name (e.g. \"io.Writer\"), find all concrete types in the program that implement it and report whether each is present in SSA RuntimeTypes. Presence does not prove allocation or reachability; absence does not exclude reflection or unsafe usage. Use source evidence to investigate possible spurious interface edges."
 }
-func (t *findImplementationsTool) InputSchema() anthropic.BetaToolInputSchemaParam {
-	return anthropic.BetaToolInputSchemaParam{
+func (t *findImplementationsTool) InputSchema() verificationToolSchema {
+	return verificationToolSchema{
+		Type: "object",
 		Properties: map[string]any{
 			"interface_type": map[string]any{"type": "string", "description": "Full interface type name, e.g. \"io.Writer\" or \"golang.org/x/net/idna.Transformer\""},
 		},
@@ -556,7 +1867,7 @@ func (t *findImplementationsTool) InputSchema() anthropic.BetaToolInputSchemaPar
 	}
 }
 
-func (t *findImplementationsTool) Execute(ctx context.Context, input json.RawMessage) ([]anthropic.BetaToolResultBlockParamContentUnion, error) {
+func (t *findImplementationsTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	var params struct {
 		InterfaceType string `json:"interface_type"`
 	}
@@ -623,9 +1934,9 @@ func (t *findImplementationsTool) Execute(ctx context.Context, input json.RawMes
 
 			found++
 			instantiated := runtimeTypes[T.String()] || runtimeTypes[ptrT.String()]
-			status := "instantiated: NO"
+			status := "runtime_type: absent (not proof of unreachability)"
 			if instantiated {
-				status = "instantiated: yes"
+				status = "runtime_type: present (not proof of allocation or reachability)"
 			}
 
 			loc := "unknown"
@@ -650,7 +1961,7 @@ func (t *findImplementationsTool) Execute(ctx context.Context, input json.RawMes
 		b.WriteString("  (no concrete types found implementing this interface)\n")
 	}
 
-	toolProgress(t.progressFunc, fmt.Sprintf("[claude] find_implementations result: %d types for %s", found, params.InterfaceType))
+	toolProgress(t.progressFunc, fmt.Sprintf("[ai] find_implementations result: %d types for %s", found, params.InterfaceType))
 	return textResult(b.String())
 }
 
@@ -673,10 +1984,11 @@ type findCallersTool struct {
 
 func (t *findCallersTool) Name() string { return "find_callers" }
 func (t *findCallersTool) Description() string {
-	return "Given a function or method name, find all callers in the call graph using reverse traversal (up to N hops). Returns the chain of callers from the target back toward entry points. Useful for detecting false negatives when the scanner found no forward path."
+	return "Given a function or method name, find all callers in the call graph using reverse traversal (up to N hops). Returns the chain of callers from the target back toward entry points. Queries only existing graph edges; use source inspection to discover omitted reflection or unsafe edges. Name matching is substring-based; confirm the exact affected package and symbol."
 }
-func (t *findCallersTool) InputSchema() anthropic.BetaToolInputSchemaParam {
-	return anthropic.BetaToolInputSchemaParam{
+func (t *findCallersTool) InputSchema() verificationToolSchema {
+	return verificationToolSchema{
+		Type: "object",
 		Properties: map[string]any{
 			"symbol":    map[string]any{"type": "string", "description": "Function/method name to search for, e.g. \"golang.org/x/net/html.Parse\" or \"(*net/http.Client).Do\""},
 			"max_depth": map[string]any{"type": "integer", "description": "Max hops backward (default: 5)"},
@@ -685,7 +1997,7 @@ func (t *findCallersTool) InputSchema() anthropic.BetaToolInputSchemaParam {
 	}
 }
 
-func (t *findCallersTool) Execute(ctx context.Context, input json.RawMessage) ([]anthropic.BetaToolResultBlockParamContentUnion, error) {
+func (t *findCallersTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	var params struct {
 		Symbol   string `json:"symbol"`
 		MaxDepth int    `json:"max_depth"`
@@ -719,7 +2031,7 @@ func (t *findCallersTool) Execute(ctx context.Context, input json.RawMessage) ([
 	}
 
 	if len(targets) == 0 {
-		return textResult(fmt.Sprintf("No nodes matching %q found in the call graph.", params.Symbol))
+		return textResult(fmt.Sprintf("No nodes matching %q found in this module graph. This does not rule out a source-level dynamic call.", params.Symbol))
 	}
 
 	var b strings.Builder
@@ -806,7 +2118,7 @@ func (t *findCallersTool) Execute(ctx context.Context, input json.RawMessage) ([
 		}
 	}
 
-	toolProgress(t.progressFunc, fmt.Sprintf("[claude] find_callers result: %d callers for %s", totalCallers, params.Symbol))
+	toolProgress(t.progressFunc, fmt.Sprintf("[ai] find_callers result: %d callers for %s", totalCallers, params.Symbol))
 	return textResult(b.String())
 }
 
@@ -820,8 +2132,9 @@ func (t *checkModuleTool) Name() string { return "check_module" }
 func (t *checkModuleTool) Description() string {
 	return "Check how a Go package is resolved (go.mod replace directives, vendor), verify symbol definitions in vendor, and find actual symbol calls in repo code. Use instead of grep_code for checking vulnerable symbol usage."
 }
-func (t *checkModuleTool) InputSchema() anthropic.BetaToolInputSchemaParam {
-	return anthropic.BetaToolInputSchemaParam{
+func (t *checkModuleTool) InputSchema() verificationToolSchema {
+	return verificationToolSchema{
+		Type: "object",
 		Properties: map[string]any{
 			"package": map[string]any{"type": "string", "description": "Full package import path, e.g. golang.org/x/net/html"},
 			"symbols": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Vulnerable symbol names to check, e.g. [\"Parse\", \"ParseFragment\"]"},
@@ -830,7 +2143,7 @@ func (t *checkModuleTool) InputSchema() anthropic.BetaToolInputSchemaParam {
 	}
 }
 
-func (t *checkModuleTool) Execute(ctx context.Context, input json.RawMessage) ([]anthropic.BetaToolResultBlockParamContentUnion, error) {
+func (t *checkModuleTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	var params struct {
 		Package string   `json:"package"`
 		Symbols []string `json:"symbols"`
@@ -991,7 +2304,7 @@ func (t *checkModuleTool) Execute(ctx context.Context, input json.RawMessage) ([
 		}
 	}
 
-	toolProgress(t.progressFunc, fmt.Sprintf("[claude] check_module result: pkg=%s symbols=%v imports=%d", params.Package, params.Symbols, len(importingFiles)))
+	toolProgress(t.progressFunc, fmt.Sprintf("[ai] check_module result: pkg=%s symbols=%v imports=%d", params.Package, params.Symbols, len(importingFiles)))
 	return textResult(b.String())
 }
 
@@ -1006,13 +2319,14 @@ func (t *checkGoVersionTool) Name() string { return "check_go_version" }
 func (t *checkGoVersionTool) Description() string {
 	return "Check the Go toolchain version from go.mod and compare against fixed versions for stdlib CVE packages. For stdlib CVEs, this may be the complete answer."
 }
-func (t *checkGoVersionTool) InputSchema() anthropic.BetaToolInputSchemaParam {
-	return anthropic.BetaToolInputSchemaParam{
+func (t *checkGoVersionTool) InputSchema() verificationToolSchema {
+	return verificationToolSchema{
+		Type:       "object",
 		Properties: map[string]any{},
 	}
 }
 
-func (t *checkGoVersionTool) Execute(ctx context.Context, input json.RawMessage) ([]anthropic.BetaToolResultBlockParamContentUnion, error) {
+func (t *checkGoVersionTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	cmd := exec.CommandContext(ctx, "go", "mod", "edit", "-json")
 	cmd.Dir = t.repoDir
 	cmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off")
@@ -1052,7 +2366,7 @@ func (t *checkGoVersionTool) Execute(ctx context.Context, input json.RawMessage)
 		b.WriteString("No stdlib packages in AffectedImports.\n")
 	}
 
-	toolProgress(t.progressFunc, fmt.Sprintf("[claude] check_go_version result: Go %s, %d stdlib packages checked", goMod.Go, stdlibCount))
+	toolProgress(t.progressFunc, fmt.Sprintf("[ai] check_go_version result: Go %s, %d stdlib packages checked", goMod.Go, stdlibCount))
 	return textResult(b.String())
 }
 
@@ -1066,8 +2380,9 @@ func (t *isTestOnlyTool) Name() string { return "is_test_only" }
 func (t *isTestOnlyTool) Description() string {
 	return "Check if a Go file is test-only (test file or test package). Vulnerable code only in tests does not affect production."
 }
-func (t *isTestOnlyTool) InputSchema() anthropic.BetaToolInputSchemaParam {
-	return anthropic.BetaToolInputSchemaParam{
+func (t *isTestOnlyTool) InputSchema() verificationToolSchema {
+	return verificationToolSchema{
+		Type: "object",
 		Properties: map[string]any{
 			"file": map[string]any{"type": "string", "description": "File path relative to repo root"},
 		},
@@ -1075,7 +2390,7 @@ func (t *isTestOnlyTool) InputSchema() anthropic.BetaToolInputSchemaParam {
 	}
 }
 
-func (t *isTestOnlyTool) Execute(ctx context.Context, input json.RawMessage) ([]anthropic.BetaToolResultBlockParamContentUnion, error) {
+func (t *isTestOnlyTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	var params struct {
 		File string `json:"file"`
 	}
@@ -1094,7 +2409,7 @@ func (t *isTestOnlyTool) Execute(ctx context.Context, input json.RawMessage) ([]
 
 	if strings.HasSuffix(baseName, "_test.go") {
 		b.WriteString("Test-only: YES (filename ends with _test.go)\n")
-		toolProgress(t.progressFunc, fmt.Sprintf("[claude] is_test_only result: %s -> yes (test file)", params.File))
+		toolProgress(t.progressFunc, fmt.Sprintf("[ai] is_test_only result: %s -> yes (test file)", params.File))
 		return textResult(b.String())
 	}
 
@@ -1102,7 +2417,7 @@ func (t *isTestOnlyTool) Execute(ctx context.Context, input json.RawMessage) ([]
 	f, err := parser.ParseFile(fset, fullPath, nil, parser.PackageClauseOnly)
 	if err != nil {
 		b.WriteString(fmt.Sprintf("Test-only: UNKNOWN (parse error: %v)\n", err))
-		toolProgress(t.progressFunc, fmt.Sprintf("[claude] is_test_only result: %s -> unknown", params.File))
+		toolProgress(t.progressFunc, fmt.Sprintf("[ai] is_test_only result: %s -> unknown", params.File))
 		return textResult(b.String())
 	}
 
@@ -1111,7 +2426,7 @@ func (t *isTestOnlyTool) Execute(ctx context.Context, input json.RawMessage) ([]
 
 	if strings.HasSuffix(pkgName, "_test") {
 		b.WriteString("Test-only: YES (external test package)\n")
-		toolProgress(t.progressFunc, fmt.Sprintf("[claude] is_test_only result: %s -> yes (test package)", params.File))
+		toolProgress(t.progressFunc, fmt.Sprintf("[ai] is_test_only result: %s -> yes (test package)", params.File))
 		return textResult(b.String())
 	}
 
@@ -1131,7 +2446,7 @@ func (t *isTestOnlyTool) Execute(ctx context.Context, input json.RawMessage) ([]
 		b.WriteString("Test-only: NO (production code)\n")
 	}
 
-	toolProgress(t.progressFunc, fmt.Sprintf("[claude] is_test_only result: %s -> %v", params.File, !hasNonTest))
+	toolProgress(t.progressFunc, fmt.Sprintf("[ai] is_test_only result: %s -> %v", params.File, !hasNonTest))
 	return textResult(b.String())
 }
 
@@ -1145,8 +2460,9 @@ func (t *checkBuildTagsTool) Name() string { return "check_build_tags" }
 func (t *checkBuildTagsTool) Description() string {
 	return "Check for build constraints (//go:build and // +build tags) in a Go file. Helps determine if vulnerable code is conditionally compiled for specific platforms."
 }
-func (t *checkBuildTagsTool) InputSchema() anthropic.BetaToolInputSchemaParam {
-	return anthropic.BetaToolInputSchemaParam{
+func (t *checkBuildTagsTool) InputSchema() verificationToolSchema {
+	return verificationToolSchema{
+		Type: "object",
 		Properties: map[string]any{
 			"file": map[string]any{"type": "string", "description": "File path relative to repo root"},
 		},
@@ -1154,7 +2470,7 @@ func (t *checkBuildTagsTool) InputSchema() anthropic.BetaToolInputSchemaParam {
 	}
 }
 
-func (t *checkBuildTagsTool) Execute(ctx context.Context, input json.RawMessage) ([]anthropic.BetaToolResultBlockParamContentUnion, error) {
+func (t *checkBuildTagsTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	var params struct {
 		File string `json:"file"`
 	}
@@ -1198,7 +2514,7 @@ func (t *checkBuildTagsTool) Execute(ctx context.Context, input json.RawMessage)
 		}
 	}
 
-	toolProgress(t.progressFunc, fmt.Sprintf("[claude] check_build_tags result: %s -> %d constraints", params.File, len(constraints)))
+	toolProgress(t.progressFunc, fmt.Sprintf("[ai] check_build_tags result: %s -> %d constraints", params.File, len(constraints)))
 	return textResult(b.String())
 }
 
@@ -1212,13 +2528,14 @@ func (t *listEntryPointsTool) Name() string { return "list_entry_points" }
 func (t *listEntryPointsTool) Description() string {
 	return "List all entry points: main() and init() functions across the repository. Helps verify which code paths are reachable at runtime."
 }
-func (t *listEntryPointsTool) InputSchema() anthropic.BetaToolInputSchemaParam {
-	return anthropic.BetaToolInputSchemaParam{
+func (t *listEntryPointsTool) InputSchema() verificationToolSchema {
+	return verificationToolSchema{
+		Type:       "object",
 		Properties: map[string]any{},
 	}
 }
 
-func (t *listEntryPointsTool) Execute(ctx context.Context, input json.RawMessage) ([]anthropic.BetaToolResultBlockParamContentUnion, error) {
+func (t *listEntryPointsTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	var b strings.Builder
 	totalEntries := 0
 
@@ -1314,7 +2631,7 @@ func (t *listEntryPointsTool) Execute(ctx context.Context, input json.RawMessage
 		b.WriteString("  (none)\n")
 	}
 
-	toolProgress(t.progressFunc, fmt.Sprintf("[claude] list_entry_points result: %d main dirs, %d total entries", len(mainDirs), totalEntries))
+	toolProgress(t.progressFunc, fmt.Sprintf("[ai] list_entry_points result: %d main dirs, %d total entries", len(mainDirs), totalEntries))
 	return textResult(b.String())
 }
 
@@ -1328,8 +2645,9 @@ func (t *checkTransitiveDepsTool) Name() string { return "check_transitive_deps"
 func (t *checkTransitiveDepsTool) Description() string {
 	return "Check if a package is a direct or transitive dependency, show its version, and trace the import chain that brings it in."
 }
-func (t *checkTransitiveDepsTool) InputSchema() anthropic.BetaToolInputSchemaParam {
-	return anthropic.BetaToolInputSchemaParam{
+func (t *checkTransitiveDepsTool) InputSchema() verificationToolSchema {
+	return verificationToolSchema{
+		Type: "object",
 		Properties: map[string]any{
 			"package": map[string]any{"type": "string", "description": "Package or module path, e.g. golang.org/x/net/html"},
 		},
@@ -1337,7 +2655,7 @@ func (t *checkTransitiveDepsTool) InputSchema() anthropic.BetaToolInputSchemaPar
 	}
 }
 
-func (t *checkTransitiveDepsTool) Execute(ctx context.Context, input json.RawMessage) ([]anthropic.BetaToolResultBlockParamContentUnion, error) {
+func (t *checkTransitiveDepsTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	var params struct {
 		Package string `json:"package"`
 	}
@@ -1423,7 +2741,7 @@ func (t *checkTransitiveDepsTool) Execute(ctx context.Context, input json.RawMes
 		}
 	}
 
-	toolProgress(t.progressFunc, fmt.Sprintf("[claude] check_transitive_deps result: %s", params.Package))
+	toolProgress(t.progressFunc, fmt.Sprintf("[ai] check_transitive_deps result: %s", params.Package))
 	return textResult(b.String())
 }
 
@@ -1440,369 +2758,6 @@ func isEntryPointLike(node *callgraph.Node, repoModulePath string) bool {
 	}
 	if node.Func.Pkg.Pkg.Name() == "main" && ast.IsExported(name) {
 		return true
-	}
-	return false
-}
-
-func LogClaudeStatus(progressFunc func(string)) {
-	if os.Getenv("GVS_CLAUDE") != "1" {
-		toolProgress(progressFunc, "Claude verification: disabled (set GVS_CLAUDE=1 to enable)")
-		return
-	}
-	cfg, found := loadClaudeConfig()
-	if !found {
-		toolProgress(progressFunc, "Claude verification: disabled (missing ~/.claude.conf or CLAUDE_CODE_USE_VERTEX!=1)")
-		return
-	}
-	toolProgress(progressFunc, fmt.Sprintf("Claude verification: enabled (project=%s, region=%s, model=%s, max_iterations=%d)",
-		cfg.ProjectID, cfg.Location, cfg.Model, cfg.MaxIterations))
-
-	r := &Result{ScanConfig: ScanConfig{ProgressFunc: progressFunc}}
-	if _, ok := loadSkillPrompt(r); ok {
-		toolProgress(progressFunc, "Claude skill file: loaded")
-	} else {
-		toolProgress(progressFunc, "Claude skill file: not found")
-	}
-}
-
-func loadClaudeConfig() (claudeConfig, bool) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return claudeConfig{}, false
-	}
-
-	confPath := filepath.Join(homeDir, ".claude.conf")
-	file, err := os.Open(confPath)
-	if err != nil {
-		return claudeConfig{}, false
-	}
-	defer file.Close()
-
-	cfg := claudeConfig{
-		Location:      "global",
-		Model:         "claude-sonnet-4-20250514",
-		MaxIterations: 20,
-	}
-
-	var useVertex bool
-
-	sc := bufio.NewScanner(file)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if strings.HasPrefix(line, "CLAUDE_CODE_USE_VERTEX=") {
-			useVertex = strings.TrimPrefix(line, "CLAUDE_CODE_USE_VERTEX=") == "1"
-		} else if strings.HasPrefix(line, "ANTHROPIC_VERTEX_PROJECT_ID=") {
-			cfg.ProjectID = strings.TrimPrefix(line, "ANTHROPIC_VERTEX_PROJECT_ID=")
-		} else if strings.HasPrefix(line, "CLOUD_ML_REGION=") {
-			cfg.Location = strings.TrimPrefix(line, "CLOUD_ML_REGION=")
-		} else if strings.HasPrefix(line, "VERTEX_MODEL=") {
-			cfg.Model = strings.TrimPrefix(line, "VERTEX_MODEL=")
-		} else if strings.HasPrefix(line, "MAX_ITERATIONS=") {
-			if v, err := strconv.Atoi(strings.TrimPrefix(line, "MAX_ITERATIONS=")); err == nil && v > 0 {
-				cfg.MaxIterations = v
-			}
-		}
-	}
-	if err := sc.Err(); err != nil {
-		return claudeConfig{}, false
-	}
-
-	if !useVertex || cfg.ProjectID == "" {
-		return claudeConfig{}, false
-	}
-
-	return cfg, true
-}
-
-func loadSkillPrompt(result *Result) (string, bool) {
-	// 1. Environment variable override
-	if dir := os.Getenv("GVS_SKILLS_DIR"); dir != "" {
-		path := filepath.Join(dir, "verify-scan.md")
-		if data, err := os.ReadFile(path); err == nil {
-			result.progress(fmt.Sprintf("[claude] Loading skill: %s", path))
-			return string(data), true
-		}
-	}
-
-	// 2. Relative to the binary location
-	if exe, err := os.Executable(); err == nil {
-		binDir := filepath.Dir(exe)
-		path := filepath.Join(binDir, "..", "skills", "verify-scan.md")
-		if data, err := os.ReadFile(path); err == nil {
-			result.progress(fmt.Sprintf("[claude] Loading skill: %s", path))
-			return string(data), true
-		}
-		// Also check same directory as binary (container layout)
-		path = filepath.Join(binDir, "skills", "verify-scan.md")
-		if data, err := os.ReadFile(path); err == nil {
-			result.progress(fmt.Sprintf("[claude] Loading skill: %s", path))
-			return string(data), true
-		}
-	}
-
-	// 3. User install location
-	if homeDir, err := os.UserHomeDir(); err == nil {
-		path := filepath.Join(homeDir, ".local", "share", "gvs", "skills", "verify-scan.md")
-		if data, err := os.ReadFile(path); err == nil {
-			result.progress(fmt.Sprintf("[claude] Loading skill: %s", path))
-			return string(data), true
-		}
-	}
-
-	// 4. Current working directory (development)
-	path := filepath.Join("skills", "verify-scan.md")
-	if data, err := os.ReadFile(path); err == nil {
-		result.progress(fmt.Sprintf("[claude] Loading skill: %s", path))
-		return string(data), true
-	}
-
-	return "", false
-}
-
-func buildVerificationPrompt(result *Result, skillTemplate string, sourceSnippets map[string]string) (string, error) {
-	type sanitizedUsedImports struct {
-		CurrentVersion string `json:"CurrentVersion,omitempty"`
-		ReplaceModule  string `json:"ReplaceModule,omitempty"`
-		ReplaceVersion string `json:"ReplaceVersion,omitempty"`
-	}
-	sanitized := make(map[string]map[string]sanitizedUsedImports)
-	for dir, pkgs := range result.UsedImports {
-		sanitized[dir] = make(map[string]sanitizedUsedImports)
-		for pkg, details := range pkgs {
-			sanitized[dir][pkg] = sanitizedUsedImports{
-				CurrentVersion: details.CurrentVersion,
-				ReplaceModule:  details.ReplaceModule,
-				ReplaceVersion: details.ReplaceVersion,
-			}
-		}
-	}
-
-	promptResult := struct {
-		UsedImports     map[string]map[string]sanitizedUsedImports `json:"UsedImports,omitempty"`
-		AffectedImports map[string]AffectedImportsDetails `json:"AffectedImports,omitempty"`
-		GoCVE           string                            `json:"GoCVE"`
-		CVE             string                            `json:"CVE"`
-		Repository      string                            `json:"Repository"`
-		Branch          string                            `json:"Branch"`
-		ReflectionRisks []ReflectionRisk                  `json:"ReflectionRisks,omitempty"`
-		Errors          []string                          `json:"Errors,omitempty"`
-	}{
-		UsedImports:     sanitized,
-		AffectedImports: result.AffectedImports,
-		GoCVE:           result.GoCVE,
-		CVE:             result.CVE,
-		Repository:      result.Repository,
-		Branch:          result.Branch,
-		ReflectionRisks: result.ReflectionRisks,
-		Errors:          result.Errors,
-	}
-
-	resultJSON, err := json.MarshalIndent(promptResult, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal scan result: %w", err)
-	}
-
-	var snippetBuilder strings.Builder
-	for path, content := range sourceSnippets {
-		snippetBuilder.WriteString(fmt.Sprintf("### %s\n\n```go\n%s\n```\n\n", path, content))
-	}
-
-	algo := os.Getenv("ALGO")
-	if algo == "" {
-		algo = "rta"
-	}
-
-	callTraces := FormatCallTraces(result)
-
-	prompt := skillTemplate
-	prompt = strings.ReplaceAll(prompt, "{{.scan_result_json}}", string(resultJSON))
-	prompt = strings.ReplaceAll(prompt, "{{.source_snippets}}", snippetBuilder.String())
-	prompt = strings.ReplaceAll(prompt, "{{.algorithm}}", algo)
-	prompt = strings.ReplaceAll(prompt, "{{.is_vulnerable}}", result.IsVulnerable)
-	prompt = strings.ReplaceAll(prompt, "{{.call_traces}}", callTraces)
-
-	return prompt, nil
-}
-
-const maxSourceBytes = 200 * 1024
-
-func collectRelevantSource(result *Result, repoDir string) map[string]string {
-	snippets := make(map[string]string)
-	totalBytes := 0
-
-	addFile := func(relPath string) {
-		if _, exists := snippets[relPath]; exists {
-			return
-		}
-		if totalBytes >= maxSourceBytes {
-			return
-		}
-		fullPath := filepath.Join(repoDir, relPath)
-		data, err := os.ReadFile(fullPath)
-		if err != nil {
-			return
-		}
-		if totalBytes+len(data) < maxSourceBytes {
-			snippets[relPath] = string(data)
-			totalBytes += len(data)
-		}
-	}
-
-	// 1. go.mod for version context
-	addFile("go.mod")
-
-	// 2. Files along call graph paths (highest signal -- actual vulnerability paths)
-	for _, pkgs := range result.UsedImports {
-		for _, details := range pkgs {
-			for _, path := range details.Paths {
-				for _, node := range path {
-					if node.Func == nil || node.Func.Prog == nil {
-						continue
-					}
-					pos := node.Func.Prog.Fset.Position(node.Func.Pos())
-					if !pos.IsValid() || pos.Filename == "" {
-						continue
-					}
-					relPath, err := filepath.Rel(repoDir, pos.Filename)
-					if err != nil || strings.HasPrefix(relPath, "..") {
-						continue
-					}
-					addFile(relPath)
-				}
-			}
-		}
-	}
-
-	// 3. Files that directly import vulnerable packages + build reverse import index
-	var vulnPkgs []string
-	for pkg := range result.AffectedImports {
-		vulnPkgs = append(vulnPkgs, pkg)
-	}
-
-	modulePath := readModulePath(repoDir)
-
-	// reverseImports: Go import path -> list of repo-relative files importing it
-	reverseImports := make(map[string][]string)
-	// directImporterImportPaths: Go import paths of packages that directly import the vulnerable package
-	var directImporterImportPaths []string
-
-	if len(vulnPkgs) > 0 {
-		filepath.WalkDir(repoDir, func(path string, d os.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
-				if d != nil && d.IsDir() {
-					name := d.Name()
-					if name == "vendor" || name == ".git" || strings.HasPrefix(name, ".") {
-						return filepath.SkipDir
-					}
-				}
-				return nil
-			}
-			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-				return nil
-			}
-			relPath, _ := filepath.Rel(repoDir, path)
-			if relPath == "" {
-				relPath = path
-			}
-
-			fset := token.NewFileSet()
-			f, parseErr := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
-			if parseErr != nil {
-				return nil
-			}
-
-			isDirectImporter := false
-
-			for _, imp := range f.Imports {
-				importPath := strings.Trim(imp.Path.Value, `"`)
-				reverseImports[importPath] = append(reverseImports[importPath], relPath)
-				for _, pkg := range vulnPkgs {
-					if importPath == pkg || strings.HasPrefix(importPath, pkg+"/") {
-						isDirectImporter = true
-					}
-				}
-			}
-
-			if isDirectImporter {
-				addFile(relPath)
-				if modulePath != "" {
-					dirRel := filepath.Dir(relPath)
-					var pkgImportPath string
-					if dirRel == "." {
-						pkgImportPath = modulePath
-					} else {
-						pkgImportPath = modulePath + "/" + filepath.ToSlash(dirRel)
-					}
-					directImporterImportPaths = append(directImporterImportPaths, pkgImportPath)
-				}
-			}
-			return nil
-		})
-	}
-
-	// 4. 2-hop importers: files that import a package which directly imports the vulnerable package
-	seen := make(map[string]bool)
-	for _, importPath := range directImporterImportPaths {
-		if seen[importPath] {
-			continue
-		}
-		seen[importPath] = true
-		for _, relPath := range reverseImports[importPath] {
-			addFile(relPath)
-		}
-	}
-
-	// 5. Entry point files (main packages)
-	for _, sets := range result.Files {
-		for _, fileSet := range sets {
-			for _, f := range fileSet {
-				addFile(f)
-			}
-		}
-	}
-
-	// 6. Files from ReflectionRisks locations
-	for _, risk := range result.ReflectionRisks {
-		parts := strings.SplitN(risk.Location, ":", 2)
-		if len(parts) == 0 {
-			continue
-		}
-		addFile(parts[0])
-	}
-
-	return snippets
-}
-
-func readModulePath(repoDir string) string {
-	data, err := os.ReadFile(filepath.Join(repoDir, "go.mod"))
-	if err != nil {
-		return ""
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "module ") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "module"))
-		}
-	}
-	return ""
-}
-
-func importsAnyPackage(filePath string, packages []string) bool {
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, filePath, nil, parser.ImportsOnly)
-	if err != nil {
-		return false
-	}
-	for _, imp := range f.Imports {
-		importPath := strings.Trim(imp.Path.Value, `"`)
-		for _, pkg := range packages {
-			if importPath == pkg || strings.HasPrefix(importPath, pkg+"/") {
-				return true
-			}
-		}
 	}
 	return false
 }

@@ -6,7 +6,10 @@ VERSION = $(shell git describe --tags --long --dirty 2>/dev/null)
 IMAGE = quay.io/k37y/${NAME}:${VERSION}
 PORT ?= 8082
 ALGO ?= vta
-CLAUDE_CONF = $(HOME)/.claude.conf
+# Optional runtime environment file; credentials are never baked into the image.
+AI_ENV_FILE ?= $(HOME)/.config/gvs/gvs.env
+AI_ENV_VARS = GVS_AI GVS_AI_PROVIDER GVS_AI_MODEL GVS_AI_API_KEY GVS_AI_BASE_URL \
+              GVS_AI_PROJECT_ID GVS_AI_LOCATION GVS_AI_MAX_ITERATIONS GVS_AI_MAX_TOKENS GVS_AI_CONTEXT_TOKENS GVS_AI_TIMEOUT
 ADC_CREDS = $(HOME)/.config/gcloud/application_default_credentials.json
 PREFIX ?= /usr
 BINDIR ?= $(PREFIX)/bin
@@ -22,10 +25,6 @@ RUN_OPTS := --security-opt label=disable \
             --tty \
 	    --interactive \
             --publish $(PORT):8082
-
-ifdef VOLUME_EXISTS
-    VOLUME_OPT := --volume $(CLAUDE_CONF):/root/.claude.conf
-endif
 
 ifeq ($(shell id -u),0)
 	SUDO :=
@@ -88,20 +87,19 @@ image:
 
 image-run: image
 	-podman kill ${RUNNING_CONTAINER} && podman wait ${RUNNING_CONTAINER}
-	@VOLUME_OPT=""; \
-	if [ -f "$(CLAUDE_CONF)" ]; then \
-		echo "Claude config found. Mounting volume ..."; \
-		VOLUME_OPT="$$VOLUME_OPT --volume $(CLAUDE_CONF):/root/.claude.conf"; \
-	else \
-		echo "Claude config not found. Skipping ..."; \
+	@set --; \
+	if [ -f "$(AI_ENV_FILE)" ]; then \
+		set -- "$$@" --env-file "$(AI_ENV_FILE)"; \
 	fi; \
+	for name in $(AI_ENV_VARS); do \
+		if printenv "$$name" >/dev/null; then \
+			set -- "$$@" --env "$$name"; \
+		fi; \
+	done; \
 	if [ -f "$(ADC_CREDS)" ]; then \
-		echo "ADC credentials found. Mounting volume ..."; \
-		VOLUME_OPT="$$VOLUME_OPT --volume $(ADC_CREDS):/root/.config/gcloud/application_default_credentials.json"; \
-	else \
-		echo "ADC credentials not found. Skipping ..."; \
+		set -- "$$@" --volume "$(ADC_CREDS):/root/.config/gcloud/application_default_credentials.json:ro"; \
 	fi; \
-	podman run $(RUN_OPTS) $$VOLUME_OPT $(IMAGE)
+	podman run $(RUN_OPTS) "$$@" $(IMAGE)
 
 .PHONY: image-push
 
@@ -210,6 +208,10 @@ install-user: gvs cg
 		echo "# ALGO=vta" >> $(USER_CONFDIR)/gvs.env; \
 		echo "# CORS_ALLOWED_ORIGINS=" >> $(USER_CONFDIR)/gvs.env; \
 		echo "# GVS_COUNTER_URL=" >> $(USER_CONFDIR)/gvs.env; \
+		echo "# GVS_AI=1" >> $(USER_CONFDIR)/gvs.env; \
+		echo "# GVS_AI_PROVIDER=openai-compatible" >> $(USER_CONFDIR)/gvs.env; \
+		echo "# GVS_AI_MODEL=" >> $(USER_CONFDIR)/gvs.env; \
+		echo "# GVS_AI_API_KEY=" >> $(USER_CONFDIR)/gvs.env; \
 	fi
 	@echo "Reloading systemd user daemon..."
 	systemctl --user daemon-reload

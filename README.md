@@ -67,15 +67,151 @@ flowchart TD
 ```
 ## Prerequisites
 * `podman`, `git`, `jq` and `make`
-* Gemini API credentials (optional)
 
-  If Gemini credentials are absent, the `Summary` field in the final JSON result will be an error message.
-  - Create a file named `~/.gemini.conf`
-  - Use the below contents
-    ```bash
-    API_URL=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent
-    API_KEY=<your-api-key>
-    ```
+## Optional AI verification
+
+AI verification is disabled by default. Enable it with `GVS_AI=1` and choose
+an explicit provider and model. The verifier gives the model repository search,
+source-reading, module-resolution, and call-graph tools, then validates its JSON
+assessment. The scanner verdict remains separate from the AI assessment.
+
+The audit compares the structured paths underlying graph SVGs with source to
+identify supported paths and suspected false positives/negatives. It also traces
+dynamic affected-symbol usage through reflection, unsafe operations, and
+callbacks. Each `reflection_risks` entry must be supported, ruled out, or
+explicitly unresolved; the audit can discover additional candidates. It does
+not visually inspect SVG files or certify algorithm correctness.
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `GVS_AI` | Set to `1` to enable verification | Disabled |
+| `GVS_AI_PROVIDER` | `anthropic-vertex` or `openai-compatible` | Required when enabled |
+| `GVS_AI_MODEL` | Model ID supported by the selected endpoint | Required when enabled |
+| `GVS_AI_API_KEY` | Bearer token for an OpenAI-compatible endpoint | Required for api.openai.com; optional for other endpoints |
+| `GVS_AI_BASE_URL` | API base URL, including any version prefix | `https://api.openai.com/v1` |
+| `GVS_AI_PROJECT_ID` | Google Cloud project for `anthropic-vertex` | Required for Vertex |
+| `GVS_AI_LOCATION` | Vertex region | `global` |
+| `GVS_AI_MAX_ITERATIONS` | Investigation turns; each can contain multiple tool calls | `20` |
+| `GVS_AI_MAX_TOKENS` | Maximum output tokens per request | `16384` |
+| `GVS_AI_CONTEXT_TOKENS` | Context limit for the selected model; configure to match your endpoint | `131072` |
+| `GVS_AI_TIMEOUT` | Overall verification timeout, in Go duration format | `10m` |
+| `GVS_SKILLS_DIR` | Directory containing `verify-scan.md` | Installed or repository skills directory |
+
+For a hosted or local OpenAI-compatible endpoint:
+
+```bash
+export GVS_AI=1
+export GVS_AI_PROVIDER=openai-compatible
+export GVS_AI_MODEL='<your-tool-capable-model>'
+export GVS_AI_BASE_URL='https://your-provider.example/v1'
+export GVS_AI_API_KEY='<your-api-key>'
+./bin/cg -progress CVE-2024-45338 /path/to/repo
+```
+
+This backend sends requests to `<base-url>/chat/completions`. The endpoint and
+model must support function tools, tool-result messages, `tool_choice: none`,
+and `max_completion_tokens`. Compatibility depends on the endpoint and model;
+this is not a native Responses API backend. See the
+[official function-calling documentation](https://developers.openai.com/api/docs/guides/function-calling).
+
+For Claude on Vertex, use Google Application Default Credentials:
+
+```bash
+export GVS_AI=1
+export GVS_AI_PROVIDER=anthropic-vertex
+export GVS_AI_MODEL='<your-vertex-model-id>'
+export GVS_AI_PROJECT_ID='<your-google-cloud-project>'
+export GVS_AI_LOCATION=global
+./bin/cg -progress CVE-2024-45338 /path/to/repo
+```
+
+The verifier allows one final request with tools disabled after the investigation
+limit. Invalid configuration, API failures, truncated responses, and invalid
+assessments are reported in `Errors`. A failed investigation never supplies a verdict.
+For scans with reflection risks, completed batch findings are retained and pending
+risk indices are reported under `AIVerification.coverage`; incomplete coverage
+produces an `unknown` assessment. A reviewed risk can still be unresolved.
+Successful results include:
+
+```json
+{
+  "AIVerification": {
+    "provider": "openai-compatible",
+    "model": "your-model-id",
+    "IsVulnerable": "unknown",
+    "confidence": "low",
+    "reasoning": "The available evidence does not establish runtime reachability.",
+    "evidence": ["find_callers: no path to a known entry point"],
+    "graph_analysis": {
+      "summary": "No path available to compare with source.",
+      "findings": []
+    },
+    "dynamic_analysis": {
+      "summary": "No supplied risk candidates; independent search incomplete.",
+      "findings": []
+    },
+    "uncertainties": ["Dynamic entry-point reachability remains unverified."]
+  }
+}
+```
+
+`make image-run` reads `~/.config/gvs/gvs.env` (override with `AI_ENV_FILE`)
+and forwards exported `GVS_AI*` settings. Exported settings override the file.
+The user systemd service reads the same environment file. Vertex ADC credentials
+are mounted read-only when present. The binaries themselves read environment
+variables, not configuration files.
+
+This replaces `GVS_CLAUDE`, `~/.claude.conf`, `ClaudeVerification`, and the old
+Claude-specific feedback fields without compatibility aliases. Old saved results
+are not migrated automatically.
+
+All AI verification code lives in `pkg/cmd/cg/verify.go`: configuration, provider
+adapters, repository tools, prompts, and assessment validation. The scanner only
+calls `cg.VerifyAndSummarize(result, directory)`; that entry point also handles
+enablement and progress logging. To add a backend, implement the private
+`verificationAgent` interface and register its configuration and constructor in
+that file. Verification tests live in `verify_test.go`.
+
+CG collects dynamic candidates using the loaded Go type information, including
+reflection aliases, exact affected function/method identities, function maps, and
+unsafe memory operations. `reflection_risks[].association` distinguishes
+`target_linked` evidence from `unresolved` operations. Unresolved candidates omit
+`package` and `symbol`; generic method names and message strings are not treated
+as affected-symbol evidence. Candidate detection is not a proof of runtime
+reachability. Files importing `reflect` or `unsafe` without usable type information
+retain explicit dynamic coverage gaps. Ordinary build/load failures remain in
+`Errors` and do not create reflection-risk entries by themselves.
+
+The verifier groups duplicate risk observations and investigates at most 16
+original risk indices per batch, with a 6 KiB compact risk budget. It preserves
+original scan indices and provides paginated `read_reflection_risks` access to full
+evidence. `coverage` records total, reviewed, and pending risks outside the model.
+Each batch uses a fresh conversation under the overall verification timeout.
+
+Before each provider request, the verifier budgets the serialized request
+(including schemas and accumulated history), reserves output tokens and a framing
+margin, and attempts a final assessment as space runs low. The estimate uses one
+input token per serialized byte; it is conservative for the supported protocols,
+not a provider-specific tokenizer measurement. Set `GVS_AI_CONTEXT_TOKENS` to the
+model's actual limit. Requests exceeding this local budget are not sent; pending
+risks remain unreviewed. Graph excerpts are capped at 16 KiB with explicit
+omission notices and graph tools available for follow-up.
+
+Initial source context uses line-numbered excerpts around call sites, affected
+symbols, and reflection locations, with a 32 KiB source budget and 4 KiB per file.
+Each tool response is limited to 8 KiB. Omissions are explicitly marked, and the
+model can request narrower file ranges or searches to recover needed evidence.
+These are byte limits, not token limits; instructions, scan metadata, call traces,
+tool schemas, and accumulated conversation history also contribute to input usage.
+
+Use `cg -progress ...` to see initial prompt bytes and per-request and cumulative
+token usage. Input totals include cached input; cache reads and writes are listed
+separately when reported. Missing usage is marked unavailable, and cumulative
+logs include reporting counts so partial totals are visible. These counters come
+from received API responses, not billing records; SDK retries may incur additional
+usage that was not returned. Missing or truncated evidence should lead to an
+`unknown` assessment when a decisive question cannot be resolved.
+
 ## Tests
 
 Run unit tests with race detection using `make test`. Both test targets require

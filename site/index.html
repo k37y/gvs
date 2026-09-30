@@ -82,13 +82,13 @@
 				<div class="gvs-col gvs-col-ref">
 					<h3 class="gvs-section-title">Frequently Asked Questions</h3>
 					<dl class="gvs-ref-list">
-						<div class="gvs-ref-item"><dt>What does the GVS scanner analysis do?</dt><dd>It traces whether vulnerable symbols are actually reachable from your code's entry points using call graph analysis, then Claude AI independently verifies the result by inspecting source code, interface implementations, and caller chains to catch false positives and false negatives.</dd></div>
+						<div class="gvs-ref-item"><dt>What does the GVS scanner analysis do?</dt><dd>It traces whether vulnerable symbols are actually reachable from your code's entry points using call graph analysis, then AI independently verifies the result by inspecting source code, interface implementations, and caller chains to catch false positives and false negatives.</dd></div>
 						<div class="gvs-ref-item"><dt>What algorithms are available?</dt><dd>VTA (most precise, slowest), RTA (balanced), CHA (fast, less precise), Static (fastest, direct calls only)</dd></div>
-						<div class="gvs-ref-item"><dt>How is the final verdict determined?</dt><dd>The repository is confirmed vulnerable only when both GVS scanner and Claude AI independently agree. If either disagrees, the result is treated as not confirmed.
+						<div class="gvs-ref-item"><dt>How is the final verdict determined?</dt><dd>The repository is confirmed vulnerable only when both GVS scanner and AI independently agree. If either disagrees, the result is treated as not confirmed.
 							<table style="margin-top:0.5rem; border-collapse:collapse; width:100%; font-size:0.85rem;">
 								<thead><tr style="border-bottom:2px solid var(--pf-t--global--border--color--default);">
 									<th style="padding:0.3rem 0.5rem; text-align:left;">GVS Scanner</th>
-									<th style="padding:0.3rem 0.5rem; text-align:left; border-left:1px solid var(--pf-t--global--border--color--default);">Claude AI</th>
+									<th style="padding:0.3rem 0.5rem; text-align:left; border-left:1px solid var(--pf-t--global--border--color--default);">AI</th>
 									<th style="padding:0.3rem 0.5rem; text-align:left; border-left:1px solid var(--pf-t--global--border--color--default);">Final Verdict</th>
 								</tr></thead>
 								<tbody>
@@ -129,7 +129,7 @@
 						<div class="gvs-log-placeholder">Scan results will appear here after completion.</div>
 					</div>
 					<div id="reportContainer" style="display:none; margin-top:8px; text-align:right;">
-						<button class="pf-v6-c-button pf-m-link pf-m-small" type="button" onclick="openFeedbackModal()">Feedback for Claude</button>
+						<button class="pf-v6-c-button pf-m-link pf-m-small" type="button" onclick="openFeedbackModal()">Feedback for AI</button>
 						<button id="reportButton" class="pf-v6-c-button pf-m-link pf-m-small" type="button" onclick="reportInaccuracy()">Report Inaccuracy</button>
 					</div>
 				</div>
@@ -160,11 +160,11 @@
 	<!-- Feedback Modal -->
 	<div id="feedbackModal" class="gvs-modal-overlay" style="display:none" onclick="closeFeedbackModal(event)">
 		<div class="gvs-modal">
-			<h3 class="gvs-modal-title">Feedback for Claude</h3>
-			<p class="gvs-modal-desc">How does GVS scan result compare with Claude's verification?</p>
+			<h3 class="gvs-modal-title">Feedback for AI</h3>
+			<p class="gvs-modal-desc">How does GVS scan result compare with AI's verification?</p>
 			<div class="gvs-modal-actions">
 				<button class="pf-v6-c-button pf-m-secondary" type="button" onclick="submitFeedback('gvs_only')">GVS was right</button>
-				<button class="pf-v6-c-button pf-m-secondary" type="button" onclick="submitFeedback('claude_only')">Claude was right</button>
+				<button class="pf-v6-c-button pf-m-secondary" type="button" onclick="submitFeedback('ai_only')">AI was right</button>
 				<button class="pf-v6-c-button pf-m-primary" type="button" onclick="submitFeedback('both')">Both were right</button>
 			</div>
 		</div>

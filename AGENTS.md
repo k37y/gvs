@@ -1,6 +1,8 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Shared development guidance for coding agents working in this repository. Directory-specific instructions, such as `data/AGENTS.md`, apply within their directories.
+
+This guide is separate from the runtime AI audit prompt in `skills/verify-scan.md`. The verifier loads that prompt, not this file.
 
 ## Project Overview
 
@@ -10,8 +12,8 @@ GVS (Go Vulnerability Scanner) is a vulnerability analysis tool that determines 
 - Call graph analysis to trace vulnerable symbol usage from entry points
 - Support for both CVE IDs and GOCVE IDs (e.g., `CVE-2024-45338` or `GO-2024-3333`)
 - Multiple call graph algorithms (vta, rta, cha, static) with different speed/precision trade-offs
-- Automatic fix command generation and execution
-- Reflection-based vulnerability detection (analyzes dynamic symbol invocation)
+- Suggested fix command generation
+- Typed reflection and unsafe usage candidates for further investigation
 - Branch and commit hash support for repository scanning
 - Web API with task-based async processing and progress streaming
 
@@ -50,15 +52,18 @@ make image GVS_COUNTER_URL="https://foo.com/bar"
 # Build and run container
 make image-run
 
-# Build and run with Gemini API (for AI summaries)
-# Requires ~/.gemini.conf with API_URL and API_KEY
+# Build and run with optional AI verification
+# Configure GVS_AI settings in ~/.config/gvs/gvs.env (see README.md)
 make image-run
 ```
 
 ### Testing
 ```bash
-# Run all tests
+# Run tests without the integration build tag
 go test ./...
+
+# Run the API/scanner integration suite, including race detection
+make test-integration
 
 # Test a specific package
 go test ./pkg/cmd/cg
@@ -87,9 +92,9 @@ make uninstall
 
 2. **`cg`** (`cmd/cg/main.go`): CLI tool for direct call graph analysis
    - Accepts CVE ID or GOCVE ID as first argument, directory as second
-   - Supports `-fix` flag to automatically run fix commands
    - Supports `-progress` flag for detailed progress reporting
-   - Supports `-library` and `-symbol` flags to bypass CVE lookup and scan directly
+   - Manual scans require `-library`, `-symbols`, and `-fixversion` together
+   - Supports `-graph` to generate SVG call graph visualizations
    - Supports `-algo` flag to choose call graph algorithm
    - Outputs JSON results to stdout
 
@@ -102,7 +107,7 @@ cmd/              # Binary entry points
 
 pkg/              # Shared library code
   cmd/
-    cg/           # Core scanning logic (scanner.go, types.go, summary.go)
+    cg/           # Scanner, reflection.go, verify.go, types, and summaries
     gvs/          # Cleanup utilities
     gvc/          # Legacy scan types
   utils/          # Tool validation
@@ -157,34 +162,49 @@ The scanner follows this workflow (see README.md flowchart):
 3. **Merge Results** (`cmd/cg/main.go`):
    - Deduplicate symbols across workers
    - Determine overall vulnerability status
-   - Optionally execute fix commands
+   - Include suggested fix commands and optionally generate graph SVGs
 
-4. **Generate Summary** (`GenerateSummaryWithGemini` in summary.go):
-   - Optional AI-powered summary using Gemini API
-   - Requires `~/.gemini.conf` configuration
+4. **AI Verification** (`VerifyAndSummarize` in verify.go):
+   - Keep all production AI configuration, provider adapters, repository tools, batching, and validation in `pkg/cmd/cg/verify.go`
+   - The scanner calls only `cg.VerifyAndSummarize(result, directory)`; tests live in `verify_test.go`
+   - Audit source against the structured graph paths underlying SVGs for supported paths and suspected false positives/negatives; SVG rendering is not visually inspected
+   - Investigate affected-symbol dynamic usage through reflection, unsafe operations, and callbacks, using `reflection_risks` as leads
+   - Keep the scanner verdict separate from `AIVerification`, which contains `graph_analysis`, `dynamic_analysis`, `uncertainties`, and `coverage`
+   - Select `anthropic-vertex` or `openai-compatible` using `GVS_AI_PROVIDER`; require `GVS_AI=1` and an explicit `GVS_AI_MODEL`
+   - See [README.md](README.md) for provider setup and the complete configuration table
+
+### AI Context and Coverage
+
+- Group duplicate risk observations while preserving original scan indices. Each investigation receives at most 16 risk indices and 6 KiB of compact risk JSON.
+- Full risk evidence is available through paginated `read_reflection_risks`. A fresh conversation handles each batch under the overall verification timeout.
+- Initial source excerpts have a 32 KiB total budget and 4 KiB per file. Graph excerpts are capped at 16 KiB; tool responses at 8 KiB. Mark omissions and allow focused retrieval.
+- Budget complete serialized requests, including tool schemas and conversation history, with output and framing reserves. `GVS_AI_CONTEXT_TOKENS` must match the selected model's context limit. The local estimate uses one token per serialized byte, not a provider-specific tokenizer.
+- Track total, reviewed, and pending risks in Go. Reviewed risks may still be unresolved. The current implementation forces an `unknown` AI verdict when any risk remains pending.
+- Missing graph edges, truncated evidence, and exhausted budgets do not establish safety. Findings must cite source or tool evidence and state specific remaining gaps.
 
 ### Call Graph Algorithms
 
-Configured via `ALGO` environment variable or `-algo` flag:
+The CLI's `-algo` flag defaults to `rta` and sets `ALGO`. The scanner library also defaults to `rta` when `ALGO` is unset. The Makefile's image-build setting defaults to `vta`; distinguish these entry points when checking configuration.
 
-- **`vta`** (default): Variable Type Analysis - Most precise, slowest. Use for accuracy.
-- **`rta`**: Rapid Type Analysis - Good balance. Includes panic recovery.
-- **`cha`**: Class Hierarchy Analysis - Fast, less precise. Good for large codebases.
-- **`static`**: Static analysis only - Fastest, only detects direct calls.
+- **`rta`**: Rapid Type Analysis; falls back to static analysis on panic or missing roots.
+- **`vta`**: Variable Type Analysis.
+- **`cha`**: Class Hierarchy Analysis.
+- **`static`**: Direct static call edges.
 
-Implementation: `buildCallGraph` and related functions in `pkg/cmd/cg/scanner.go:652-703`
+Implementation: `getCallGraphAlgorithm`, `buildCallGraph`, and `buildRTACallGraph` in `pkg/cmd/cg/scanner.go`. Treat graph edges as candidate calls, not proof of exploitability, and avoid unconditional algorithm accuracy rankings.
 
-### Reflection Detection
+### Reflection and Unsafe Detection
 
-The scanner includes advanced reflection analysis (`detectReflectionVulnerabilities` in scanner.go):
+`detectReflectionVulnerabilities` in `pkg/cmd/cg/reflection.go` reuses loaded Go type information and caches candidate extraction per module. Keep scanner detection here and AI investigation in `verify.go`.
 
-Detects 14 types of reflection-based symbol invocation:
-- `reflect.ValueOf()`, `MethodByName()`, `CallSlice()`, etc.
-- Function registries (maps containing vulnerable symbols)
-- String literals containing symbol names
-- Confidence levels: high/medium/low
+- Resolve actual package, function, and receiver identities rather than matching symbol substrings or method names alone.
+- Detect affected function references, reflected method lookups/calls, function maps, and unsafe memory operations. Registries and unsafe usage do not require a `reflect` import.
+- Deduplicate observations while preserving evidence and distinct affected targets.
+- Emit `reflection_risks` with `association: "target_linked"` for evidence connected to an exact affected symbol, or `association: "unresolved"` when the affected target is unknown. Unresolved candidates omit `package` and `symbol`.
+- Candidate types include `value_of`, `method_lookup`, `reflection_call`, `function_registry`, `unsafe_pointer`, and `analysis_incomplete`.
+- Retain explicit dynamic-analysis gaps for files importing `reflect` or `unsafe` without usable type information. Ordinary build/load failures belong in `Errors`, not in reflection risks. Candidate evidence does not prove runtime reachability and does not directly change the scanner's `IsVulnerable` verdict.
 
-Each detection includes location, evidence, and confidence score in `ReflectionRisks` field.
+Regression fixtures in `reflection_test.go` cover unrelated names, aliases, receiver method sets, runtime-unknown targets, registries, unsafe operations, and incomplete types. Measure output reductions on fixtures or actual scans; do not imply a universal reduction or live-model accuracy improvement.
 
 ### API Architecture
 
@@ -196,8 +216,8 @@ Each detection includes location, evidence, and confidence score in `ReflectionR
 
 **Caching:**
 - Disk-based caching in `/tmp/gvs-cache/`
-- Cache key includes repo, branch/commit, CVE, library, symbol, and fix flag
-- Smart cache reuse: fix=true requests can reuse fix=false cache
+- Callgraph cache keys include repository, branch/commit, CVE, library, symbol, fix version, and algorithm
+- Disk cache entries expire after 24 hours
 
 **Request Flow:**
 1. `POST /callgraph` → returns `{"taskId": "..."}`
@@ -220,16 +240,16 @@ Each detection includes location, evidence, and confidence score in `ReflectionR
 - Fix commands use `go get` or `go mod edit -replace`
 
 **Stdlib packages:**
-- Compares Go toolchain version (from `go.mod`)
+- Compares the resolved Go toolchain version for the scanned module
 - Matches fix version to same major.minor branch (`findAppropriateFixVersion`)
 - Fix commands use `go mod edit -go=X.Y.Z`
 
-Implementation: `Worker` function in scanner.go:167-292
+Implementation: `Worker`, `checkDirVulnerability`, and `findAppropriateFixVersion` in `pkg/cmd/cg/scanner.go`
 
 ### Branch vs Commit Detection
 
 The scanner auto-detects branch names vs commit hashes:
-- **Branch**: Contains non-hex characters → shallow clone (`--depth 1`)
+- **Branch**: Does not match the commit-hash heuristic → shallow clone (`--depth 1`)
 - **Commit**: 7-40 hex characters → full clone then checkout
 
 Implementation: `CloneRepo` in `internal/common/utils.go`
@@ -244,8 +264,8 @@ Implementation: `CloneRepo` in `internal/common/utils.go`
 ### Environment Variables
 - `GVS_PORT`: Web server port (default: 8082)
 - `WORKER_COUNT`: Worker pool size (default: CPU/2)
-- `ALGO`: Call graph algorithm (default: vta)
-- `GOCACHE`: Go build cache location (set to `/tmp/go-build` by gvs server)
+- `ALGO`: Scanner-library algorithm selection; see the entry-point defaults above
+- `GOCACHE`: Go build cache location; the server sets an XDG-based cache path if unset
 - `CORS_ALLOWED_ORIGINS`: Comma-separated list of allowed CORS origins (default: not set)
   - Examples:
     - Not set - Same-origin only, no CORS headers (default, most secure)
@@ -254,11 +274,7 @@ Implementation: `CloneRepo` in `internal/common/utils.go`
     - Required when frontend is hosted separately from backend
 
 ### Tool Dependencies
-Required CLI tools (validated on startup):
-- `go`: Go toolchain
-- `git`: Repository cloning
-- `digraph`: Call graph querying (installed via golang.org/x/tools/cmd/digraph)
-- `jq`: JSON processing (container only)
+The CLI validates `go` and `git` on startup, and `sfdp` when generating SVG graphs. Container and Makefile workflows also use tools such as `jq`; check those files for their specific dependencies.
 
 ### Cursor Rules Integration
 The project has detailed development rules in `.cursorrules`:
@@ -276,22 +292,21 @@ The project has detailed development rules in `.cursorrules`:
 - Allows partial results with error context
 
 **Progress Reporting:**
-- Optional `ProgressCallback` function parameter
+- `Result.ProgressFunc` callback; some helpers accept `ProgressCallback`
 - Used in `-progress` mode and API progress streaming
 - Write to stderr for CLI, channel for API
 
-**Fix Command Execution:**
-- Commands run in module directory context
-- Output captured to `gvs-output.txt` file
-- Success/errors tracked separately in result
+**Suggested Fixes:**
+- Scanner results include fix commands derived from affected versions and module replacements.
+- The current CLI reports suggestions; it does not expose a `-fix` execution flag.
 
 ## Testing Checklist
 
-When making changes, verify:
+For code changes, build both binaries and run the relevant tests. Use `go test -race ./... -timeout=120s` for shared scanner or concurrency changes. The separately tagged API/scanner integration tests require `make test-integration`; the untagged command does not run them. Run relevant integration cases when scanner output, CLI/API behavior, or concurrency changes. Verify the following when the corresponding behavior is affected; documentation-only edits need content/reference checks:
 1. Both `cg` and `gvs` binaries build successfully
 2. Container builds with `make image`
 3. All four algorithms work (vta, rta, cha, static)
 4. API endpoints return valid JSON
 5. Progress reporting works in CLI and API
-6. Fix commands execute correctly
+6. Suggested fix commands match the affected module and version
 7. Both branch and commit cloning work

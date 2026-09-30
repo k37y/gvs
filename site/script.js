@@ -153,7 +153,7 @@ function renderScanHistory() {
 		let label = '<span class="gvs-label gvs-label-warning">unknown</span>';
 		if (vuln === 'true') label = '<span class="gvs-label gvs-label-danger">true</span>';
 		else if (vuln === 'false') label = '<span class="gvs-label gvs-label-success">false</span>';
-		const cv = item.output?.ClaudeVerification;
+		const cv = item.output?.AIVerification;
 		let aiLabel = '<span class="gvs-label gvs-label-warning">-</span>';
 		if (cv && cv.IsVulnerable) {
 			const aiVuln = String(cv.IsVulnerable).toLowerCase();
@@ -276,12 +276,12 @@ function syntaxHighlight(json) {
 
 function highlightLog(line) {
 	var s = line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-	if (/^\[claude\].*(?:Failed|ERROR|WARNING)/.test(line))
+	if (/^\[ai\].*(?:Failed|ERROR|WARNING)/.test(line))
 		return '<span class="log-error">' + s + '</span>';
-	if (/^\[claude\].*tool_call /.test(line))
+	if (/^\[ai\].*tool_call /.test(line))
 		return s.replace(/(tool_call )(\w+)/, '$1<span class="log-tool">$2</span>');
-	if (/^\[claude\]/.test(line))
-		return '<span class="log-claude">' + s + '</span>';
+	if (/^\[ai\]/.test(line))
+		return '<span class="log-ai">' + s + '</span>';
 	if (/✓/.test(line))
 		return '<span class="log-success">' + s + '</span>';
 	if (/✗|Failed|ERROR|^Error:|^Network Error:/.test(line))
@@ -292,8 +292,8 @@ function highlightLog(line) {
 		return '<span class="log-status">' + s + '</span>';
 	if (/^(Cloning|Clone successful|Running |Found |Discovering)/.test(line))
 		return '<span class="log-info">' + s + '</span>';
-	if (/^Claude verification:/.test(line))
-		return '<span class="log-claude">' + s + '</span>';
+	if (/^AI verification:/.test(line))
+		return '<span class="log-ai">' + s + '</span>';
 	return s;
 }
 
@@ -674,7 +674,7 @@ function closeFeedbackModal(event) {
 
 function submitFeedback(choice) {
 	document.getElementById('feedbackModal').style.display = 'none';
-	const feedbackLabels = { gvs_only: 'GVS was right', claude_only: 'Claude was right', both: 'Both were right' };
+	const feedbackLabels = { gvs_only: 'GVS was right', ai_only: 'AI was right', both: 'Both were right' };
 	const feedbackText = feedbackLabels[choice] || choice;
 
 	let history = JSON.parse(localStorage.getItem('gvs-scan-history') || '[]');
@@ -685,8 +685,8 @@ function submitFeedback(choice) {
 
 	const repo = document.getElementById("repo").value.trim();
 	const cve = document.getElementById("cve").value.trim();
-	const labels = { gvs_only: 'gvs-correct', claude_only: 'claude-correct', both: 'both-correct' };
-	const title = `Claude Feedback: ${cve || repo} - ${feedbackText}`;
+	const labels = { gvs_only: 'gvs-correct', ai_only: 'ai-correct', both: 'both-correct' };
+	const title = `AI Feedback: ${cve || repo} - ${feedbackText}`;
 	const body = `## Feedback\n- **Choice**: ${feedbackText}\n- **Repository**: ${repo}\n- **CVE**: ${cve || 'N/A'}`;
 	const url = `https://github.com/k37y/gvs/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}&labels=${labels[choice]}`;
 	window.open(url, '_blank');

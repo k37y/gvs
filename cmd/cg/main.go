@@ -170,7 +170,6 @@ func main() {
 	if result.ProgressFunc != nil {
 		result.ProgressFunc(fmt.Sprintf("cg version %s", version))
 	}
-	cg.LogClaudeStatus(result.ProgressFunc)
 
 	// Setup: library mode or CVE mode
 	var done bool
@@ -390,8 +389,8 @@ func main() {
 		}
 	}
 
-	// Verify with Claude and generate summary
-	cg.VerifyAndSummarizeWithClaude(result, directory)
+	// Verify with AI and generate summary
+	cg.VerifyAndSummarize(result, directory)
 	result.FreeSSABuilds()
 	if *progress {
 		fmt.Fprintf(os.Stderr, "Scan completed in %s\n", time.Since(scanStart).Round(time.Millisecond))
