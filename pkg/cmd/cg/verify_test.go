@@ -319,6 +319,9 @@ func TestFormatCallTraces_WithPaths(t *testing.T) {
 	if !strings.Contains(got, "1.") && !strings.Contains(got, "2.") {
 		t.Errorf("expected numbered steps, got: %s", got)
 	}
+	if !strings.Contains(got, "edge_reviews.step=1") {
+		t.Errorf("missing explicit edge review index: %s", got)
+	}
 }
 
 func TestGrepCodeTool(t *testing.T) {
@@ -879,6 +882,7 @@ func TestLoadAIConfig(t *testing.T) {
 		{"invalid pricing", map[string]string{"GVS_AI_PRICING": `{"input":"3"}`}, "GVS_AI_PRICING"},
 		{"trailing pricing", map[string]string{"GVS_AI_PRICING": `{} {}`}, "GVS_AI_PRICING"},
 		{"compatible defaults", map[string]string{"GVS_AI_PROVIDER": "openai-compatible", "GVS_AI_API_KEY": "test"}, ""},
+		{"explicit context", map[string]string{"GVS_AI_CONTEXT_TOKENS": "1047576"}, ""},
 		{"custom endpoint without key", map[string]string{"GVS_AI_PROVIDER": "openai-compatible", "GVS_AI_BASE_URL": "http://localhost:1234/v1/"}, ""},
 		{"missing key", map[string]string{"GVS_AI_PROVIDER": "openai-compatible"}, "GVS_AI_API_KEY"},
 		{"missing model", map[string]string{"GVS_AI_MODEL": ""}, "GVS_AI_MODEL"},
@@ -927,6 +931,13 @@ func TestLoadAIConfig(t *testing.T) {
 			}
 			if tt.name == "compatible defaults" && cfg.BaseURL != "https://api.openai.com/v1" {
 				t.Fatalf("URL = %s", cfg.BaseURL)
+			}
+			wantContext := 131072
+			if tt.name == "explicit context" {
+				wantContext = 1047576
+			}
+			if cfg.ContextTokens != wantContext {
+				t.Fatalf("context = %d, want %d", cfg.ContextTokens, wantContext)
 			}
 		})
 	}
@@ -1231,9 +1242,25 @@ func TestBackendsToolConversation(t *testing.T) {
 					replyAssessment(w, provider)
 				}))
 				defer server.Close()
-				output, err := backendForTest(provider, server.URL, limit).Run(context.Background(), "Assess", []verificationTool{&readFileTool{repoDir: repo}})
+				agent := backendForTest(provider, server.URL, limit)
+				var progress []string
+				log := func(message string) { progress = append(progress, message) }
+				switch a := agent.(type) {
+				case *anthropicAgent:
+					a.progress = log
+				case *compatibleAgent:
+					a.progress = log
+				}
+				output, err := agent.Run(context.Background(), "Assess", []verificationTool{&readFileTool{repoDir: repo}})
 				if err != nil || output != testAssessment || calls != 2 {
 					t.Fatalf("output=%q error=%v calls=%d", output, err, calls)
+				}
+				want := "Model returned an assessment before the investigation limit"
+				if limit == 1 {
+					want = "Final assessment requested: iteration limit"
+				}
+				if !strings.Contains(strings.Join(progress, "\n"), want) {
+					t.Fatalf("missing finalization reason %q: %v", want, progress)
 				}
 			})
 		}
@@ -1548,7 +1575,7 @@ func TestAuditSchema(t *testing.T) {
 		{"invalid mechanism", func(a *AIVerification) { a.DynamicAnalysis.Findings[0].Mechanism = "import" }, false},
 		{"invalid dynamic status", func(a *AIVerification) { a.DynamicAnalysis.Findings[0].Status = "maybe" }, false},
 		{"supported without source", func(a *AIVerification) { a.DynamicAnalysis.Findings[0].SourcePath = []string{} }, false},
-		{"unresolved without gap", func(a *AIVerification) { a.DynamicAnalysis.Findings[0].Status = "unresolved" }, false},
+		{"unresolved without gap retained", func(a *AIVerification) { a.DynamicAnalysis.Findings[0].Status = "unresolved" }, true},
 		{"unresolved with gap", func(a *AIVerification) {
 			a.DynamicAnalysis.Findings[0].Status = "unresolved"
 			a.DynamicAnalysis.Findings[0].Uncertainties = []string{"Receiver comes from runtime input"}
@@ -1575,6 +1602,84 @@ func TestAuditSchema(t *testing.T) {
 		raw, _ := json.Marshal(data)
 		if _, err := parseAssessment(string(raw)); err == nil {
 			t.Errorf("accepted missing %s", field)
+		}
+	}
+}
+
+func TestMissingFindingUncertaintyRemainsUnresolved(t *testing.T) {
+	for _, dynamic := range []bool{false, true} {
+		for _, empty := range [][]string{nil, {}} {
+			t.Run(fmt.Sprintf("dynamic=%v/null=%v", dynamic, empty == nil), func(t *testing.T) {
+				a := auditFixture(t)
+				if dynamic {
+					a.GraphAnalysis.Findings = []AIGraphFinding{}
+					a.DynamicAnalysis.Findings[0].Status = "unresolved"
+					a.DynamicAnalysis.Findings[0].Uncertainties = empty
+				} else {
+					a.DynamicAnalysis.Findings = []AIDynamicFinding{}
+					a.GraphAnalysis.Findings[0].Kind = "inconclusive"
+					a.GraphAnalysis.Findings[0].Uncertainties = empty
+				}
+				raw, err := marshalAuditResponseForTest(a)
+				if err != nil {
+					t.Fatal(err)
+				}
+				parsed, err := parseAssessment(string(raw))
+				if err != nil {
+					t.Fatalf("discarded unresolved finding: %v", err)
+				}
+				validateGraphEvidence(&Result{}, t.TempDir(), parsed, newVerificationEvidence(t.TempDir(), nil))
+				if parsed.IsVulnerable != "unknown" || !strings.Contains(strings.Join(parsed.Uncertainties, "\n"), "lacks an explicit uncertainty") {
+					t.Fatalf("missing uncertainty allowed a negative or lost the gap: %+v", parsed)
+				}
+				if dynamic {
+					if parsed.DynamicAnalysis.Findings[0].Status != "unresolved" || parsed.DynamicAnalysis.Findings[0].Confidence != "low" {
+						t.Fatalf("unresolved candidate changed: %+v", parsed.DynamicAnalysis)
+					}
+					a.DynamicAnalysis.Findings[0].Confidence = "invalid"
+				} else {
+					if parsed.GraphAnalysis.Findings[0].Kind != "inconclusive" || parsed.GraphAnalysis.Findings[0].Confidence != "low" {
+						t.Fatalf("inconclusive path changed: %+v", parsed.GraphAnalysis)
+					}
+					a.GraphAnalysis.Findings[0].Confidence = "invalid"
+				}
+				raw, _ = marshalAuditResponseForTest(a)
+				if _, err := parseAssessment(string(raw)); err == nil {
+					t.Fatal("normalization masked another malformed field")
+				}
+			})
+		}
+	}
+}
+
+func TestMissingFindingFields(t *testing.T) {
+	for _, analysis := range []string{"graph_analysis", "dynamic_analysis"} {
+		for _, fields := range [][]string{{"module"}, {"package", "symbol"}, {"reasoning"}} {
+			t.Run(analysis+"/"+strings.Join(fields, "+"), func(t *testing.T) {
+				raw, err := marshalAuditResponseForTest(auditFixture(t))
+				if err != nil {
+					t.Fatal(err)
+				}
+				var response map[string]any
+				if err := json.Unmarshal(raw, &response); err != nil {
+					t.Fatal(err)
+				}
+				findings := response[analysis].(map[string]any)["findings"].([]any)
+				// Keep a valid finding before the malformed one to check its index.
+				var invalid map[string]any
+				finding, _ := json.Marshal(findings[0])
+				json.Unmarshal(finding, &invalid)
+				for _, field := range fields {
+					invalid[field] = " "
+				}
+				response[analysis].(map[string]any)["findings"] = append(findings, invalid)
+				raw, _ = json.Marshal(response)
+				_, err = parseAssessment(string(raw))
+				want := analysis + ".findings[1]: missing or empty fields: " + strings.Join(fields, ", ")
+				if err == nil || err.Error() != want {
+					t.Fatalf("error=%v, want %q", err, want)
+				}
+			})
 		}
 	}
 }
@@ -1787,6 +1892,158 @@ func TestVerificationContextBudget(t *testing.T) {
 	}
 	if err := checkVerificationContext(cfg, map[string]any{"messages": []string{"small", strings.Repeat("history", 2500)}}, 0); err == nil {
 		t.Fatal("history excluded from budget")
+	}
+}
+
+func TestVerificationSerializedTextBudget(t *testing.T) {
+	for _, text := range []string{"plain", "é界🙂", "<quoted>\"\\\n\t", "first line\n" + strings.Repeat("x", 100)} {
+		value := strings.Repeat(text, 100)
+		for _, limit := range []int{2, 64, 128, 512, 16384} {
+			output := boundedVerificationJSONText(value, limit, "\n[Omitted.]\n")
+			encoded, err := json.Marshal(output)
+			original, _ := json.Marshal(value)
+			if err != nil || len(encoded) > limit || !utf8.ValidString(output) {
+				t.Fatalf("limit=%d encoded=%d valid=%v error=%v", limit, len(encoded), utf8.ValidString(output), err)
+			}
+			if len(original) <= limit && output != value {
+				t.Fatal("text that fits was changed")
+			}
+			if len(original) > limit && limit >= 64 && !strings.Contains(output, "[Omitted.]") {
+				t.Fatal("truncation was not disclosed")
+			}
+		}
+	}
+}
+
+func TestBackendsReserveAssessmentCorrection(t *testing.T) {
+	for _, provider := range []string{"anthropic-vertex", "openai-compatible"} {
+		t.Run(provider, func(t *testing.T) {
+			repo := t.TempDir()
+			if err := os.WriteFile(filepath.Join(repo, "main.go"), []byte("package main\n// "+strings.Repeat("<quoted>\"\\", 1000)+"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			assessment := auditFixture(t)
+			corrected, _ := marshalAuditResponseForTest(assessment)
+			assessment.GraphAnalysis.Findings[0].Module = ""
+			assessment.GraphAnalysis.Findings[0].Reasoning = strings.Repeat("Draft explanation.\n", 400)
+			draft, _ := marshalAuditResponseForTest(assessment)
+			const missing = "graph_analysis.findings[0]: missing or empty fields: module"
+			const toolCalls = 16
+			cfg := aiConfig{ContextTokens: 65536, MaxTokens: 4096}
+			calls, reviews := 0, 0
+			var previous []json.RawMessage
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Error(err)
+				}
+				if len(body) > verificationInputBudget(cfg) {
+					t.Errorf("request %d exceeds budget: %d bytes", calls, len(body))
+				}
+				var request struct {
+					Messages   []json.RawMessage `json:"messages"`
+					ToolChoice json.RawMessage   `json:"tool_choice"`
+				}
+				if err := json.Unmarshal(body, &request); err != nil {
+					t.Error(err)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if calls == 1 {
+					if strings.Contains(string(request.ToolChoice), "none") {
+						t.Error("investigation ended before source retrieval")
+					}
+					var blocks []any
+					for i := 0; i < toolCalls; i++ {
+						id := fmt.Sprintf("call_%d", i)
+						if provider == "anthropic-vertex" {
+							blocks = append(blocks, map[string]any{"type": "tool_use", "id": id, "name": "read_file", "input": map[string]string{"path": "main.go"}})
+						} else {
+							blocks = append(blocks, map[string]any{"type": "function", "id": id, "function": map[string]string{"name": "read_file", "arguments": `{"path":"main.go"}`}})
+						}
+					}
+					if provider == "anthropic-vertex" {
+						json.NewEncoder(w).Encode(map[string]any{"id": "tools", "type": "message", "role": "assistant", "stop_reason": "tool_use", "content": blocks})
+					} else {
+						json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"finish_reason": "tool_calls", "message": map[string]any{"role": "assistant", "content": nil, "reasoning_content": "retained state", "tool_calls": blocks}}}})
+					}
+					return
+				}
+				if !strings.Contains(string(request.ToolChoice), "none") {
+					t.Error("final assessment/correction must disable tools")
+				}
+				if calls == 2 {
+					for _, want := range []string{"package main", "Tool output truncated", verificationToolBudgetNotice} {
+						if !strings.Contains(string(body), want) {
+							t.Errorf("budget handling missing %q", want)
+						}
+					}
+					// Even skipped calls need exactly one result, preserving protocol pairing.
+					key := "tool_call_id"
+					if provider == "anthropic-vertex" {
+						key = "tool_use_id"
+					}
+					for i := 0; i < toolCalls; i++ {
+						pair := fmt.Sprintf(`"%s":"call_%d"`, key, i)
+						if strings.Count(string(body), pair) != 1 {
+							t.Errorf("tool result not paired: %s", pair)
+						}
+					}
+					previous = request.Messages
+				} else if calls == 3 {
+					if !strings.Contains(string(body), missing) || !strings.Contains(string(body), "Further validation feedback omitted") || !strings.Contains(string(body), "Draft explanation") {
+						t.Error("correction lost draft or bounded validation feedback")
+					}
+					for i, message := range previous {
+						if i >= len(request.Messages) || string(request.Messages[i]) != string(message) {
+							t.Errorf("correction changed conversation message %d", i)
+						}
+					}
+				} else {
+					t.Errorf("unexpected request %d", calls)
+				}
+				response := string(draft)
+				if calls > 2 {
+					response = string(corrected)
+				}
+				if provider == "anthropic-vertex" {
+					json.NewEncoder(w).Encode(map[string]any{"id": "assessment", "type": "message", "role": "assistant", "stop_reason": "end_turn", "content": []any{map[string]string{"type": "text", "text": response}}})
+				} else {
+					json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]string{"role": "assistant", "content": response}}}})
+				}
+			}))
+			defer server.Close()
+			agent := backendForTest(provider, server.URL, 5)
+			var progress []string
+			log := func(message string) { progress = append(progress, message) }
+			switch a := agent.(type) {
+			case *anthropicAgent:
+				a.cfg.ContextTokens = cfg.ContextTokens
+				a.progress = log
+			case *compatibleAgent:
+				a.cfg.ContextTokens = cfg.ContextTokens
+				a.progress = log
+			}
+			evidence := newVerificationEvidence(repo, nil)
+			tool := &verificationEvidenceTool{verificationTool: &readFileTool{repoDir: repo}, evidence: evidence}
+			output, err := agent.(reviewingVerificationAgent).RunReviewed(context.Background(), strings.Repeat("Initial evidence. ", 400), []verificationTool{tool}, func(draft string) verificationReview {
+				reviews++
+				_, err := parseAssessment(draft)
+				if err == nil || err.Error() != missing {
+					t.Errorf("unexpected draft validation: %v", err)
+				}
+				return verificationReview{Feedback: missing + "\n" + strings.Repeat("Additional <escaped> feedback.\n", 1000)}
+			})
+			if err != nil || output != string(corrected) || calls != 3 || reviews != 1 {
+				t.Fatalf("error=%v requests=%d reviews=%d corrected=%v", err, calls, reviews, output == string(corrected))
+			}
+			if _, err := parseAssessment(output); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(strings.Join(progress, "\n"), "Final assessment requested: context budget reserve") {
+				t.Fatalf("missing context finalization reason: %v", progress)
+			}
+		})
 	}
 }
 
@@ -2294,7 +2551,11 @@ func many() {
 ` + strings.Repeat(" dep.Many(func() {})\n", 60) + "}\n"
 	dependencySource := `package dependency
 import "context"
-func Start(cancel context.CancelFunc) { go func() { cancel() }() }
+func Start(cancel context.CancelFunc) {
+ go func() {
+  cancel()
+ }()
+}
 func Serve() { go func() { println("server") }() }
 type Runner interface { Run() }
 type Safe struct{}
@@ -2333,8 +2594,9 @@ func Many(f func()) { f() }
 		name, caller, callee string
 		want                 []string
 	}{
-		{"captured cancellation", "example.com/dependency.Start$1", "example.com/dependency.Serve$1", []string{"captured binding", "Argument supplied by example.com/app.main", "context.WithCancel", filepath.Join(repo, "main.go") + ":7", filepath.Join(dependency, "dep.go") + ":3"}},
-		{"interface receiver", "example.com/dependency.Invoke", "(example.com/dependency.Server).Run", []string{"*ssa.MakeInterface", "Safe", "Argument supplied by example.com/app.main", filepath.Join(dependency, "dep.go") + ":10"}},
+		{"captured cancellation", "example.com/dependency.Start$1", "example.com/dependency.Serve$1", []string{"Indirect dispatch candidate", "captured binding", "Argument supplied by example.com/app.main", "context.WithCancel", filepath.Join(repo, "main.go") + ":7", filepath.Join(dependency, "dep.go") + ":5"}},
+		{"static closure call", "example.com/dependency.Start", "example.com/dependency.Start$1", []string{"Statically resolved call", "origins do not refute this call"}},
+		{"interface receiver", "example.com/dependency.Invoke", "(example.com/dependency.Server).Run", []string{"*ssa.MakeInterface", "Safe", "Argument supplied by example.com/app.main", filepath.Join(dependency, "dep.go") + ":14"}},
 		{"bounded callers", "example.com/dependency.Many", "example.com/dependency.Serve$1", []string{"truncated"}},
 		{"missing caller", "unknown", "example.com/dependency.Serve$1", []string{"Caller not found", "does not rule out"}},
 		{"exact names required", "example.com/dependency.Start", "Serve", []string{"No matching edge", "does not rule out"}},
@@ -2359,7 +2621,7 @@ func Many(f func()) { f() }
 	// another read_file call. Merely having the source on disk is insufficient.
 	evidence := newVerificationEvidence(repo, nil)
 	evidence.sourceFiles = verificationSourceFiles(scan)
-	citation := AISourceCitation{File: filepath.Join(dependency, "dep.go"), Line: 3, Quote: "func Start(cancel context.CancelFunc) { go func() { cancel() }() }"}
+	citation := AISourceCitation{File: filepath.Join(dependency, "dep.go"), Line: 5, Quote: "  cancel()"}
 	if evidence.check(citation) == nil {
 		t.Fatal("unread source accepted as evidence")
 	}
@@ -2389,6 +2651,30 @@ func Many(f func()) { f() }
 			t.Fatalf("hidden source must not become evidence: %v, %d bytes", err, len(output))
 		}
 	})
+	t.Run("context truncation", func(t *testing.T) {
+		evidence := newVerificationEvidence(repo, nil)
+		evidence.sourceFiles = verificationSourceFiles(scan)
+		ctx := context.WithValue(context.Background(), verificationToolLimitKey{}, 512)
+		tool := &verificationEvidenceTool{verificationTool: inspector, evidence: evidence}
+		output, err := executeTool(ctx, []verificationTool{tool}, "inspect_dispatch", input, nil)
+		encoded, _ := json.Marshal(output)
+		if err != nil || len(encoded) > 512 || !strings.Contains(output, "truncated") {
+			t.Fatalf("context limit not applied: %v, %d bytes", err, len(encoded))
+		}
+		visible := 0
+		for _, quote := range append([]AISourceCitation{citation}, origins...) {
+			shown := strings.Contains(output, verificationSourceQuote(quote))
+			if shown {
+				visible++
+			}
+			if (evidence.check(quote) == nil) != shown {
+				t.Fatalf("citation visibility mismatch: %+v, visible=%v", quote, shown)
+			}
+		}
+		if visible == 0 || visible == len(origins)+1 {
+			t.Fatalf("fixture must retain some quotes and omit others: visible=%d", visible)
+		}
+	})
 	t.Run("cancellation assessment", func(t *testing.T) {
 		// Omit initial excerpts to exercise source delivery through the tool alone.
 		if err := os.WriteFile(filepath.Join(repo, "verify-scan.md"), []byte("Assess {{.call_traces}}"), 0600); err != nil {
@@ -2408,10 +2694,21 @@ func Many(f func()) { f() }
 		if len(nodes) != len(path) {
 			t.Fatal("fixture path missing")
 		}
+		var closureCall AISourceCitation
+		for _, edge := range nodes[1].Out {
+			if edge.Callee == nodes[2] && edge.Site != nil && edge.Site.Common().StaticCallee() == nodes[2].Func {
+				pos := nodes[1].Func.Prog.Fset.Position(edge.Site.Pos())
+				closureCall = AISourceCitation{File: pos.Filename, Line: pos.Line, Quote: strings.Split(dependencySource, "\n")[pos.Line-1]}
+			}
+		}
+		if closureCall.Line == 0 || closureCall.Line == citation.Line {
+			t.Fatal("fixture must distinguish the static closure call from cancel()")
+		}
 		for _, tc := range []struct {
 			name, want string
 		}{
 			{"checked cancellation origin", "false"},
+			{"refuted closure call instead of callback", "unknown"},
 			{"unread source", "unknown"},
 			{"fabricated origin", "unknown"},
 			{"missing alternate review", "unknown"},
@@ -2429,6 +2726,13 @@ func Many(f func()) { f() }
 						}
 					}
 					review := AIEdgeReview{Step: 3, Status: "ruled_out", CallSite: citation, ValueOrigin: append([]AISourceCitation(nil), origins...), Reasoning: "main passes the context.WithCancel result into Start; its captured cancel cannot be Serve's closure."}
+					if tc.name == "refuted closure call instead of callback" {
+						staticInput := json.RawMessage(`{"module":".","caller":"example.com/dependency.Start","callee":"example.com/dependency.Start$1"}`)
+						if _, err := executeTool(ctx, tools, "inspect_dispatch", staticInput, nil); err != nil {
+							return "", err
+						}
+						review.Step, review.CallSite = 2, closureCall
+					}
 					if tc.name == "fabricated origin" {
 						review.ValueOrigin[0].Quote = "cancel := somethingElse()"
 					}
@@ -2439,7 +2743,7 @@ func Many(f func()) { f() }
 					a := &AIVerification{IsVulnerable: "false", Confidence: "high", Reasoning: review.Reasoning, Evidence: []string{review.Reasoning},
 						GraphAnalysis: AIGraphAnalysis{Summary: "Cancellation callback is overapproximated", AlternativePaths: alternate, ScopeEvidence: origins, Findings: []AIGraphFinding{{
 							Kind: "suspected_false_positive", Module: ".", Package: "example.com/dependency", Symbol: "Serve", GraphPath: path,
-							SourcePath: []string{citation.File + ":3"}, EdgeReviews: []AIEdgeReview{review}, Confidence: "high", Reasoning: review.Reasoning,
+							SourcePath: []string{citation.File + ":5"}, EdgeReviews: []AIEdgeReview{review}, Confidence: "high", Reasoning: review.Reasoning,
 							Evidence: []string{review.Reasoning}, Uncertainties: []string{},
 						}}}, DynamicAnalysis: AIDynamicAnalysis{Summary: "No further dynamic usage found in the fixture", Findings: []AIDynamicFinding{}}, Uncertainties: []string{},
 					}
@@ -2449,6 +2753,14 @@ func Many(f func()) { f() }
 				verifyWithAgent(context.Background(), result, repo, aiConfig{}, agent)
 				if result.IsVulnerable != "true" || result.AIVerification == nil || result.AIVerification.IsVulnerable != tc.want {
 					t.Fatalf("want AI=%s with scanner unchanged, got %+v; errors %v", tc.want, result.AIVerification, result.Errors)
+				}
+				if tc.name == "refuted closure call instead of callback" {
+					feedback := strings.Join(result.AIVerification.Uncertainties, "\n")
+					for _, want := range []string{"a statically resolved call cannot be refuted", "edge_reviews[0] step=2", "step 3:", "dep.go:5"} {
+						if !strings.Contains(feedback, want) {
+							t.Errorf("missing %q in closure/callback feedback: %s", want, feedback)
+						}
+					}
 				}
 			})
 		}
@@ -2678,6 +2990,432 @@ func TestAIGraphDispatchEvidence(t *testing.T) {
 
 }
 
+func TestAIReflectionDispatchEvidence(t *testing.T) {
+	repo := t.TempDir()
+	code := `package main
+import "reflect"
+type Item struct{}
+func (*Item) DeepCopyInto(*Item) {}
+func target() {}
+func copyItem(a, b *Item) {
+ reflect.ValueOf(a).MethodByName("DeepCopyInto").Call([]reflect.Value{reflect.ValueOf(b)})
+}
+func invokeTarget() {
+ reflect.ValueOf(target).Call(nil)
+}
+func copyTwice(a, b *Item) {
+ reflect.ValueOf(a).MethodByName("DeepCopyInto").Call([]reflect.Value{reflect.ValueOf(b)})
+ reflect.ValueOf(a).MethodByName("DeepCopyInto").Call([]reflect.Value{reflect.ValueOf(b)})
+}
+func runtimeChoice(a any, name string) {
+ reflect.ValueOf(a).MethodByName(name).Call(nil)
+}
+type Value struct{}
+func (Value) Call() {}
+func unrelated() { Value{}.Call() }
+func main() {
+ a, b := &Item{}, &Item{}
+ copyItem(a, b)
+ invokeTarget()
+ copyTwice(a, b)
+ runtimeChoice(a, "DeepCopyInto")
+ unrelated()
+ _ = bind(Server{})
+}
+type Handler interface{ Handle() }
+type Server struct{}
+func (Server) Handle() { target() }
+func bind(h Handler) func() { return h.Handle }
+`
+	for name, content := range map[string]string{"go.mod": "module example.com/test\n\ngo 1.21\n", "main.go": code} {
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("ALGO", "rta")
+	scan := &Result{ScanConfig: ScanConfig{Directory: repo}}
+	build := scan.getSSABuild(repo)
+	if build == nil || build.cg == nil {
+		t.Fatalf("fixture build failed: %v", scan.Errors)
+	}
+	node := func(name string) *callgraph.Node {
+		t.Helper()
+		for fn, n := range build.cg.Nodes {
+			if fn != nil && fn.String() == name {
+				return n
+			}
+		}
+		t.Fatalf("fixture node missing: %s", name)
+		return nil
+	}
+	reflected, target := node("(reflect.Value).Call"), node("example.com/test.target")
+	var synthetic bool
+	for _, edge := range reflected.Out {
+		synthetic = synthetic || edge.Callee == target && edge.Site == nil
+	}
+	if !synthetic {
+		t.Fatal("fixture must reproduce RTA's synthetic reflection edge")
+	}
+	citation := func(line int) AISourceCitation {
+		return AISourceCitation{File: "main.go", Line: line, Quote: strings.Split(code, "\n")[line-1]}
+	}
+	review := func(line int, status string) AIEdgeReview {
+		return AIEdgeReview{Step: 2, Status: status, CallSite: citation(line), ValueOrigin: []AISourceCitation{citation(line)}, Reasoning: "Review the actual reflected value selected at this caller's source site."}
+	}
+	var excerpts strings.Builder
+	for i, line := range strings.Split(code, "\n") {
+		fmt.Fprintf(&excerpts, "%d|%s\n", i+1, line)
+	}
+	evidence := newVerificationEvidence(repo, map[string]string{"main.go": excerpts.String()})
+	for _, tc := range []struct {
+		name, caller, kind, want string
+		reviews                  []AIEdgeReview
+	}{
+		{"literal different method", "copyItem", "suspected_false_positive", "false", []AIEdgeReview{review(7, "ruled_out")}},
+		{"actual reflected target", "invokeTarget", "supported_path", "true", []AIEdgeReview{review(10, "supported")}},
+		{"runtime value unresolved", "runtimeChoice", "suspected_false_positive", "unknown", []AIEdgeReview{review(17, "unresolved")}},
+		{"other caller's citation", "invokeTarget", "suspected_false_positive", "unknown", []AIEdgeReview{review(7, "ruled_out")}},
+		{"no review", "copyItem", "suspected_false_positive", "unknown", nil},
+		{"all call sites excluded", "copyTwice", "suspected_false_positive", "false", []AIEdgeReview{review(13, "ruled_out"), review(14, "ruled_out")}},
+		{"one call site unreviewed", "copyTwice", "suspected_false_positive", "unknown", []AIEdgeReview{review(13, "ruled_out")}},
+		{"conflicting support", "copyTwice", "suspected_false_positive", "unknown", []AIEdgeReview{review(13, "ruled_out"), review(14, "ruled_out"), review(14, "supported")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := []*callgraph.Node{node("example.com/test." + tc.caller), reflected, target}
+			finding := AIGraphFinding{Module: ".", Package: "example.com/test", Symbol: "target", Kind: tc.kind, GraphPath: []string{path[0].Func.String(), path[1].Func.String(), path[2].Func.String()}, EdgeReviews: tc.reviews}
+			a := &AIVerification{IsVulnerable: "false", Confidence: "high", GraphAnalysis: AIGraphAnalysis{AlternativePaths: "Fixture caller and its reflected value reviewed", ScopeEvidence: []AISourceCitation{citation(22)}, Findings: []AIGraphFinding{finding}}}
+			if tc.kind == "supported_path" {
+				a.IsVulnerable = "true"
+			}
+			r := &Result{UsedImports: map[string]map[string]UsedImportsDetails{".": {"example.com/test": {Symbols: []string{"target"}, Paths: [][]*callgraph.Node{path}}}}, ssaBuilds: scan.ssaBuilds}
+			if traces := FormatCallTraces(r); !strings.Contains(traces, "reflection_caller=") || !strings.Contains(traces, "retaining step=2") {
+				t.Fatalf("missing reflection review instructions: %s", traces)
+			}
+			validateGraphEvidence(r, repo, a, evidence)
+			if a.IsVulnerable != tc.want {
+				t.Fatalf("want %s, got %+v", tc.want, a)
+			}
+		})
+	}
+	path := []string{node("example.com/test.copyItem").Func.String(), reflected.Func.String(), target.Func.String()}
+	for _, tc := range []string{"missing origin", "unread source", "fabricated source", "wrong step", "no caller context"} {
+		t.Run(tc, func(t *testing.T) {
+			r := review(7, "ruled_out")
+			f := AIGraphFinding{Kind: "suspected_false_positive", Module: ".", GraphPath: path, EdgeReviews: []AIEdgeReview{r}}
+			e := evidence
+			switch tc {
+			case "missing origin":
+				f.EdgeReviews[0].ValueOrigin = nil
+			case "unread source":
+				e = newVerificationEvidence(repo, nil)
+			case "fabricated source":
+				f.EdgeReviews[0].CallSite.Quote = "imaginary source"
+			case "wrong step":
+				f.EdgeReviews[0].Step = 1
+			case "no caller context":
+				f.GraphPath, f.EdgeReviews[0].Step = path[1:], 1
+			}
+			if err := validateGraphFinding(scan, repo, &f, e); err == nil {
+				t.Fatal("invalid reflection review accepted")
+			}
+		})
+	}
+	t.Run("distinct reflection callers remain separate", func(t *testing.T) {
+		paths := [][]*callgraph.Node{{node("example.com/test.copyItem"), reflected, target}, {node("example.com/test.invokeTarget"), reflected, target}}
+		r := &Result{UsedImports: map[string]map[string]UsedImportsDetails{".": {"example.com/test": {Symbols: []string{"target", "target"}, Paths: paths}}}, ssaBuilds: scan.ssaBuilds}
+		a := &AIVerification{IsVulnerable: "false", GraphAnalysis: AIGraphAnalysis{AlternativePaths: "Reviewed fixture callers", ScopeEvidence: []AISourceCitation{citation(22)}, Findings: []AIGraphFinding{{Kind: "suspected_false_positive", Module: ".", Package: "example.com/test", Symbol: "target", GraphPath: path, EdgeReviews: []AIEdgeReview{review(7, "ruled_out")}}}}}
+		validateGraphEvidence(r, repo, a, evidence)
+		if a.IsVulnerable != "unknown" || len(a.GraphAnalysis.Findings[0].refutedSteps) != 1 {
+			t.Fatalf("path refutation must be retained without excluding a different caller: %+v", a)
+		}
+	})
+	t.Run("refuted reflection before unresolved interface wrapper", func(t *testing.T) {
+		wrapper := node("(example.com/test.Handler).Handle$bound")
+		method := node("(example.com/test.Server).Handle")
+		f := AIGraphFinding{Kind: "suspected_false_positive", Module: ".", GraphPath: []string{path[0], path[1], wrapper.Func.String(), method.Func.String(), target.Func.String()}, EdgeReviews: []AIEdgeReview{review(7, "ruled_out")}}
+		if err := validateGraphFinding(scan, repo, &f, evidence); err != nil {
+			t.Fatalf("the excluded reflection step should refute the path without resolving the downstream wrapper: %v", err)
+		}
+	})
+	t.Run("unrelated synthetic edge", func(t *testing.T) {
+		fake := node("(example.com/test.Value).Call")
+		callgraph.AddEdge(fake, nil, target)
+		f := AIGraphFinding{Kind: "suspected_false_positive", Module: ".", GraphPath: []string{node("example.com/test.unrelated").Func.String(), fake.Func.String(), target.Func.String()}, EdgeReviews: []AIEdgeReview{review(21, "ruled_out")}}
+		if err := validateGraphFinding(scan, repo, &f, evidence); err == nil {
+			t.Fatal("unrelated synthetic edge accepted as reflection")
+		}
+	})
+	for _, synthetic := range []bool{false, true} {
+		t.Run(fmt.Sprintf("inspection/synthetic=%v", synthetic), func(t *testing.T) {
+			e := newVerificationEvidence(repo, nil)
+			e.sourceFiles = verificationSourceFiles(scan)
+			tool := &verificationEvidenceTool{verificationTool: &inspectDispatchTool{graph: build.cg, repoDir: repo, sourceFiles: e.sourceFiles}, evidence: e}
+			args := map[string]string{"caller": path[0], "callee": path[1]}
+			if synthetic {
+				args = map[string]string{"caller": path[1], "callee": path[2], "reflection_caller": path[0]}
+			}
+			input, _ := json.Marshal(args)
+			output, err := executeTool(context.Background(), []verificationTool{tool}, "inspect_dispatch", input, nil)
+			if err != nil || len(output) > maxToolResultBytes {
+				t.Fatalf("inspection error=%v bytes=%d", err, len(output))
+			}
+			for _, want := range []string{"reflection receiver", "MethodByName", "DeepCopyInto"} {
+				if !strings.Contains(output, want) {
+					t.Errorf("missing %q: %s", want, output)
+				}
+			}
+			if err := e.check(citation(7)); err != nil {
+				t.Fatal(err)
+			}
+			if e.check(citation(10)) == nil {
+				t.Fatal("inspection leaked a different reflection caller's source")
+			}
+		})
+	}
+	t.Run("reflection inspection requires matching caller", func(t *testing.T) {
+		tool := &inspectDispatchTool{graph: build.cg, repoDir: repo}
+		for _, caller := range []string{"", "example.com/test.target", "missing"} {
+			input, _ := json.Marshal(map[string]string{"caller": reflected.Func.String(), "callee": target.Func.String(), "reflection_caller": caller})
+			output, quotes, err := tool.ExecuteWithSources(context.Background(), input)
+			if err != nil || len(quotes) != 0 || !strings.Contains(output, "No matching source anchor") {
+				t.Fatalf("invalid reflection caller accepted: %q, %v", output, err)
+			}
+		}
+	})
+	t.Run("select unattempted reflection checks", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			want int
+		}{
+			{"unreviewed", 2}, {"inconclusive", 2}, {"validated refutation", 1},
+			{"already inspected", 1}, {"implicit module", 1}, {"failed inspection", 1},
+			{"wrong caller", 2}, {"wrong module", 2}, {"static reflection call", 2},
+			{"later batch", 0}, {"definite verdict", 0}, {"invalid assessment", 0},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				r := &Result{ScanConfig: ScanConfig{Directory: repo}, UsedImports: map[string]map[string]UsedImportsDetails{".": {"example.com/test": {Paths: [][]*callgraph.Node{{node(path[0]), reflected, target}, {node(path[0]), reflected, target}, {node("example.com/test.invokeTarget"), reflected, target}}}}}, ssaBuilds: scan.ssaBuilds}
+				a := &AIVerification{IsVulnerable: "unknown"}
+				e := newVerificationEvidence(repo, nil)
+				switch tc.name {
+				case "invalid assessment":
+					a = nil
+				case "definite verdict":
+					a.IsVulnerable = "true"
+				case "inconclusive":
+					a.GraphAnalysis.Findings = []AIGraphFinding{{Kind: "inconclusive", Module: ".", GraphPath: path}}
+				case "validated refutation":
+					a.GraphAnalysis.Findings = []AIGraphFinding{{Kind: "suspected_false_positive", Module: ".", GraphPath: path, refutedSteps: []int{2}}}
+				case "unreviewed", "later batch":
+				default:
+					query := verificationDispatchQuery{Module: ".", Caller: path[1], Callee: path[2], ReflectionCaller: path[0]}
+					switch tc.name {
+					case "implicit module":
+						query.Module = ""
+					case "wrong module":
+						query.Module = "other"
+					case "wrong caller":
+						query.ReflectionCaller = "example.com/test.main"
+					case "static reflection call":
+						query.Caller, query.Callee, query.ReflectionCaller = path[0], path[1], ""
+					}
+					for _, tool := range verificationTools(r, repo) {
+						if tool.Name() != "inspect_dispatch" {
+							continue
+						}
+						if tc.name == "failed inspection" {
+							tool = &inspectDispatchTool{repoDir: repo} // Graph unavailable.
+						}
+						input, _ := json.Marshal(query)
+						wrapped := &verificationEvidenceTool{verificationTool: tool, evidence: e}
+						_, _ = wrapped.Execute(context.Background(), input)
+					}
+				}
+				checks := verificationReflectionChecks(r, repo, a, e, tc.name != "later batch")
+				if strings.Count(checks, "inspect_dispatch(") != tc.want || len(checks) > maxToolResultBytes/2 {
+					t.Fatalf("want %d exact checks; got %s", tc.want, checks)
+				}
+				if tc.want > 0 && (!strings.Contains(checks, "edge_reviews.step=2") || !strings.Contains(checks, `"reflection_caller":"example.com/test.invokeTarget"`)) {
+					t.Fatalf("missing step or separate calling context: %s", checks)
+				}
+			})
+		}
+	})
+	for _, provider := range []string{"anthropic-vertex", "openai-compatible"} {
+		for _, failure := range []bool{false, true} {
+			t.Run(fmt.Sprintf("continue uninspected reflection/%s/failure=%v", provider, failure), func(t *testing.T) {
+				r := &Result{ScanConfig: ScanConfig{Directory: repo}, AffectedImports: map[string]AffectedImportsDetails{"example.com/test": {Symbols: []string{"target"}}}, UsedImports: map[string]map[string]UsedImportsDetails{".": {"example.com/test": {Symbols: []string{"target"}, Paths: [][]*callgraph.Node{{node(path[0]), reflected, target}}}}}, ssaBuilds: scan.ssaBuilds}
+				draft := &AIVerification{IsVulnerable: "unknown", Confidence: "medium", Reasoning: "Reflection target not inspected", Evidence: []string{"Missing reflected value review"}, Uncertainties: []string{"Reflected target and other routes unresolved"}, GraphAnalysis: AIGraphAnalysis{Summary: "Unresolved reflection edge", Findings: []AIGraphFinding{{Kind: "inconclusive", Module: ".", Package: "example.com/test", Symbol: "target", GraphPath: path, SourcePath: []string{}, Confidence: "medium", Reasoning: "Receiver not inspected", Evidence: []string{"No dispatch review"}, Uncertainties: []string{"Reflected target unresolved"}}}}, DynamicAnalysis: AIDynamicAnalysis{Summary: "Alternate reflected invocations still need review", Findings: []AIDynamicFinding{}}}
+				if failure {
+					draft.IsVulnerable = "false"
+					draft.Uncertainties = []string{}
+					draft.GraphAnalysis.Findings[0].Kind = "suspected_false_positive"
+					draft.GraphAnalysis.Findings[0].Uncertainties = []string{}
+					draft.GraphAnalysis.Findings[0].EdgeReviews = []AIEdgeReview{review(7, "ruled_out")}
+					draft.GraphAnalysis.AlternativePaths = "Claimed inspection without supplied source"
+					draft.GraphAnalysis.ScopeEvidence = []AISourceCitation{citation(7)}
+				}
+				first, err := marshalAuditResponseForTest(draft)
+				if err != nil {
+					t.Fatal(err)
+				}
+				draft.GraphAnalysis.Findings[0].Kind = "suspected_false_positive"
+				draft.GraphAnalysis.Findings[0].EdgeReviews = []AIEdgeReview{review(7, "ruled_out")}
+				draft.GraphAnalysis.Findings[0].Uncertainties = []string{}
+				draft.GraphAnalysis.Findings[0].Reasoning = "The selected method is DeepCopyInto"
+				last, err := marshalAuditResponseForTest(draft)
+				if err != nil {
+					t.Fatal(err)
+				}
+				args, _ := json.Marshal(map[string]string{"module": ".", "caller": path[1], "callee": path[2], "reflection_caller": path[0]})
+				calls := 0
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+					calls++
+					var body struct {
+						Messages   []json.RawMessage `json:"messages"`
+						ToolChoice json.RawMessage   `json:"tool_choice"`
+					}
+					if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+						t.Error(err)
+					}
+					if calls == 2 {
+						if strings.Contains(string(body.ToolChoice), "none") || !strings.Contains(string(body.Messages[len(body.Messages)-1]), "reflection_caller") {
+							t.Errorf("missing tools-enabled reflection continuation; tool_choice=%s", body.ToolChoice)
+						}
+						w.Header().Set("Content-Type", "application/json")
+						if provider == "anthropic-vertex" {
+							json.NewEncoder(w).Encode(map[string]any{"id": "inspect", "type": "message", "role": "assistant", "stop_reason": "tool_use", "content": []any{map[string]any{"type": "tool_use", "id": "dispatch", "name": "inspect_dispatch", "input": json.RawMessage(args)}}})
+						} else {
+							json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"finish_reason": "tool_calls", "message": map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"id": "dispatch", "type": "function", "function": map[string]string{"name": "inspect_dispatch", "arguments": string(args)}}}}}}})
+						}
+						return
+					}
+					response := string(first)
+					if calls == 3 {
+						response = string(last)
+						if !strings.Contains(string(body.Messages[len(body.Messages)-1]), "Source quote:") || !strings.Contains(string(body.Messages[len(body.Messages)-1]), "DeepCopyInto") {
+							t.Error("continued investigation did not deliver reflected value source")
+						}
+					}
+					if failure && calls == 3 {
+						w.WriteHeader(500)
+						return
+					}
+					if calls > 3 {
+						t.Errorf("unexpected extra request %d", calls)
+					}
+					replyVerificationTextForTest(w, provider, response)
+				}))
+				defer server.Close()
+				template, wantRefuted := "{{.source_snippets}}\n{{.call_traces}}", 1
+				if failure {
+					// The draft cites a real source line that was not yet supplied.
+					template, wantRefuted = "{{.call_traces}}", 0
+				}
+				a, err := verifyRiskBatch(context.Background(), r, repo, aiConfig{}, backendForTest(provider, server.URL, 6), template, nil, nil, true)
+				if err != nil || a == nil || a.IsVulnerable != "unknown" || len(a.GraphAnalysis.Findings[0].refutedSteps) != wantRefuted || calls != 3 {
+					t.Fatalf("continuation lost source refutation or unresolved alternatives: assessment=%+v err=%v requests=%d", a, err, calls)
+				}
+			})
+		}
+	}
+	t.Run("unknown reflection anchor", func(t *testing.T) {
+		callgraph.AddEdge(node("example.com/test.copyItem"), nil, reflected)
+		f := AIGraphFinding{Kind: "suspected_false_positive", Module: ".", GraphPath: path, EdgeReviews: []AIEdgeReview{review(7, "ruled_out")}}
+		if err := validateGraphFinding(scan, repo, &f, evidence); err == nil {
+			t.Fatal("unlocatable reflection site excluded without evidence")
+		}
+	})
+}
+
+func replyVerificationTextForTest(w http.ResponseWriter, provider, text string) {
+	w.Header().Set("Content-Type", "application/json")
+	if provider == "anthropic-vertex" {
+		json.NewEncoder(w).Encode(map[string]any{"id": "assessment", "type": "message", "role": "assistant", "stop_reason": "end_turn", "content": []any{map[string]string{"type": "text", "text": text}}})
+	} else {
+		json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]string{"role": "assistant", "content": text}}}})
+	}
+}
+
+func TestBackendsBoundedInvestigationContinuation(t *testing.T) {
+	for _, provider := range []string{"anthropic-vertex", "openai-compatible"} {
+		for _, tc := range []struct {
+			name         string
+			limit, calls int
+		}{
+			{"once", 6, 2}, {"then correction", 6, 3}, {"provider error", 6, 2},
+			{"timeout", 6, 1}, {"context", 6, 1}, {"last tool turn", 1, 1}, {"final turn", 0, 1},
+		} {
+			t.Run(provider+"/"+tc.name, func(t *testing.T) {
+				calls, reviews := 0, 0
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					calls++
+					var request struct {
+						Messages   []json.RawMessage `json:"messages"`
+						ToolChoice json.RawMessage   `json:"tool_choice"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+						t.Error(err)
+					}
+					if calls > 1 {
+						messages, _ := json.Marshal(request.Messages)
+						if !strings.Contains(string(messages), "original source") || !strings.Contains(string(messages), "provisional assessment") {
+							t.Error("continuation lost existing conversation")
+						}
+						wantFinal := calls == 3
+						if strings.Contains(string(request.ToolChoice), "none") != wantFinal {
+							t.Errorf("tool choice=%s; final=%v", request.ToolChoice, wantFinal)
+						}
+						if calls == 2 && !strings.Contains(string(request.Messages[len(request.Messages)-1]), "inspect exact reflection edge") {
+							t.Error("continuation lacks focused check")
+						}
+						if calls == 3 && !strings.Contains(string(request.Messages[len(request.Messages)-1]), "repair citations") {
+							t.Error("correction lacks latest feedback")
+						}
+					}
+					if calls > tc.calls {
+						t.Errorf("unexpected request %d", calls)
+					}
+					if tc.name == "provider error" && calls == 2 {
+						w.WriteHeader(500)
+						return
+					}
+					replyVerificationTextForTest(w, provider, "provisional assessment")
+				}))
+				defer server.Close()
+				agent := backendForTest(provider, server.URL, tc.limit)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				output, err := agent.(reviewingVerificationAgent).RunReviewed(ctx, "original source", nil, func(string) verificationReview {
+					reviews++
+					if tc.name == "timeout" {
+						cancel()
+					}
+					if tc.name == "context" {
+						switch a := agent.(type) {
+						case *compatibleAgent:
+							a.cfg.ContextTokens = 1
+						case *anthropicAgent:
+							a.cfg.ContextTokens = 1
+						}
+					}
+					decision := verificationReview{Investigation: "inspect exact reflection edge"}
+					if tc.name == "then correction" {
+						decision.Feedback = "repair citations"
+					}
+					return decision
+				})
+				wantReviews := tc.calls
+				if tc.name == "then correction" || tc.name == "provider error" {
+					wantReviews--
+				}
+				if err != nil || output != "provisional assessment" || calls != tc.calls || reviews != wantReviews {
+					t.Fatalf("response=%q err=%v requests=%d reviews=%d", output, err, calls, reviews)
+				}
+			})
+		}
+	}
+}
+
 func TestAIGraphSupportedAndAlternatePaths(t *testing.T) {
 	repo := t.TempDir()
 	code := `package main
@@ -2791,6 +3529,29 @@ func TestVerificationEvidenceRetrieval(t *testing.T) {
 	e.add("partial.go", "2|truncated without newline")
 	if e.check(AISourceCitation{File: "partial.go", Line: 2, Quote: "truncated without newline"}) == nil {
 		t.Fatal("partial line accepted")
+	}
+}
+
+func TestVerificationEvidenceContextLimit(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "main.go"), []byte("package main\n// "+strings.Repeat("<quoted>\"", 1500)+"\nfunc omitted() {}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, limit := range []int{512, 20000} {
+		e := newVerificationEvidence(repo, nil)
+		tool := &verificationEvidenceTool{verificationTool: &readFileTool{repoDir: repo}, evidence: e}
+		ctx := context.WithValue(context.Background(), verificationToolLimitKey{}, limit)
+		output, err := executeTool(ctx, []verificationTool{tool}, "read_file", []byte(`{"path":"main.go"}`), nil)
+		encoded, _ := json.Marshal(output)
+		if err != nil || len(encoded) > limit || !strings.Contains(output, "truncated") {
+			t.Fatalf("limit=%d encoded=%d err=%v", limit, len(encoded), err)
+		}
+		if err := e.check(AISourceCitation{File: "main.go", Line: 1, Quote: "package main"}); err != nil {
+			t.Fatal(err)
+		}
+		if len(e.lines["main.go"]) != 1 {
+			t.Fatalf("partial or omitted source line registered at limit %d: %+v", limit, e.lines["main.go"])
+		}
 	}
 }
 
@@ -3189,7 +3950,10 @@ func TestBackendsBoundedAssessmentCorrection(t *testing.T) {
 				agent := backendForTest(provider, server.URL, 0)
 				reviewer := agent.(reviewingVerificationAgent)
 				reviews := 0
-				output, err := reviewer.RunReviewed(context.Background(), "original evidence", nil, func(string) string { reviews++; return "step 3 needs value origin" })
+				output, err := reviewer.RunReviewed(context.Background(), "original evidence", nil, func(string) verificationReview {
+					reviews++
+					return verificationReview{Feedback: "step 3 needs value origin"}
+				})
 				want := "corrected assessment"
 				if failure {
 					want = "draft assessment"
@@ -3283,15 +4047,66 @@ func main() { invoke(safe) }
 	if err == nil || !strings.Contains(err.Error(), "step 2") || !strings.Contains(err.Error(), "main.go:5") {
 		t.Fatalf("unhelpful feedback: %v", err)
 	}
-	for _, malformed := range []bool{false, true} {
-		t.Run(fmt.Sprintf("batch correction/malformed=%v", malformed), func(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*AIGraphFinding)
+		want   string
+	}{
+		{"missing reviews", func(f *AIGraphFinding) { f.EdgeReviews = nil }, "missing edge_reviews"},
+		{"wrong step", func(f *AIGraphFinding) { f.EdgeReviews[0].Step = 3 }, "edge_reviews[0] has step=3"},
+		{"missing step", func(f *AIGraphFinding) { f.EdgeReviews[0].Step = 0 }, "edge_reviews[0] has step=0"},
+		{"wrong call site", func(f *AIGraphFinding) { f.EdgeReviews[0].CallSite.Line = 8 }, "call_site=main.go:8"},
+		{"static call refutation", func(f *AIGraphFinding) { f.EdgeReviews[0].Step, f.EdgeReviews[0].CallSite = 1, origin }, "a statically resolved call cannot be refuted"},
+		{"unresolved review", func(f *AIGraphFinding) { f.EdgeReviews[0].Status = "unresolved" }, "step=2 status=unresolved"},
+		{"conflicting support", func(f *AIGraphFinding) {
+			supported := review
+			supported.Status = "supported"
+			f.EdgeReviews = append(f.EdgeReviews, supported)
+		}, "conflicting supported call"},
+	} {
+		t.Run("review feedback/"+tc.name, func(t *testing.T) {
+			finding := AIGraphFinding{Kind: "suspected_false_positive", Module: ".", GraphPath: names, EdgeReviews: []AIEdgeReview{review}}
+			tc.mutate(&finding)
+			err := validateGraphFinding(&Result{ssaBuilds: map[string]*ssaBuild{repo: {cg: graph}}}, repo, &finding, evidence)
+			if err == nil {
+				t.Fatal("incomplete review accepted")
+			}
+			for _, want := range []string{tc.want, "step 2", "main.go:5"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("missing %q in feedback: %v", want, err)
+				}
+			}
+			public := publicAuditDiagnostic("Graph evidence validation for example.com/test.target: " + err.Error())
+			if strings.Contains(public, "review details:") || strings.Contains(public, "main.go:5") {
+				t.Fatalf("detailed correction feedback leaked into public diagnostic: %s", public)
+			}
+		})
+	}
+	for _, outcome := range []string{"complete", "static call refutation", "invalid JSON", "inconclusive without uncertainty"} {
+		t.Run("batch correction/"+outcome, func(t *testing.T) {
+			malformed := outcome == "invalid JSON"
+			incomplete := outcome == "inconclusive without uncertainty"
 			r := &Result{AffectedImports: map[string]AffectedImportsDetails{"example.com/test": {Symbols: []string{"target"}}}, UsedImports: map[string]map[string]UsedImportsDetails{".": {"example.com/test": {Symbols: []string{"target"}, Paths: [][]*callgraph.Node{path}}}}, ssaBuilds: map[string]*ssaBuild{repo: {cg: graph}}}
+			if incomplete {
+				r.AffectedImports["example.com/test"] = AffectedImportsDetails{Symbols: []string{"target", "other"}}
+				r.UsedImports["."]["example.com/test"] = UsedImportsDetails{Symbols: []string{"target", "other"}, Paths: [][]*callgraph.Node{path, {node("main"), node("invoke"), node("other")}}}
+			}
 			draft := &AIVerification{IsVulnerable: "false", Confidence: "high", Reasoning: "The callback invokes safe, not bridge", Evidence: []string{"main.go:8: main passes safe"}, GraphAnalysis: AIGraphAnalysis{Summary: "Checked callback dispatch", AlternativePaths: "Checked callers and entry point", ScopeEvidence: []AISourceCitation{origin}, Findings: []AIGraphFinding{{Kind: "suspected_false_positive", Module: ".", Package: "example.com/test", Symbol: "target", GraphPath: names, SourcePath: []string{}, Confidence: "high", Reasoning: "The passed function is safe", Evidence: []string{"main.go:8: main passes safe"}, Uncertainties: []string{}}}}, DynamicAnalysis: AIDynamicAnalysis{Summary: "No relevant dynamic candidates", Findings: []AIDynamicFinding{}}, Uncertainties: []string{}}
+			if outcome == "static call refutation" {
+				wrongStep := review
+				wrongStep.Step, wrongStep.CallSite = 1, origin
+				draft.GraphAnalysis.Findings[0].EdgeReviews = []AIEdgeReview{wrongStep}
+			}
 			first, err := marshalAuditResponseForTest(draft)
 			if err != nil {
 				t.Fatal(err)
 			}
 			draft.GraphAnalysis.Findings[0].EdgeReviews = []AIEdgeReview{review}
+			if incomplete {
+				draft.IsVulnerable = "unknown"
+				draft.Uncertainties = []string{"The other callback path is still unresolved"}
+				draft.GraphAnalysis.Findings = append(draft.GraphAnalysis.Findings, AIGraphFinding{Kind: "inconclusive", Module: ".", Package: "example.com/test", Symbol: "other", GraphPath: []string{node("main").Func.String(), node("invoke").Func.String(), node("other").Func.String()}, SourcePath: []string{}, Confidence: "medium", Reasoning: "The other callback path was not resolved", Evidence: []string{"No completed review for this candidate"}, Uncertainties: []string{}})
+			}
 			corrected, err := marshalAuditResponseForTest(draft)
 			if err != nil {
 				t.Fatal(err)
@@ -3302,8 +4117,17 @@ func main() { invoke(safe) }
 				body, _ := io.ReadAll(request.Body)
 				response := string(first)
 				if calls > 1 {
-					if !strings.Contains(string(body), "step 2") || !strings.Contains(string(body), "main.go:5") {
-						t.Errorf("missing exact correction feedback: %s", body)
+					failure := "missing edge_reviews"
+					if outcome == "static call refutation" {
+						failure = "a statically resolved call cannot be refuted"
+					}
+					for _, want := range []string{"step 2", "main.go:5", failure, "own nonempty uncertainties", "Quotes in top-level evidence do not replace edge_reviews"} {
+						if !strings.Contains(string(body), want) {
+							t.Errorf("missing correction guidance %q: %s", want, body)
+						}
+					}
+					if incomplete && !strings.Contains(string(body), "Unreviewed scanner candidate: module=.; target=example.com/test.other") {
+						t.Errorf("unreviewed path missing from correction: %s", body)
 					}
 					response = string(corrected)
 					if malformed {
@@ -3316,7 +4140,7 @@ func main() { invoke(safe) }
 			defer server.Close()
 			a, err := verifyRiskBatch(context.Background(), r, repo, aiConfig{}, backendForTest("openai-compatible", server.URL, 0), "{{.source_snippets}}\n{{.call_traces}}", nil, nil, true)
 			want := "false"
-			if malformed {
+			if malformed || incomplete {
 				want = "unknown"
 			}
 			if err != nil || a == nil || a.IsVulnerable != want || calls != 2 {
@@ -3324,6 +4148,9 @@ func main() { invoke(safe) }
 			}
 			if malformed && !strings.Contains(strings.Join(a.Uncertainties, "\n"), "Assessment correction failed") {
 				t.Fatalf("correction failure lost: %+v", a)
+			}
+			if incomplete && (a.GraphAnalysis.Findings[0].Kind != "suspected_false_positive" || len(a.GraphAnalysis.Findings[0].refutedSteps) != 1 || !strings.Contains(strings.Join(a.Uncertainties, "\n"), "lacks an explicit uncertainty") || strings.Contains(strings.Join(a.Uncertainties, "\n"), "Assessment correction failed")) {
+				t.Fatalf("partial correction lost the validated refutation or unresolved gap: %+v", a)
 			}
 		})
 	}
@@ -3339,9 +4166,9 @@ func TestBackendsCorrectionRespectsBudgets(t *testing.T) {
 				agent := backendForTest(provider, server.URL, 0)
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
-				output, err := agent.(reviewingVerificationAgent).RunReviewed(ctx, "evidence", nil, func(string) string {
+				output, err := agent.(reviewingVerificationAgent).RunReviewed(ctx, "evidence", nil, func(string) verificationReview {
 					if limit == "accepted" {
-						return ""
+						return verificationReview{}
 					}
 					if limit == "timeout" {
 						cancel()
@@ -3353,7 +4180,7 @@ func TestBackendsCorrectionRespectsBudgets(t *testing.T) {
 							a.cfg.ContextTokens = 1
 						}
 					}
-					return "repair needed"
+					return verificationReview{Feedback: "repair needed"}
 				})
 				if err != nil || output != testAssessment || calls != 1 {
 					t.Fatalf("output=%q err=%v calls=%d", output, err, calls)

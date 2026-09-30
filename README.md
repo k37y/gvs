@@ -94,6 +94,27 @@ omitted source and surrounding context remain available through `read_file`.
 Only complete quotes delivered to the model count as citation evidence. SSA hints
 alone do not establish reachability. One checked impossible edge can refute a path;
 other paths and relevant alternative routes still need review.
+Traces label the required `edge_reviews.step`; correction feedback distinguishes
+missing reviews from mismatched steps or call sites and lists uncovered paths
+before detailed diagnostics. Dispatch inspection distinguishes static closure
+calls from indirect callback invocations. A refutation attached to a static call
+is rejected with feedback identifying that call and the indirect candidate steps.
+An inconclusive graph finding or unresolved dynamic
+finding with no uncertainty gets an explicit verifier gap and stays unresolved,
+so that omission does not discard other valid findings in the same response.
+For synthetic edges from `reflect.Value.Call` or `CallSlice`, reviews cite the
+actual reflection invocation in the preceding path caller and the selected value.
+`inspect_dispatch` accepts `reflection_caller` to retrieve that source and trace
+`ValueOf`, `MethodByName`, and `Method` arguments. Every matching site in that
+caller needs evidence for a refutation; it cannot exclude other callers of the
+reflection API. The static call into the reflection API remains valid even when
+the following synthetic target edge is excluded.
+If an early assessment leaves a synthetic reflection path unresolved, the verifier
+can continue the investigation once with exact `inspect_dispatch` arguments for
+up to four unattempted edges. This uses the existing conversation and limits;
+the later assessment correction still disables tools. Already inspected edges
+and validated path refutations do not trigger this continuation. Missing evidence
+still leaves the verdict unknown.
 These checks validate evidence provenance and coverage; source-flow interpretation
 still depends on the model. Citation objects and `file:line: exact source` strings
 undergo the same source checks; incomplete required citations remain unverified
@@ -123,7 +144,7 @@ not visually inspect SVG files or certify algorithm correctness.
 | `GVS_AI_LOCATION` | Vertex region | `global` |
 | `GVS_AI_MAX_ITERATIONS` | Investigation turns; each can contain multiple tool calls | `20` |
 | `GVS_AI_MAX_TOKENS` | Maximum output tokens per request | `16384` |
-| `GVS_AI_CONTEXT_TOKENS` | Context limit for the selected model; configure to match your endpoint | `131072` |
+| `GVS_AI_CONTEXT_TOKENS` | Context limit for the selected model; configure to match your endpoint (not detected automatically) | `131072`, including when empty |
 | `GVS_AI_TIMEOUT` | Overall verification timeout, in Go duration format | `10m` |
 | `GVS_AI_PRICING` | JSON object of USD rates per million tokens: `input` (uncached), `output`, `cache_read`, `cache_write` | Unset; costs are `null` |
 | `GVS_SKILLS_DIR` | Directory containing `verify-scan.md` | Installed or repository skills directory |
@@ -245,19 +266,33 @@ Before each provider request, the verifier budgets the serialized request
 margin, and attempts a final assessment as space runs low. The estimate uses one
 input token per serialized byte; it is conservative for the supported protocols,
 not a provider-specific tokenizer measurement. Set `GVS_AI_CONTEXT_TOKENS` to the
-model's actual limit. Requests exceeding this local budget are not sent; pending
-risks remain unreviewed. Graph excerpts are capped at 16 KiB with explicit
-omission notices and graph tools available for follow-up.
+model's actual limit. For OpenAI's GPT-4.1, use `GVS_AI_CONTEXT_TOKENS=1047576`
+([model documentation](https://developers.openai.com/api/docs/models/gpt-4.1));
+use a lower limit if your endpoint imposes one. Requests exceeding this local
+budget are not sent; pending risks remain unreviewed. Graph excerpts are capped
+at 16 KiB with explicit omission notices and graph tools available for follow-up.
+
+During tool use, the verifier also reserves space for the final assessment prompt
+and one correction: a 16 KiB serialized draft, up to 8 KiB of serialized validation
+feedback, and correction instructions/framing. Tool results are shortened or
+remaining calls skipped when necessary, with explicit notices. Complete history
+is preserved, and larger drafts still face the request budget check. Missing-field
+feedback identifies the analysis, finding index, and fields needing correction.
 
 Initial source context uses line-numbered excerpts around call sites, affected
 symbols, and reflection locations, with a 32 KiB source budget and 4 KiB per file.
-Each tool response is limited to 8 KiB. Omissions are explicitly marked, and the
-model can request narrower file ranges or searches to recover needed evidence.
+Each tool response is limited to 8 KiB and the remaining conversation budget;
+only complete source lines or quote records delivered within those limits count
+as citations. Omissions are explicitly marked, and the model can request narrower
+file ranges or searches to recover needed evidence while tools remain enabled.
 These are byte limits, not token limits; instructions, scan metadata, call traces,
 tool schemas, and accumulated conversation history also contribute to input usage.
 
 Use `cg -progress ...` to see initial prompt bytes and per-request and cumulative
-token usage. Input totals include cached input; cache reads and writes are listed
+token usage. The enabled message includes the configured context limit. Progress
+distinguishes a model returning an assessment early from GVS requesting one due
+to the iteration limit or context reserve; correction still has tools disabled.
+Input totals include cached input; cache reads and writes are listed
 separately when reported. Missing usage is marked unavailable, and cumulative
 logs include reporting counts so partial totals are visible. These counters come
 from received API responses, not billing records; SDK retries may incur additional
