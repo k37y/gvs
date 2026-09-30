@@ -521,7 +521,7 @@ func verifyRiskBatch(ctx context.Context, result *Result, repoDir string, cfg ai
 	}
 	tools := verificationTools(result, repoDir)
 	for i, tool := range tools {
-		if tool.Name() == "read_file" {
+		if tool.Name() == "read_file" || tool.Name() == "inspect_dispatch" {
 			tools[i] = &verificationEvidenceTool{verificationTool: tool, evidence: evidence}
 		}
 	}
@@ -678,9 +678,10 @@ func (t *reflectionRisksTool) Execute(ctx context.Context, input json.RawMessage
 
 func verificationTools(result *Result, repoDir string) []verificationTool {
 	pf := result.ProgressFunc
+	sourceFiles := verificationSourceFiles(result)
 	tools := []verificationTool{
 		&grepCodeTool{repoDir: repoDir, progressFunc: pf},
-		&readFileTool{repoDir: repoDir, sourceFiles: verificationSourceFiles(result), progressFunc: pf},
+		&readFileTool{repoDir: repoDir, sourceFiles: sourceFiles, progressFunc: pf},
 		&listFilesTool{repoDir: repoDir, progressFunc: pf},
 		&checkModuleTool{repoDir: repoDir, progressFunc: pf},
 		&checkGoVersionTool{repoDir: repoDir, result: result, progressFunc: pf},
@@ -704,7 +705,7 @@ func verificationTools(result *Result, repoDir string) []verificationTool {
 		}
 		if build.cg != nil {
 			callers[module] = &findCallersTool{graph: build.cg, repoModulePath: readModulePath(dir), progressFunc: pf}
-			dispatch[module] = &inspectDispatchTool{graph: build.cg}
+			dispatch[module] = &inspectDispatchTool{graph: build.cg, repoDir: repoDir, sourceFiles: sourceFiles}
 		}
 	}
 	if len(implementations) > 0 {
@@ -746,21 +747,29 @@ func (t *moduleGraphTool) InputSchema() verificationToolSchema {
 	return schema
 }
 func (t *moduleGraphTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
+	output, _, err := t.ExecuteWithSources(ctx, input)
+	return output, err
+}
+func (t *moduleGraphTool) ExecuteWithSources(ctx context.Context, input json.RawMessage) (string, []AISourceCitation, error) {
 	var params struct {
 		Module string `json:"module"`
 	}
 	if err := json.Unmarshal(input, &params); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if params.Module == "" && len(t.tools) == 1 {
 		params.Module = verificationKeys(t.tools)[0]
 	}
 	tool, ok := t.tools[params.Module]
 	if !ok {
-		return "", fmt.Errorf("select module from %v; an unavailable module graph is not evidence of unreachability", verificationKeys(t.tools))
+		return "", nil, fmt.Errorf("select module from %v; an unavailable module graph is not evidence of unreachability", verificationKeys(t.tools))
+	}
+	if sourceTool, ok := tool.(verificationSourceTool); ok {
+		output, citations, err := sourceTool.ExecuteWithSources(ctx, input)
+		return "Module: " + params.Module + "\n" + output, citations, err
 	}
 	output, err := tool.Execute(ctx, input)
-	return "Module: " + params.Module + "\n" + output, err
+	return "Module: " + params.Module + "\n" + output, nil, err
 }
 
 func parseAssessment(text string) (*AIVerification, error) {
@@ -1022,15 +1031,38 @@ type verificationEvidenceTool struct {
 	evidence *verificationEvidence
 }
 
+// Keep source provenance separate from tool prose, which may contain untrusted
+// repository text. Only complete quote records visible after bounding count.
+type verificationSourceTool interface {
+	ExecuteWithSources(context.Context, json.RawMessage) (string, []AISourceCitation, error)
+}
+
+func verificationSourceQuote(citation AISourceCitation) string {
+	data, _ := json.Marshal(citation)
+	return "Source quote: " + string(data) + "\n"
+}
+
 func (t *verificationEvidenceTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
-	output, err := t.verificationTool.Execute(ctx, input)
+	var output string
+	var citations []AISourceCitation
+	var err error
+	if tool, ok := t.verificationTool.(verificationSourceTool); ok {
+		output, citations, err = tool.ExecuteWithSources(ctx, input)
+	} else {
+		output, err = t.verificationTool.Execute(ctx, input)
+	}
 	// Use exactly the same bound as executeTool; omitted source is not evidence.
 	output = boundVerificationToolOutput(output)
 	if err == nil {
+		for _, citation := range citations {
+			if strings.Contains(output, verificationSourceQuote(citation)) {
+				t.evidence.add(citation.File, fmt.Sprintf("%d|%s\n", citation.Line, citation.Quote))
+			}
+		}
 		var params struct {
 			Path string `json:"path"`
 		}
-		if json.Unmarshal(input, &params) == nil {
+		if t.Name() == "read_file" && json.Unmarshal(input, &params) == nil {
 			t.evidence.add(params.Path, output)
 		}
 	}
@@ -1750,7 +1782,7 @@ For both graph and dynamic findings, source_path is an array of strings such as 
 The scanner verdict is withheld. Derive your verdict independently from source and applicable versions, using graph edges only as candidates to audit.
 One source-supported invocation of an affected version in applicable production scope establishes true; unrelated pending or inconclusive candidates do not undo it. Report those gaps without claiming complete coverage. For supported dynamic findings and suspected_false_negative graph findings, include source_evidence as an array of file/line/quote citations for the entry, function/receiver origin, and affected invocation. Narrative source_path strings alone are not checked source evidence. Source lines must have been supplied in initial excerpts or read_file.
 For false in graph_and_dynamic scope, classify reported paths and complete focused alternate-path and dynamic checks. For dynamic_batch, complete the assigned candidates and connected-path checks. A checked refuted edge can exclude other scanner paths with exactly the same module and path prefix through that edge. Do not reuse it across different calling contexts or merely similar callee signatures. If validation feedback is returned, correct the structured assessment using the existing evidence; do not fabricate source or force true/false.
-For disputed function-value/interface edges, use inspect_dispatch when available to locate the actual argument, captured binding, assignment, or receiver construction. Its SSA output is only a retrieval lead: read_file the call site and origin locations, including dependency files, and follow factory return values or further callers as needed. For a callback parameter captured by a closure, inspect the enclosing function's callers and the passed argument's assignment before declaring its origin unavailable. For example, verify the context.WithCancel result passed into a signal handler instead of treating unrelated func() closures as possible origins merely because CHA connects them. A reachable caller or matching signature does not establish dispatch, and reaching a nested closure does not prove invocation of its enclosing function. Supporting a path requires every indirect step to be supported. Refuting a path needs only one impossible step (covering every matching call site for that step); preserve that false-positive finding even if other paths remain inconclusive. Do not spend the remaining budget proving downstream steps of an already refuted path; investigate the other paths and relevant alternate routes.
+For disputed function-value/interface edges, use inspect_dispatch when available to locate the actual argument, captured binding, assignment, or receiver construction. Its Source quote objects are actual file reads and can be cited directly in edge_reviews as call_site and value_origin; its SSA hints alone are only retrieval leads. Use read_file for omitted source or surrounding context, including dependency files, and follow factory return values or further callers as needed. For a callback parameter captured by a closure, inspect the enclosing function's callers and the passed argument's assignment before declaring its origin unavailable. For example, verify the context.WithCancel result passed into a signal handler instead of treating unrelated func() closures as possible origins merely because CHA connects them. A reachable caller or matching signature does not establish dispatch, and reaching a nested closure does not prove invocation of its enclosing function. Supporting a path requires every indirect step to be supported. Refuting a path needs only one impossible step (covering every matching call site for that step); preserve that false-positive finding even if other paths remain inconclusive. Do not spend the remaining budget proving downstream steps of an already refuted path; investigate the other paths and relevant alternate routes.
 Indirect dependency status, absent direct imports, or absent vendor source do not establish non-use: inspect the relevant transitive import/call chain and resolved dependency source. Failed searches are missing evidence, never evidence of absence.
 No scanner-reported path means there is no path to classify as supported_path or suspected_false_positive. A scanner verdict of false is not a false-positive finding. Empty UsedImports does not itself mean graph construction failed; check graph_modules and Errors. Without supplied paths, use findings=[] when no applicable finding is established, suspected_false_negative for a source-backed missed path, or inconclusive for a specific unresolved question. Do not require an SVG or invent a graph_path.
 An empty reflection_risks list is not a reason for unknown and is not proof of safety. Before finalizing, use check_module/check_transitive_deps to resolve verdict-changing dependency questions, list_entry_points and focused source/build-tag checks to resolve relevant production scope, and available module graphs plus focused source checks to investigate affected invocations. Partial initial excerpts are starting points, not permanent coverage limits. For unknown, identify a concrete verdict-changing question, the attempted check or why it could not be attempted, and how its missing result could change the verdict. Hypothetical hidden reflection or a lack of exhaustive review of unrelated source is not sufficient by itself. Return false within the investigated scope when applicable versions, production scope, graph evidence, and focused source checks support no affected invocation and no concrete verdict-changing gap remains; do not automatically copy the scanner verdict.
@@ -2865,10 +2897,7 @@ func (t *readFileTool) Execute(ctx context.Context, input json.RawMessage) (stri
 	if err := json.Unmarshal(input, &params); err != nil {
 		return textResult(fmt.Sprintf("error: %v", err))
 	}
-	fullPath, err := safePath(t.repoDir, params.Path)
-	if filepath.IsAbs(params.Path) && t.sourceFiles[filepath.Clean(params.Path)] {
-		fullPath, err = filepath.Clean(params.Path), nil
-	}
+	fullPath, err := verificationSourcePath(t.repoDir, t.sourceFiles, params.Path)
 	if err != nil {
 		return textResult(err.Error())
 	}
@@ -2896,6 +2925,13 @@ func (t *readFileTool) Execute(ctx context.Context, input json.RawMessage) (stri
 	}
 	toolProgress(t.progressFunc, fmt.Sprintf("[ai] read_file result: %s (%d lines)", params.Path, end-start))
 	return textResult(b.String())
+}
+
+func verificationSourcePath(repoDir string, sourceFiles map[string]bool, path string) (string, error) {
+	if filepath.IsAbs(path) && sourceFiles[filepath.Clean(path)] {
+		return filepath.Clean(path), nil
+	}
+	return safePath(repoDir, path)
 }
 
 // list_files tool
@@ -3094,13 +3130,17 @@ func splitTypeName(fullName string) (pkgPath, typeName string) {
 	return fullName[:idx], fullName[idx+1:]
 }
 
-// SSA origins are retrieval leads, not source citations or reachability proofs.
+// SSA guides source retrieval; only actual file reads produce source quotes.
 // Keep this traversal bounded and leave alias/control-flow questions to source review.
-type inspectDispatchTool struct{ graph *callgraph.Graph }
+type inspectDispatchTool struct {
+	graph       *callgraph.Graph
+	repoDir     string
+	sourceFiles map[string]bool
+}
 
 func (t *inspectDispatchTool) Name() string { return "inspect_dispatch" }
 func (t *inspectDispatchTool) Description() string {
-	return "Inspect an exact graph caller/callee edge and trace the called function value or interface receiver through SSA parameters, captured values, assignments, and conversions. Returns source locations to read_file, including dependencies. These bounded hints are not proof of runtime flow or source citations; missing origins remain unresolved."
+	return "Inspect an exact graph caller/callee edge and trace the called function value or interface receiver through SSA parameters, captured values, assignments, and conversions. Returns exact source quotes for call sites and origins, including indexed dependencies; use these file/line/quote objects in edge_reviews. SSA hints alone are not proof of runtime flow. Use read_file for omitted source or further context."
 }
 func (t *inspectDispatchTool) InputSchema() verificationToolSchema {
 	return verificationToolSchema{Type: "object", Properties: map[string]any{
@@ -3109,12 +3149,16 @@ func (t *inspectDispatchTool) InputSchema() verificationToolSchema {
 	}, Required: []string{"caller", "callee"}}
 }
 func (t *inspectDispatchTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
+	output, _, err := t.ExecuteWithSources(ctx, input)
+	return output, err
+}
+func (t *inspectDispatchTool) ExecuteWithSources(ctx context.Context, input json.RawMessage) (string, []AISourceCitation, error) {
 	var params struct{ Caller, Callee string }
 	if err := json.Unmarshal(input, &params); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if t.graph == nil {
-		return "Graph unavailable; dispatch origin remains unresolved.", nil
+		return "Graph unavailable; dispatch origin remains unresolved.", nil, nil
 	}
 	var caller *callgraph.Node
 	for fn, node := range t.graph.Nodes {
@@ -3124,18 +3168,25 @@ func (t *inspectDispatchTool) Execute(ctx context.Context, input json.RawMessage
 		}
 	}
 	if caller == nil {
-		return "Caller not found in this module graph; this does not rule out usage.", nil
+		return "Caller not found in this module graph; this does not rule out usage.", nil, nil
 	}
+	var locations []token.Position
+	seenLocations := make(map[string]bool)
 	location := func(pos token.Pos) string {
 		if prog := caller.Func.Prog; prog != nil && prog.Fset != nil {
 			if p := prog.Fset.Position(pos); p.IsValid() {
-				return fmt.Sprintf("%s:%d", p.Filename, p.Line)
+				key := fmt.Sprintf("%s:%d", p.Filename, p.Line)
+				if !seenLocations[key] {
+					locations = append(locations, p)
+					seenLocations[key] = true
+				}
+				return key
 			}
 		}
 		return "source location unavailable"
 	}
 	var b strings.Builder
-	b.WriteString("SSA origin hints, not validated source evidence. Read the listed source with read_file before citing it. Caller edges and stores may overapproximate flow; aliases and runtime values are not resolved here.\n")
+	b.WriteString("SSA origin hints: caller edges and stores may overapproximate flow; aliases and runtime values are not resolved here. Supplied source quotes are citable, but their interpretation still requires source-flow reasoning.\n")
 	seen := make(map[ssa.Value]bool)
 	remaining := 40
 	var trace func(ssa.Value, string, int)
@@ -3248,7 +3299,50 @@ func (t *inspectDispatchTool) Execute(ctx context.Context, input json.RawMessage
 	if !matched {
 		b.WriteString("No matching edge in this graph; absence does not rule out dynamic usage.\n")
 	}
-	return boundVerificationToolOutput(b.String()), ctx.Err()
+	quotes, citations := t.sourceQuotes(ctx, locations)
+	// Put complete source quotes first so verbose SSA hints cannot crowd them out.
+	return boundVerificationToolOutput(quotes + b.String()), citations, ctx.Err()
+}
+
+func (t *inspectDispatchTool) sourceQuotes(ctx context.Context, locations []token.Position) (string, []AISourceCitation) {
+	var b strings.Builder
+	var citations []AISourceCitation
+	files := make(map[string][]string)
+	omitted := false
+	for _, pos := range locations {
+		if ctx.Err() != nil {
+			break
+		}
+		path, err := verificationSourcePath(t.repoDir, t.sourceFiles, pos.Filename)
+		if err != nil {
+			omitted = true
+			continue
+		}
+		lines, loaded := files[path]
+		if !loaded {
+			data, err := os.ReadFile(path)
+			if err == nil {
+				lines = strings.Split(string(data), "\n")
+			}
+			files[path] = lines
+		}
+		if pos.Line < 1 || pos.Line > len(lines) {
+			omitted = true
+			continue
+		}
+		citation := AISourceCitation{File: path, Line: pos.Line, Quote: lines[pos.Line-1]}
+		row := verificationSourceQuote(citation)
+		if b.Len()+len(row) > maxToolResultBytes/2 {
+			omitted = true
+			continue
+		}
+		b.WriteString(row)
+		citations = append(citations, citation)
+	}
+	if omitted {
+		b.WriteString("Some source quotes were unavailable or omitted by the source budget; use read_file for the required locations.\n")
+	}
+	return b.String(), citations
 }
 
 // find_callers tool

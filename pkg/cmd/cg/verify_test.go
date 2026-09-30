@@ -2355,25 +2355,154 @@ func Many(f func()) { f() }
 			}
 		})
 	}
-	// Origin hints do not make unread dependency source valid citation evidence.
+	// Inspection supplies actual source, including the indexed dependency, without
+	// another read_file call. Merely having the source on disk is insufficient.
 	evidence := newVerificationEvidence(repo, nil)
 	evidence.sourceFiles = verificationSourceFiles(scan)
 	citation := AISourceCitation{File: filepath.Join(dependency, "dep.go"), Line: 3, Quote: "func Start(cancel context.CancelFunc) { go func() { cancel() }() }"}
 	if evidence.check(citation) == nil {
 		t.Fatal("unread source accepted as evidence")
 	}
-	reader := &verificationEvidenceTool{verificationTool: &readFileTool{repoDir: repo, sourceFiles: evidence.sourceFiles}, evidence: evidence}
-	input, _ := json.Marshal(map[string]any{"path": citation.File, "start_line": 3, "end_line": 3})
-	if _, err := reader.Execute(context.Background(), input); err != nil {
+	checkedInspector := &verificationEvidenceTool{verificationTool: inspector, evidence: evidence}
+	input := json.RawMessage(`{"module":".","caller":"example.com/dependency.Start$1","callee":"example.com/dependency.Serve$1"}`)
+	output, err := checkedInspector.Execute(context.Background(), input)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := evidence.check(citation); err != nil {
-		t.Fatalf("indexed dependency source could not be retrieved: %v", err)
+	origins := []AISourceCitation{
+		{File: filepath.Join(repo, "main.go"), Line: 7, Quote: " _, cancel := context.WithCancel(context.Background())"},
+		{File: filepath.Join(repo, "main.go"), Line: 8, Quote: " dep.Start(cancel)"},
 	}
+	for _, quote := range append([]AISourceCitation{citation}, origins...) {
+		if err := evidence.check(quote); err != nil || !strings.Contains(output, verificationSourceQuote(quote)) {
+			t.Fatalf("dispatch source not supplied and registered: %+v: %v\n%s", quote, err, output)
+		}
+	}
+	t.Run("module prefix truncation", func(t *testing.T) {
+		module := strings.Repeat("m", maxToolResultBytes)
+		prefixed := &moduleGraphTool{tools: map[string]verificationTool{module: inspector.(*moduleGraphTool).tools["."]}}
+		evidence := newVerificationEvidence(repo, nil)
+		evidence.sourceFiles = verificationSourceFiles(scan)
+		input, _ := json.Marshal(map[string]string{"module": module, "caller": "example.com/dependency.Start$1", "callee": "example.com/dependency.Serve$1"})
+		output, err := (&verificationEvidenceTool{verificationTool: prefixed, evidence: evidence}).Execute(context.Background(), input)
+		if err != nil || len(output) > maxToolResultBytes || evidence.check(citation) == nil {
+			t.Fatalf("hidden source must not become evidence: %v, %d bytes", err, len(output))
+		}
+	})
+	t.Run("cancellation assessment", func(t *testing.T) {
+		// Omit initial excerpts to exercise source delivery through the tool alone.
+		if err := os.WriteFile(filepath.Join(repo, "verify-scan.md"), []byte("Assess {{.call_traces}}"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GVS_SKILLS_DIR", repo)
+		path := []string{"example.com/app.main", "example.com/dependency.Start", "example.com/dependency.Start$1", "example.com/dependency.Serve$1"}
+		var nodes []*callgraph.Node
+		for _, name := range path {
+			for fn, node := range build.cg.Nodes {
+				if fn != nil && fn.String() == name {
+					nodes = append(nodes, node)
+					break
+				}
+			}
+		}
+		if len(nodes) != len(path) {
+			t.Fatal("fixture path missing")
+		}
+		for _, tc := range []struct {
+			name, want string
+		}{
+			{"checked cancellation origin", "false"},
+			{"unread source", "unknown"},
+			{"fabricated origin", "unknown"},
+			{"missing alternate review", "unknown"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				result := &Result{ScanConfig: ScanConfig{Directory: repo}, IsVulnerable: "true",
+					AffectedImports: map[string]AffectedImportsDetails{"example.com/dependency": {Symbols: []string{"Serve"}}},
+					UsedImports:     map[string]map[string]UsedImportsDetails{".": {"example.com/dependency": {Symbols: []string{"Serve"}, Paths: [][]*callgraph.Node{nodes}}}},
+					ssaBuilds:       scan.ssaBuilds,
+				}
+				agent := fakeAgent(func(ctx context.Context, prompt string, tools []verificationTool) (string, error) {
+					if tc.name != "unread source" {
+						if _, err := executeTool(ctx, tools, "inspect_dispatch", input, nil); err != nil {
+							return "", err
+						}
+					}
+					review := AIEdgeReview{Step: 3, Status: "ruled_out", CallSite: citation, ValueOrigin: append([]AISourceCitation(nil), origins...), Reasoning: "main passes the context.WithCancel result into Start; its captured cancel cannot be Serve's closure."}
+					if tc.name == "fabricated origin" {
+						review.ValueOrigin[0].Quote = "cancel := somethingElse()"
+					}
+					alternate := "Reviewed main, the fixture's only entry, and its callback argument; no path supplies Serve's closure."
+					if tc.name == "missing alternate review" {
+						alternate = ""
+					}
+					a := &AIVerification{IsVulnerable: "false", Confidence: "high", Reasoning: review.Reasoning, Evidence: []string{review.Reasoning},
+						GraphAnalysis: AIGraphAnalysis{Summary: "Cancellation callback is overapproximated", AlternativePaths: alternate, ScopeEvidence: origins, Findings: []AIGraphFinding{{
+							Kind: "suspected_false_positive", Module: ".", Package: "example.com/dependency", Symbol: "Serve", GraphPath: path,
+							SourcePath: []string{citation.File + ":3"}, EdgeReviews: []AIEdgeReview{review}, Confidence: "high", Reasoning: review.Reasoning,
+							Evidence: []string{review.Reasoning}, Uncertainties: []string{},
+						}}}, DynamicAnalysis: AIDynamicAnalysis{Summary: "No further dynamic usage found in the fixture", Findings: []AIDynamicFinding{}}, Uncertainties: []string{},
+					}
+					raw, err := marshalAuditResponseForTest(a)
+					return string(raw), err
+				})
+				verifyWithAgent(context.Background(), result, repo, aiConfig{}, agent)
+				if result.IsVulnerable != "true" || result.AIVerification == nil || result.AIVerification.IsVulnerable != tc.want {
+					t.Fatalf("want AI=%s with scanner unchanged, got %+v; errors %v", tc.want, result.AIVerification, result.Errors)
+				}
+			})
+		}
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := executeTool(ctx, []verificationTool{inspector}, "inspect_dispatch", []byte(`{}`), nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled inspection: %v", err)
+	}
+}
+
+func TestInspectDispatchSourceQuoteBounds(t *testing.T) {
+	repo, dependency := t.TempDir(), t.TempDir()
+	local, external := filepath.Join(repo, "main.go"), filepath.Join(dependency, "dep.go")
+	for _, path := range []string{local, external} {
+		if err := os.WriteFile(path, []byte("package fixture\n"+strings.Repeat("x", maxToolResultBytes)+"\nfunc target() {}\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name      string
+		path      string
+		line      int
+		indexed   bool
+		wantQuote bool
+	}{
+		{"repository source", "main.go", 1, false, true},
+		{"indexed dependency", external, 1, true, true},
+		{"unindexed dependency", external, 1, false, false},
+		{"missing file", "missing.go", 1, false, false},
+		{"oversized source line", "main.go", 2, false, false},
+		{"missing line", "main.go", 99, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tool := &inspectDispatchTool{repoDir: repo, sourceFiles: map[string]bool{external: tc.indexed}}
+			output, citations := tool.sourceQuotes(context.Background(), []token.Position{{Filename: tc.path, Line: tc.line}, {Filename: "main.go", Line: 3}})
+			wantCount := 1
+			if tc.wantQuote {
+				wantCount++
+			}
+			if len(citations) != wantCount || len(output) > maxToolResultBytes || strings.Contains(output, "omitted") == tc.wantQuote {
+				t.Fatalf("unexpected source availability: %+v, %q", citations, output)
+			}
+			// A missing or oversized row must not prevent later usable source.
+			last := citations[len(citations)-1]
+			if last.File != local || last.Line != 3 || last.Quote != "func target() {}" {
+				t.Fatalf("lost later source: %+v", citations)
+			}
+			for _, citation := range citations {
+				if !strings.Contains(output, verificationSourceQuote(citation)) {
+					t.Fatalf("metadata quote not shown in output: %+v", citation)
+				}
+			}
+		})
 	}
 }
 

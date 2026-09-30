@@ -87,9 +87,12 @@ path prefix through the refuted edge. Different calling contexts still need revi
 Supported dynamic calls and missed graph paths require checked source citations.
 Dependency source can be read using scanner-indexed absolute file paths.
 The `inspect_dispatch` tool follows SSA callback/receiver origins through caller
-arguments, captured variables, assignments, and conversions, returning source
-locations for focused reads. These bounded hints do not establish reachability
-or replace source citations. One checked impossible edge can refute a path;
+arguments, captured variables, assignments, and conversions. It also reads the
+corresponding call-site and origin lines, returning exact source quotes usable
+in dispatch reviews. Quotes have a 4 KiB budget within the 8 KiB tool limit;
+omitted source and surrounding context remain available through `read_file`.
+Only complete quotes delivered to the model count as citation evidence. SSA hints
+alone do not establish reachability. One checked impossible edge can refute a path;
 other paths and relevant alternative routes still need review.
 These checks validate evidence provenance and coverage; source-flow interpretation
 still depends on the model. Citation objects and `file:line: exact source` strings
