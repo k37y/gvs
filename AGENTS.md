@@ -62,8 +62,14 @@ make image-run
 # Run tests without the integration build tag
 go test ./...
 
+# Run race tests in Podman when the host lacks CGO or a C compiler
+make test-podman
+
 # Run the API/scanner integration suite, including race detection
 make test-integration
+
+# Run the integration suite with Go, CGO, Git, and Graphviz supplied by Podman
+make test-integration-podman
 
 # Test a specific package
 go test ./pkg/cmd/cg
@@ -169,7 +175,7 @@ The scanner follows this workflow (see README.md flowchart):
    - The scanner calls only `cg.VerifyAndSummarize(result, directory)`; tests live in `verify_test.go`
    - Audit source against the structured graph paths underlying SVGs for supported paths and suspected false positives/negatives; SVG rendering is not visually inspected
    - Investigate affected-symbol dynamic usage through reflection, unsafe operations, and callbacks, using `reflection_risks` as leads
-   - Keep the scanner verdict separate from `AIVerification`, which contains `graph_analysis`, `dynamic_analysis`, `uncertainties`, and `coverage`
+   - Keep the scanner verdict separate from `AIVerification`. Its public JSON contains `IsVulnerable`, `confidence`, `evidence`, `reasoning`, and `usage`; structured graph/dynamic findings, uncertainties, and coverage remain internal for validation. Include decisive finding evidence and unresolved gaps in the public evidence/reasoning
    - Select `anthropic-vertex` or `openai-compatible` using `GVS_AI_PROVIDER`; require `GVS_AI=1` and an explicit `GVS_AI_MODEL`
    - See [README.md](README.md) for provider setup and the complete configuration table
 
@@ -177,10 +183,16 @@ The scanner follows this workflow (see README.md flowchart):
 
 - Group duplicate risk observations while preserving original scan indices. Each investigation receives at most 16 risk indices and 6 KiB of compact risk JSON.
 - Full risk evidence is available through paginated `read_reflection_risks`. A fresh conversation handles each batch under the overall verification timeout.
+- The initial investigation audits shared graph paths and independently searches for missed dynamic usage. Later batches investigate their risk indices and connected paths without repeating the shared graph audit. Batch verdicts are scoped; a global negative requires the initial audit and every batch to support it, with no failed or pending investigation.
+- Keep labeled path and dynamic finding explanations in public `evidence`, including when the aggregate verdict is unknown. Measure focused fixture findings and repeated graph work; fewer unknown verdicts alone are not an accuracy metric.
 - Initial source excerpts have a 32 KiB total budget and 4 KiB per file. Graph excerpts are capped at 16 KiB; tool responses at 8 KiB. Mark omissions and allow focused retrieval.
 - Budget complete serialized requests, including tool schemas and conversation history, with output and framing reserves. `GVS_AI_CONTEXT_TOKENS` must match the selected model's context limit. The local estimate uses one token per serialized byte, not a provider-specific tokenizer.
-- Track total, reviewed, and pending risks in Go. Reviewed risks may still be unresolved. The current implementation forces an `unknown` AI verdict when any risk remains pending.
+- Track total, reviewed, and pending risks in Go from actual finding indices. Reviewed risks may still be unresolved. Pending risks prevent a negative verdict, but do not override a validated positive invocation; preserve the remaining coverage gaps.
+- Validate source citations for graph dispatch and supported source-only/dynamic findings. Reuse refutations only for identical module/path prefixes. Permit at most one assessment correction using exact validation feedback in the same conversation, without further tool calls and within the existing context/timeout budget.
+- Validate indirect-edge reviews against exact graph call sites and quoted source lines supplied in the investigation. Source citations may come from initial excerpts or `read_file`; external dependency reads are limited to scanner-indexed source files. Refuted paths alone cannot establish safety: require reported-path coverage and a source-backed alternate-path review before a negative verdict. Evidence validation checks provenance and structure, not the model's semantic interpretation.
+- `inspect_dispatch` provides bounded SSA origin hints for exact module/caller/callee edges (40 values, depth 8, normal tool output limit). Follow its locations with `read_file`; hints are not source citations or proofs of runtime flow. One refuted step can exclude a path, but all matching call sites for that step need source-backed refutations. `grep_code` uses POSIX extended regex and includes vendor files.
 - Missing graph edges, truncated evidence, and exhausted budgets do not establish safety. Findings must cite source or tool evidence and state specific remaining gaps.
+- Keep public AI explanations concise: summarize unresolved targets, retain distinct source citations, and avoid repeating finding diagnostics in reasoning. Full graph routes and dispatch inventories belong in the internal audit and validation feedback.
 
 ### Call Graph Algorithms
 

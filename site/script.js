@@ -59,7 +59,11 @@ class FormHistoryManager {
 			history = history.slice(0, this.maxHistoryItems);
 		}
 		
-		localStorage.setItem(storageKey, JSON.stringify(history));
+		try {
+			localStorage.setItem(storageKey, JSON.stringify(history));
+		} catch (e) {
+			console.warn('Could not save form history:', e);
+		}
 	}
 	
 	getHistory(fieldId) {
@@ -124,21 +128,55 @@ function showHistoryView(event) { showView('history', event); }
 function showResultView(event) { showView('result', event); }
 
 // Scan history management
+function getScanHistory() {
+	try {
+		const history = JSON.parse(localStorage.getItem('gvs-scan-history') || '[]');
+		return Array.isArray(history) ? history.filter(item => item && typeof item === 'object') : [];
+	} catch (e) {
+		console.warn('Could not read scan history:', e);
+		return [];
+	}
+}
+
+function writeScanHistory(history) {
+	history = history.slice(0, 50);
+	while (history.length) {
+		try {
+			localStorage.setItem('gvs-scan-history', JSON.stringify(history));
+			return true;
+		} catch (e) {
+			if (e.name !== 'QuotaExceededError' && e.name !== 'NS_ERROR_DOM_QUOTA_REACHED') {
+				console.warn('Could not save scan history:', e);
+				return false;
+			}
+			if (history.length === 1) {
+				console.warn('Scan is too large to save in browser history:', e);
+				return false;
+			}
+			history.pop();
+		}
+	}
+	return false;
+}
+
 function saveScanToHistory(scanData) {
-	let history = JSON.parse(localStorage.getItem('gvs-scan-history') || '[]');
+	const history = getScanHistory();
 	history.unshift({ ...scanData, timestamp: new Date().toISOString() });
-	if (history.length > 50) history = history.slice(0, 50);
-	localStorage.setItem('gvs-scan-history', JSON.stringify(history));
+	return writeScanHistory(history);
 }
 
 function clearScanHistory() {
-	localStorage.removeItem('gvs-scan-history');
+	try {
+		localStorage.removeItem('gvs-scan-history');
+	} catch (e) {
+		console.warn('Could not clear scan history:', e);
+	}
 	renderScanHistory();
 }
 
 function renderScanHistory() {
 	const body = document.getElementById('historyCardBody');
-	const history = JSON.parse(localStorage.getItem('gvs-scan-history') || '[]');
+	const history = getScanHistory();
 	if (!history.length) {
 		body.innerHTML = '<div class="pf-v6-c-empty-state"><div class="pf-v6-c-empty-state__content"><div class="pf-v6-c-empty-state__body">No scan history yet. Run a scan to see results here.</div></div></div>';
 		return;
@@ -169,7 +207,7 @@ function renderScanHistory() {
 }
 
 function loadHistoryScan(index) {
-	const history = JSON.parse(localStorage.getItem('gvs-scan-history') || '[]');
+	const history = getScanHistory();
 	const item = history[index];
 	if (!item) return;
 	showResultView();
@@ -563,7 +601,7 @@ function runScan() {
 
 						progressContent.scrollTop = progressContent.scrollHeight;
 
-					saveScanToHistory({
+					const historySaved = saveScanToHistory({
 						repo: document.getElementById("repo").value.trim(),
 						branchOrCommit: document.getElementById("branchOrCommit").value.trim(),
 						cve: document.getElementById("cve").value.trim(),
@@ -572,6 +610,9 @@ function runScan() {
 						output: statusData.output,
 						logs: progressContent.innerHTML
 					});
+					if (!historySaved) {
+						progressContent.innerHTML += highlightLog('Scan completed, but this result could not be saved in browser history.') + '\n';
+					}
 						
 						// Close progress stream if active
 						if (window.currentProgressStream) {
@@ -677,10 +718,10 @@ function submitFeedback(choice) {
 	const feedbackLabels = { gvs_only: 'GVS was right', ai_only: 'AI was right', both: 'Both were right' };
 	const feedbackText = feedbackLabels[choice] || choice;
 
-	let history = JSON.parse(localStorage.getItem('gvs-scan-history') || '[]');
+	const history = getScanHistory();
 	if (history.length > 0) {
 		history[0].feedback = feedbackText;
-		localStorage.setItem('gvs-scan-history', JSON.stringify(history));
+		writeScanHistory(history);
 	}
 
 	const repo = document.getElementById("repo").value.trim();

@@ -9,7 +9,7 @@ ALGO ?= vta
 # Optional runtime environment file; credentials are never baked into the image.
 AI_ENV_FILE ?= $(HOME)/.config/gvs/gvs.env
 AI_ENV_VARS = GVS_AI GVS_AI_PROVIDER GVS_AI_MODEL GVS_AI_API_KEY GVS_AI_BASE_URL \
-              GVS_AI_PROJECT_ID GVS_AI_LOCATION GVS_AI_MAX_ITERATIONS GVS_AI_MAX_TOKENS GVS_AI_CONTEXT_TOKENS GVS_AI_TIMEOUT
+              GVS_AI_PROJECT_ID GVS_AI_LOCATION GVS_AI_MAX_ITERATIONS GVS_AI_MAX_TOKENS GVS_AI_CONTEXT_TOKENS GVS_AI_TIMEOUT GVS_AI_PRICING
 ADC_CREDS = $(HOME)/.config/gcloud/application_default_credentials.json
 PREFIX ?= /usr
 BINDIR ?= $(PREFIX)/bin
@@ -18,6 +18,24 @@ SERVICE = gvs.service
 BINS = gvs cg
 USERNAME ?= gvs
 GROUPNAME ?= $(USERNAME)
+
+# Install test tools in plain UBI; Go selects the module's toolchain automatically.
+PODMAN_TEST_IMAGE ?= registry.access.redhat.com/ubi9/ubi
+# Keep build/module caches between disposable test containers.
+PODMAN_TEST_CACHE ?= gvs-test-cache
+# Override to select packages, test names, or a different timeout.
+PODMAN_TEST_ARGS ?= -race -v -count=1 -timeout=120s ./...
+# Match the host integration suite, with an override for focused runs.
+PODMAN_INTEGRATION_TEST_ARGS ?= -race -v -count=1 -tags integration ./internal/api -run "TestCallgraph.*Integration|TestCgBinaryValidation" -timeout 45m
+
+# Share the read-only checkout and persistent Go caches across both test targets.
+PODMAN_TEST_RUN = podman run --rm --security-opt label=disable --user 0 \
+	--volume "$(CURDIR):/workspace:ro" \
+	--volume "$(PODMAN_TEST_CACHE):/cache" \
+	--workdir /workspace \
+	--env CGO_ENABLED=1 --env GOTOOLCHAIN=auto \
+	--env GOCACHE=/cache/build --env GOMODCACHE=/cache/mod \
+	--env GOFLAGS=-buildvcs=false
 
 RUN_OPTS := --security-opt label=disable \
             --rm --detach \
@@ -42,11 +60,25 @@ run: gvs cg
 test:
 	go test -race -v -count=1 ./...
 
+# Run race tests without requiring Go, CGO, or a C compiler on the host.
+.PHONY: test-podman
+
+test-podman:
+	$(PODMAN_TEST_RUN) "$(PODMAN_TEST_IMAGE)" sh -c \
+		'dnf install -y golang gcc git && exec go test "$$@"' sh $(PODMAN_TEST_ARGS)
+
 .PHONY: test-integration
 
 test-integration:
 	@echo "Running integration tests..."
 	go test -race -v -count=1 -tags integration ./internal/api -run "TestCallgraph.*Integration|TestCgBinaryValidation" -timeout 45m
+
+# Install integration dependencies in UBI without requiring host development tools.
+.PHONY: test-integration-podman
+
+test-integration-podman:
+	$(PODMAN_TEST_RUN) "$(PODMAN_TEST_IMAGE)" sh -c \
+		'dnf install -y golang gcc git graphviz && exec go test "$$@"' sh $(PODMAN_INTEGRATION_TEST_ARGS)
 
 .PHONY: gvs
 
