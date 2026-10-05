@@ -1,7 +1,6 @@
 package api
 
 import (
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,7 +20,7 @@ func RetrieveCacheFromDisk(key string) ([]byte, error) {
 func SaveCacheToDisk(key string, data []byte) error {
 	err := os.MkdirAll(cacheDir, 0755)
 	if err != nil {
-		log.Fatalf("Failed to create directory: %v", err)
+		return err
 	}
 	return os.WriteFile(filepath.Join(cacheDir, keyToFilename(key)), data, 0644)
 }
@@ -37,7 +36,7 @@ func RetrieveCacheLogFromDisk(key string) ([]byte, error) {
 func SaveCacheLogsToDisk(key string, data []byte) error {
 	err := os.MkdirAll(cacheDir, 0755)
 	if err != nil {
-		log.Fatalf("Failed to create directory: %v", err)
+		return err
 	}
 	return os.WriteFile(filepath.Join(cacheDir, keyToLogFilename(key)), data, 0644)
 }

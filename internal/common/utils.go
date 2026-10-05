@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 func FormatIntroducedFixed(events []interface{}) []string {
@@ -80,6 +81,8 @@ func CloneRepo(ctx context.Context, repoURL, branchOrCommit, cloneDir string) er
 	os.Setenv("GIT_TERMINAL_PROMPT", "0")
 
 	checkCmd := exec.CommandContext(ctx, "git", "ls-remote", "--exit-code", repoURL)
+	checkCmd.WaitDelay = 5 * time.Second
+	configureCommandCancellation(checkCmd)
 	var checkStderr bytes.Buffer
 	checkCmd.Stderr = &checkStderr
 
@@ -116,6 +119,8 @@ func isCommitHash(ref string) bool {
 
 func cloneByBranch(ctx context.Context, repoURL, branch, cloneDir string) error {
 	cmd := exec.CommandContext(ctx, "git", "clone", "--depth", "1", "--branch", branch, "--single-branch", repoURL, cloneDir)
+	cmd.WaitDelay = 5 * time.Second
+	configureCommandCancellation(cmd)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -128,6 +133,8 @@ func cloneByBranch(ctx context.Context, repoURL, branch, cloneDir string) error 
 
 func cloneByCommit(ctx context.Context, repoURL, commit, cloneDir string) error {
 	cmd := exec.CommandContext(ctx, "git", "clone", repoURL, cloneDir)
+	cmd.WaitDelay = 5 * time.Second
+	configureCommandCancellation(cmd)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -137,6 +144,8 @@ func cloneByCommit(ctx context.Context, repoURL, commit, cloneDir string) error 
 	}
 
 	checkoutCmd := exec.CommandContext(ctx, "git", "-C", cloneDir, "checkout", commit)
+	checkoutCmd.WaitDelay = 5 * time.Second
+	configureCommandCancellation(checkoutCmd)
 	var checkoutStderr bytes.Buffer
 	checkoutCmd.Stderr = &checkoutStderr
 
@@ -167,6 +176,8 @@ func FindGoModDirs(root string) ([]string, error) {
 
 func RunGovulncheck(ctx context.Context, directory, target string) (string, int, error) {
 	cmd := exec.CommandContext(ctx, "govulncheck", "-format", "sarif", "-C", directory, target)
+	cmd.WaitDelay = 5 * time.Second
+	configureCommandCancellation(cmd)
 	var out bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &out

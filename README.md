@@ -229,7 +229,8 @@ Successful results include:
 ```
 
 `make image-run` reads `~/.config/gvs/gvs.env` (override with `AI_ENV_FILE`)
-and forwards exported `GVS_AI*` settings. Exported settings override the file.
+and forwards exported `GVS_AI*` settings and the MCP/task settings documented
+below. Exported settings override the file.
 The user systemd service reads the same environment file. Vertex ADC credentials
 are mounted read-only when present. The binaries themselves read environment
 variables, not configuration files.
@@ -343,7 +344,7 @@ make test-podman PODMAN_TEST_ARGS='-race -count=1 -timeout=120s ./pkg/cmd/cg -ru
 ```
 
 The host-based test targets require Go and a C compiler for `-race`.
-Run the API and scanner integration suite with
+Run the API, scanner, and MCP integration suite with
 `make test-integration`; it additionally requires Git, Graphviz (`sfdp`), and
 network access to GitHub and vuln.go.dev.
 
@@ -372,6 +373,8 @@ boundaries, incomplete analysis, graph paths, and scan lifecycle behavior.
 scanner subprocess. The suite checks multiple modules and affected packages
 with 1, 4, and 8 workers. See [the test data notes](internal/api/testdata/README.md)
 for validating fixture changes in a local checkout.
+The MCP integration cases exercise submission, polling, cancellation, and result
+retrieval through the HTTP client without live AI requests.
 
 Scans compare dependency versions selected by Go, including transitive upgrades.
 Incomplete package loading produces an unknown result. A reachable symbol in a
@@ -384,6 +387,176 @@ the original module’s advisory versions do not establish whether the fork is f
 $ git clone https://github.com/k37y/gvs && cd gvs
 $ make image-run
 ```
+
+### MCP server
+
+Enable the optional Streamable HTTP endpoint when starting GVS:
+
+```bash
+GVS_MCP=1 make run
+```
+
+Connect your MCP client to `http://localhost:8082/mcp`. The endpoint returns 404
+when disabled. It uses the official Go MCP SDK, with stateless HTTP and JSON
+responses. Scan tasks run in the background and are shared with the existing
+REST API; only one scan runs at a time across both interfaces.
+
+For a container, put the settings in `~/.config/gvs/gvs.env`, or export them before
+running `make image-run`:
+
+```bash
+export GVS_MCP=1
+export GVS_PUBLIC_URL='https://gvs.example.com'
+make image-run
+```
+
+`GVS_PUBLIC_URL` is the externally reachable base URL used for graph links. A
+reverse proxy must forward the `/mcp` endpoint and `/graph/` paths. MCP requests
+only submit work or retrieve status/results; they do not keep an HTTP request
+open for the entire scan. Deploy on a trusted network or behind an access proxy;
+GVS does not provide MCP authentication or per-user task isolation.
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `GVS_MCP` | Set to `1` to enable `/mcp` | Disabled |
+| `GVS_MCP_ALLOWED_ORIGINS` | Comma-separated, exact HTTP(S) browser origins; for example `https://assistant.example.com` | Empty |
+| `GVS_PUBLIC_URL` | Public HTTP(S) base URL for graph links | Derived from the request/proxy configuration |
+| `GVS_SCAN_TIMEOUT` | Maximum task duration, including cloning and AI verification, in Go duration format | `30m` |
+| `GVS_TASK_TTL` | Retention after a task reaches a terminal state, in Go duration format | `24h` |
+
+Requests without an `Origin` header are accepted. Browser requests must have an
+exactly allowlisted origin; malformed or unlisted origins are rejected.
+`GVS_MCP_ALLOWED_ORIGINS` does not accept `*` and is independent of the REST
+`CORS_ALLOWED_ORIGINS` setting. Browser preflights support MCP request headers.
+AI verification remains controlled by the server's existing `GVS_AI*` settings.
+
+| MCP tool | Required arguments | Optional arguments |
+| --- | --- | --- |
+| `gvs_scan` | `repo`, `branch`, `cve`, `algo` | `requestId` |
+| `gvs_manual_scan` | `repo`, `branch`, `library`, `symbol`, `fixedVersion`, `algo` | `requestId` |
+| `gvs_status` | `taskId` | — |
+| `gvs_cancel` | `taskId` | — |
+| `gvs_read_result` | `taskId` | `cursor` |
+
+Required arguments are nonempty strings. `repo` must be an HTTP(S) Git repository
+URL; `branch` accepts a branch name or commit hash and maps to the REST
+`branchOrCommit` field. `cve` accepts a CVE or GO vulnerability identifier. Both
+scan tools require `algo` to be `rta`, `vta`, `cha`, or `static`. Manual scans accept
+comma-separated `symbol` values and the existing fixed-version syntax;
+`fixedVersion` maps to `fixversion`. Both tools perform call-graph analysis;
+there is no MCP tool for the separate govulncheck `/scan` workflow.
+
+An optional `requestId` of at most 128 characters makes submission retries
+idempotent. Reuse it with the same execution arguments to retrieve the original
+task; reusing it with different arguments is an error. A busy rejection does not
+reserve the key. Tasks, cancellation state, and retry keys are process-local:
+they disappear on restart and expire after the configured retention period.
+Disconnecting from MCP does not cancel an accepted scan.
+
+Server logs on stderr use `[MCP]` for tool names, call durations and error flags;
+`[API]` for REST request methods, paths and durations; and `[Task <taskId>]` for
+shared scan lifecycle changes and cache hits. Request logs are emitted when
+the call finishes; a progress stream logs when it closes. Bodies, query strings,
+headers, tool arguments and result contents are omitted from these request logs.
+Both `[API]` and `[MCP]` request logs include `remote_ip`, taken from the
+connection address without its port. Forwarded IP headers are ignored; behind
+a reverse proxy, this records the proxy's address.
+Detailed scanner logs remain available in the task result's `logs` field,
+including for cached results.
+
+#### Submit, poll, and read a result
+
+The following examples show MCP tool arguments and their structured result
+payloads, without the JSON-RPC envelope. The same result JSON is also returned
+as text content for clients that do not consume structured content.
+
+Call `gvs_scan` with:
+
+```json
+{
+  "repo": "https://github.com/k37y/gvs-example-one",
+  "branch": "main",
+  "cve": "CVE-2024-45338",
+  "algo": "rta",
+  "requestId": "example-scan-1"
+}
+```
+
+The tool immediately returns a task ID and polling guidance, for example:
+
+```json
+{
+  "taskId": "example-task-id",
+  "status": "pending",
+  "pollAfterSeconds": 5,
+  "message": "Scan accepted and still processing; it may take several minutes. Call gvs_status after 5 seconds."
+}
+```
+
+Wait five seconds, then call `gvs_status` with
+`{"taskId":"example-task-id"}`. While `status` is `pending` or `running`, wait
+`pollAfterSeconds` and repeat the status call. The client or calling agent must
+implement this loop; a scan can take several minutes. A timed-out status request
+can be retried with the same task ID. Stop polling at `completed`, `failed`, or
+`cancelled`; terminal results omit polling guidance.
+
+To stop work, call `gvs_cancel` with the task ID, then poll until terminal. The
+cancel tool acknowledges the request; terminal cancellation waits for the worker
+to exit and logs to be collected. Repeated cancellation is harmless and cannot
+overwrite an already completed task. A scan timeout is reported as `failed` with
+an explicit execution error.
+
+`gvs_status` returns the task ID, status, UTC `createdAt`/`updatedAt` timestamps,
+and `cached`. Terminal results also include `completedAt` and `expiresAt`.
+When scan output is available, `summary` keeps the scanner and AI assessments
+separate. For a scanner-positive, AI-negative result it is:
+
+```json
+{
+  "scannerVerdict": "true",
+  "aiVerdict": "false",
+  "aiConfidence": "high",
+  "verdictsDisagree": true
+}
+```
+
+These fields derive from `output.IsVulnerable` and
+`output.AIVerification.IsVulnerable`/`confidence`; they do not replace either
+assessment or create a combined verdict. Verdicts are strings (`"true"`,
+`"false"`, `"unknown"`) or `null` when unavailable/unrecognized.
+`verdictsDisagree` is `null` unless both verdicts are definite. Confidence is
+`"high"`, `"medium"`, or `"low"`; missing or unrecognized confidence is `null`.
+Non-JSON output is preserved as a string without a summary.
+
+For results that fit inline, `output` contains the full original scanner JSON,
+including AI evidence, reasoning and usage, reflection risks, suggested fixes,
+graph links, and any future fields. Execution failures appear in `error`;
+scanner diagnostics remain in `output.Errors`. A successful status lookup can
+return a failed scan. Available logs are retained for fresh and cached results.
+`cached: true` means the output, AI usage, and evidence belong to a previous
+analysis; task timestamps describe the current submission.
+
+The `result` field reports `available`, `inline`, and, once available,
+`totalBytes` for the immutable complete-result JSON artifact. That artifact
+contains the available `output`, `error`, and `logs`. It remains retrievable until
+the task expires. If the serialized MCP result would exceed 64 KiB, counting
+both structured and text content, status omits those fields and lists them in
+`result.externalFields`. The summary and retrieval guidance remain available;
+the underlying result is not truncated.
+
+To retrieve an external result, call `gvs_read_result` with the task ID. Each
+response includes `taskId`, `content`, `nextCursor`, and `eof`. Append each decoded
+`content` string verbatim, use `nextCursor` for the next call, and stop at
+`eof: true`; parse the concatenated text as JSON. Chunks contain at most 16 KiB of
+UTF-8 text and may be smaller to respect the serialized response limit.
+Replaying a cursor returns the same content. Cursors are bound to their task and
+artifact; invalid or expired cursors return errors. Graph URLs link to SVG files
+which clients fetch separately.
+
+Unknown task IDs, invalid arguments, busy submissions, and invalid cursors return
+MCP tool errors. Native MCP Tasks, stdio transport, durable tasks, progress
+subscriptions, and local-directory scans are outside this interface.
+
 ### Sample API request and response of callgraph path
 ```bash
 $ curl --request POST \
