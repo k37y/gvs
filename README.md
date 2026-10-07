@@ -68,6 +68,53 @@ flowchart TD
 ## Prerequisites
 * `podman`, `git`, `jq` and `make`
 
+## Runtime storage
+
+Set `GVS_DATA_DIR` to an absolute directory writable by the server user to keep
+GVS runtime files together:
+
+```bash
+GVS_DATA_DIR=/srv/gvs-data ./bin/gvs
+```
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `GVS_DATA_DIR` | Root directory for server writes, including child scanner/tool caches and temporary files | Unset; preserves existing locations |
+
+The server creates these subdirectories:
+
+| Directory | Contents |
+| --- | --- |
+| `tmp/` | Repository clones, task result artifacts, and temporary files (including Go build work) |
+| `cache/gvs/` | Cached scan JSON and logs |
+| `graph/` | Generated SVG call graphs served at `/graph/` |
+| `go-build/` | Go build cache |
+| `go/` | Go workspace, module/toolchain downloads, and tool installation directory |
+| `cache/` | Other XDG tool caches |
+| `config/` | XDG tool configuration and Go telemetry data |
+
+When set, `GVS_DATA_DIR` takes precedence over inherited `GOCACHE`, `GOMODCACHE`,
+`GOPATH`, `GOBIN`, `GOTMPDIR`, `TMPDIR`, `TMP`, `TEMP`, `XDG_CACHE_HOME`,
+`XDG_CONFIG_HOME`, and `GVS_GRAPH_CACHE`. Go telemetry is redirected using the
+toolchain's `TEST_TELEMETRY_DIR` override. Cleanup uses the configured temporary
+directory. Existing files are not migrated. Logs written to stdout/stderr remain
+managed by your terminal, container runtime, or service manager.
+
+This setting applies to the `gvs` server and tools it launches. Standalone `cg`
+continues to use its Go environment and explicit `-graph` output path.
+Without `GVS_DATA_DIR`, scan caches remain in `/tmp/gvs-cache`, temporary files
+use the OS temporary directory, and graphs use the existing XDG/home cache path.
+
+For containers, mount a writable volume and set the path inside the container:
+
+```bash
+podman run --rm -p 8082:8082 \
+  -v gvs-data:/data -e GVS_DATA_DIR=/data quay.io/k37y/gvs:latest
+```
+
+`make image-run` also forwards an exported `GVS_DATA_DIR` or reads it from
+`~/.config/gvs/gvs.env`. Add a volume through `RUN_OPTS` if persistence is needed.
+
 ## Optional AI verification
 
 AI verification is disabled by default. Enable it with `GVS_AI=1` and choose

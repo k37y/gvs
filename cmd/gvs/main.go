@@ -42,30 +42,13 @@ func main() {
 		port = envPort
 	}
 
-	// Set up cache directories using XDG-compliant paths
-	cacheDir := getCacheDir()
-	goCacheDir := filepath.Join(cacheDir, "go-build")
-	graphCacheDir := filepath.Join(cacheDir, "gvs", "graph")
-
-	// Only set GOCACHE if not already set
-	if os.Getenv("GOCACHE") == "" {
-		os.Setenv("GOCACHE", goCacheDir)
-	}
-	err := os.MkdirAll(goCacheDir, os.ModePerm)
+	graphCacheDir, err := configureStorage()
 	if err != nil {
-		log.Fatalf("Failed to create go cache directory: %v", err)
+		log.Fatalf("Failed to configure storage: %v", err)
 	}
-
-	// Create graph cache directory
-	err = os.MkdirAll(graphCacheDir, os.ModePerm)
-	if err != nil {
-		log.Fatalf("Failed to create graph cache directory: %v", err)
+	if root := os.Getenv("GVS_DATA_DIR"); root != "" {
+		log.Printf("Using data directory: %s", root)
 	}
-
-	// Export graph cache dir for handlers to use
-	os.Setenv("GVS_GRAPH_CACHE", graphCacheDir)
-
-	log.Printf("Using cache directory: %s", cacheDir)
 	log.Printf("Graph cache: %s", graphCacheDir)
 
 	mux, err := newHandler(graphCacheDir)

@@ -9,8 +9,15 @@ import (
 
 var cacheDir = "/tmp/gvs-cache"
 
+func getCacheDir() string {
+	if root := os.Getenv("GVS_DATA_DIR"); root != "" {
+		return filepath.Join(root, "cache", "gvs")
+	}
+	return cacheDir
+}
+
 func RetrieveCacheFromDisk(key string) ([]byte, error) {
-	path := filepath.Join(cacheDir, keyToFilename(key))
+	path := filepath.Join(getCacheDir(), keyToFilename(key))
 	if info, err := os.Stat(path); err == nil && time.Since(info.ModTime()) < 24*time.Hour {
 		return os.ReadFile(path)
 	}
@@ -18,6 +25,7 @@ func RetrieveCacheFromDisk(key string) ([]byte, error) {
 }
 
 func SaveCacheToDisk(key string, data []byte) error {
+	cacheDir := getCacheDir()
 	err := os.MkdirAll(cacheDir, 0755)
 	if err != nil {
 		return err
@@ -26,7 +34,7 @@ func SaveCacheToDisk(key string, data []byte) error {
 }
 
 func RetrieveCacheLogFromDisk(key string) ([]byte, error) {
-	path := filepath.Join(cacheDir, keyToLogFilename(key))
+	path := filepath.Join(getCacheDir(), keyToLogFilename(key))
 	if info, err := os.Stat(path); err == nil && time.Since(info.ModTime()) < 24*time.Hour {
 		return os.ReadFile(path)
 	}
@@ -34,6 +42,7 @@ func RetrieveCacheLogFromDisk(key string) ([]byte, error) {
 }
 
 func SaveCacheLogsToDisk(key string, data []byte) error {
+	cacheDir := getCacheDir()
 	err := os.MkdirAll(cacheDir, 0755)
 	if err != nil {
 		return err
