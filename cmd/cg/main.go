@@ -214,7 +214,7 @@ func main() {
 				case <-ticker.C:
 					completed := atomic.LoadInt64(&completedJobs)
 					total := atomic.LoadInt64(&totalJobs)
-					if total > 0 && completed > 0 {
+					if total > 0 && completed > 0 && completed < total {
 						percentage := float64(completed) / float64(total) * 100
 						fmt.Fprintf(os.Stderr, "Progress: %d/%d jobs completed (%.1f%%)\n", completed, total, percentage)
 					}
@@ -284,9 +284,6 @@ func main() {
 	// Stop progress display
 	if *progress {
 		close(progressDone)
-		completed := atomic.LoadInt64(&completedJobs)
-		total := atomic.LoadInt64(&totalJobs)
-		fmt.Fprintf(os.Stderr, "Progress: %d/%d jobs completed (100.0%%)\n", completed, total)
 	}
 
 	normalizeUsedImports(result)

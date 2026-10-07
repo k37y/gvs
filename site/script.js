@@ -592,11 +592,16 @@ function runScan() {
 						// Show report inaccuracy button
 						document.getElementById("reportContainer").style.display = "block";
 
-						// Render cached logs if returned by the server (cache hit)
+						if (window.currentProgressStream) {
+							window.currentProgressStream.close();
+							window.currentProgressStream = null;
+						}
+
+						// Final logs are complete for both fresh scans and cache hits.
 						const progressContent = document.getElementById("resultProgressContent");
 						if (statusData.logs) {
-							const logLines = statusData.logs.split('\n').filter(l => l).map(l => highlightLog(l));
-							progressContent.innerHTML += logLines.join('\n') + '\n';
+							const logLines = statusData.logs.split(/\r?\n/).filter(l => l).map(l => highlightLog(l));
+							progressContent.innerHTML = logLines.join('\n') + '\n';
 						}
 
 						progressContent.scrollTop = progressContent.scrollHeight;
@@ -613,12 +618,6 @@ function runScan() {
 					if (!historySaved) {
 						progressContent.innerHTML += highlightLog('Scan completed, but this result could not be saved in browser history.') + '\n';
 					}
-						
-						// Close progress stream if active
-						if (window.currentProgressStream) {
-							window.currentProgressStream.close();
-							window.currentProgressStream = null;
-						}
 						
 						cleanup();
 					}
@@ -687,6 +686,7 @@ function startProgressStream(taskId) {
 	const eventSource = new EventSource(`${API_BASE_URL}/progress/${taskId}`);
 	
 	eventSource.onmessage = function(event) {
+		if (window.currentProgressStream !== eventSource) return;
 		const data = event.data;
 		if (data && data.trim()) {
 			progressContent.innerHTML += highlightLog(data) + '\n';

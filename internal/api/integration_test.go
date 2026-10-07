@@ -871,6 +871,28 @@ func TestCallgraphIntegration(t *testing.T) {
 
 func TestCgBinaryValidation(t *testing.T) {
 	cgBin := buildIntegrationCG(t)
+	t.Run("progress completion", func(t *testing.T) {
+		t.Setenv("GVS_AI", "0")
+		repo, _ := newLifecycleRepo(t, "v1.0.0")
+		for _, algo := range []string{"rta", "vta", "cha", "static"} {
+			t.Run(algo, func(t *testing.T) {
+				cmd := exec.Command(cgBin, "-progress", "-algo", algo, "-library", fixtureLibrary,
+					"-symbols", "Danger", "-fixversion", "v1.1.0", repo)
+				var logs bytes.Buffer
+				cmd.Stderr = &logs
+				output, err := cmd.Output()
+				if err != nil {
+					t.Fatalf("scan failed: %v\n%s", err, &logs)
+				}
+				if !json.Valid(output) {
+					t.Fatalf("invalid scanner JSON: %s", output)
+				}
+				if count := strings.Count(logs.String(), "Progress: 1/1 jobs completed (100.0%)"); count != 1 {
+					t.Errorf("final progress appeared %d times, want 1:\n%s", count, &logs)
+				}
+			})
+		}
+	})
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module test\ngo 1.22.0\n"), 0644); err != nil {
 		t.Fatal(err)

@@ -69,3 +69,44 @@ test('history stays limited to 50 newest entries', () => {
 	assert.equal(app.history()[0].repo, 'new');
 	assert.equal(app.history().at(-1).repo, 'old-48');
 });
+
+test('completion uses full logs once after live, interrupted, or absent streaming', async () => {
+	const logs = 'cg version test\r\nRepeated message\nRepeated message\n<done>\n';
+	for (const streamed of [logs.split('\n'), ['cg version test'], []]) {
+		const app = setup();
+		const elements = new Map();
+		app.context.document.getElementById = id => {
+			if (!elements.has(id)) elements.set(id, {
+				value: '', innerHTML: '', style: {}, classList: { add() {}, remove() {} }
+			});
+			return elements.get(id);
+		};
+		for (const [id, value] of Object.entries({ repo: 'repo', branchOrCommit: 'main', cve: 'CVE-2026-1234', algo: 'rta' })) {
+			app.context.document.getElementById(id).value = value;
+		}
+		app.context.window.validateCVEInput = () => true;
+		app.context.showResultView = () => {};
+		let poll;
+		app.context.setInterval = callback => { poll = callback; return 1; };
+		app.context.clearInterval = () => {};
+		let stream;
+		app.context.EventSource = class {
+			constructor() { stream = this; }
+			close() { this.closed = true; }
+		};
+		app.context.fetch = async url => ({ json: async () => url.endsWith('/status')
+			? { status: 'completed', output: {}, logs }
+			: { taskId: 'task' } });
+		app.context.runScan();
+		await new Promise(setImmediate);
+		for (const data of ['Cloning repository...', ...streamed]) stream.onmessage({ data });
+		poll();
+		await new Promise(setImmediate);
+		const expected = logs.split(/\r?\n/).filter(Boolean).map(app.context.highlightLog).join('\n') + '\n';
+		assert.equal(elements.get('resultProgressContent').innerHTML, expected);
+		assert.equal(app.history()[0].logs, expected);
+		assert.equal(stream.closed, true);
+		stream.onmessage({ data: 'late message' });
+		assert.equal(elements.get('resultProgressContent').innerHTML, expected);
+	}
+});
