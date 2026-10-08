@@ -306,11 +306,6 @@ func Worker(jobs <-chan Job, results chan<- *Result, wg *sync.WaitGroup, result 
 			continue
 		default:
 		}
-		dir := filepath.Join(result.Directory, job.Dir)
-		if result.AffectedImports[job.Package].Type != "stdlib" && !result.isModuleInGoModOrSum(job.Package, dir) {
-			results <- &Result{IsVulnerable: "false"}
-			continue
-		}
 		res := job.isVulnerable(result)
 		results <- res
 	}
@@ -538,20 +533,22 @@ func (j Job) isVulnerable(result *Result) *Result {
 		unknown = true
 	}
 
-	// packages.Load resolves the actual build list, including transitive upgrades.
-	// The original go.mod can declare an older version in an untidy module.
-	if result.AffectedImports[j.Package].Type != "stdlib" {
-		if build := result.getSSABuild(dir); build != nil {
-			packages.Visit(build.loadedPkgs, nil, func(p *packages.Package) {
-				if p.PkgPath == j.Package && p.Module != nil {
+	// Resolve presence and versions from actual imports, including transitive
+	// dependencies. A go.mod/go.sum entry alone does not establish package use.
+	present := false
+	if build := result.getSSABuild(dir); build != nil {
+		packages.Visit(build.loadedPkgs, nil, func(p *packages.Package) {
+			if p.PkgPath == j.Package {
+				present = true
+				if result.AffectedImports[j.Package].Type != "stdlib" && p.Module != nil {
 					curVer, modPath = p.Module.Version, p.Module.Path
 					repPath, repVer = "", ""
 					if p.Module.Replace != nil && p.Module.Replace.Version != "" {
 						repPath, repVer = p.Module.Replace.Path, p.Module.Replace.Version
 					}
 				}
-			})
-		}
+			}
+		})
 	}
 
 	goToolchainVersion := ""
@@ -572,7 +569,7 @@ func (j Job) isVulnerable(result *Result) *Result {
 		result.Errors = append(result.Errors, fmt.Sprintf("Replacement for %s uses different module %s; advisory versions cannot establish its vulnerability status", modPath, repPath))
 	}
 
-	if used || unknown {
+	if present || used {
 		if result.UsedImports == nil {
 			result.UsedImports = make(map[string]map[string]UsedImportsDetails)
 		}
@@ -585,7 +582,7 @@ func (j Job) isVulnerable(result *Result) *Result {
 			uentry.ReplaceModule = repPath
 			uentry.ReplaceVersion = repVer
 		}
-		if vr.NeedsReplaceFix && vr.FixVersion != "" {
+		if (used || unknown) && vr.NeedsReplaceFix && vr.FixVersion != "" {
 			uentry.FixCommands = []string{
 				fmt.Sprintf("go mod edit -replace=%s=%s@%s", modPath, modPath, vr.FixVersion),
 				"go mod tidy",
@@ -1278,42 +1275,32 @@ func FindPathToSymbolExported(entry *callgraph.Node, pkg, symbol string, progres
 
 // matchesSymbol checks if the node's function matches the target symbol from the specified package
 func matchesSymbol(node *callgraph.Node, pkg, symbol string) bool {
-	if node.Func == nil {
+	if node == nil || node.Func == nil {
 		return false
 	}
 
-	funcStr := node.Func.String()
-
-	// FIRST: Verify the function belongs to the target package
-	// This prevents matching (*log.Logger).Writer when searching for logrus
-	if pkg != "" && !strings.Contains(funcStr, pkg) {
+	// SSA retains the declaring object for generic instances and method
+	// wrappers. Printed names can contain unrelated packages in type arguments
+	// or Go's distinct vendor/ packages, so they cannot establish identity.
+	obj := node.Func.Object()
+	path := objectPackage(obj)
+	if path == "" || (pkg != "" && path != pkg) {
 		return false
 	}
 
-	// Direct match
-	if funcStr == symbol {
+	name := symbolForObject(obj)
+	if symbol == name || symbol == path+"."+name {
 		return true
 	}
 
-	// Check if the function string contains the symbol
-	// This handles cases like "(pkg.Type).Method" matching "pkg.Type.Method"
-	if strings.Contains(funcStr, symbol) {
-		return true
-	}
-
-	// Handle receiver variations: (Type).Method, (*Type).Method
-	// The symbol might be "pkg.Method" but the function is "(pkg.Type).Method"
-	if strings.Contains(symbol, ".") {
-		parts := strings.Split(symbol, ".")
-		if len(parts) >= 2 {
-			methodName := parts[len(parts)-1]
-			pkgPrefix := strings.Join(parts[:len(parts)-1], ".")
-
-			// Check if function ends with the method name and contains the package
-			if strings.HasSuffix(funcStr, "."+methodName) && strings.Contains(funcStr, pkgPrefix) {
-				return true
+	if receiver, method, ok := strings.Cut(name, "."); ok {
+		recv := "(" + path + "." + receiver + ")"
+		if fn, ok := obj.(*types.Func); ok {
+			if _, pointer := types.Unalias(fn.Signature().Recv().Type()).(*types.Pointer); pointer {
+				recv = "(*" + path + "." + receiver + ")"
 			}
 		}
+		return symbol == recv+"."+method
 	}
 
 	return false

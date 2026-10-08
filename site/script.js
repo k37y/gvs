@@ -482,7 +482,7 @@ function runScan() {
 					outputDiv.innerHTML = `<strong>Error:</strong> ${data.error}<br>`;
 					outputDiv.classList.add("alert-danger");
 					
-					progressContent.innerHTML += highlightLog(`Error: ${data.error}`) + '\n';
+					progressContent.insertAdjacentHTML('beforeend', highlightLog(`Error: ${data.error}`) + '\n');
 					progressContent.scrollTop = progressContent.scrollHeight;
 					
 					cleanup()
@@ -497,7 +497,7 @@ function runScan() {
 				outputDiv.innerHTML += `<strong>Network Error:</strong> ${err.message}<br>`;
 				outputDiv.classList.add("alert-danger");
 
-				progressContent.innerHTML += highlightLog(`Network Error: ${err.message}`) + '\n';
+				progressContent.insertAdjacentHTML('beforeend', highlightLog(`Network Error: ${err.message}`) + '\n');
 				progressContent.scrollTop = progressContent.scrollHeight;
 			});
 
@@ -520,7 +520,7 @@ function runScan() {
 					outputDiv.innerHTML = `<strong>Error:</strong> ${data.error}<br>`;
 					outputDiv.classList.add("alert-danger");
 					
-					progressContent.innerHTML += highlightLog(`Error: ${data.error}`) + '\n';
+					progressContent.insertAdjacentHTML('beforeend', highlightLog(`Error: ${data.error}`) + '\n');
 					progressContent.scrollTop = progressContent.scrollHeight;
 					
 					cleanup()
@@ -537,7 +537,7 @@ function runScan() {
 					: error.message || error;
 				outputDiv.innerHTML = `<strong>Error:</strong> ${errMsg}`;
 				
-				progressContent.innerHTML += highlightLog(`Network Error: ${errMsg}`) + '\n';
+				progressContent.insertAdjacentHTML('beforeend', highlightLog(`Network Error: ${errMsg}`) + '\n');
 				progressContent.scrollTop = progressContent.scrollHeight;
 			})
 			.finally(() => {
@@ -550,7 +550,7 @@ function runScan() {
 		const progressContent = document.getElementById("resultProgressContent");
 		
 		// Always start progress streaming
-		startProgressStream(taskId);
+		const progressLog = startProgressStream(taskId);
 		
 		const intervalId = setInterval(() => {
 			fetch(`${API_BASE_URL}/status`, {
@@ -568,7 +568,7 @@ function runScan() {
 						// Add error message to progress output
 						const progressContent = document.getElementById("resultProgressContent");
 						const timestamp = new Date().toLocaleTimeString();
-						progressContent.innerHTML += highlightLog(`Scan Failed at ${timestamp}: ${statusData.error}`) + '\n';
+						progressContent.insertAdjacentHTML('beforeend', highlightLog(`Scan Failed at ${timestamp}: ${statusData.error}`) + '\n');
 						progressContent.scrollTop = progressContent.scrollHeight;
 						
 						clearInterval(intervalId);
@@ -578,7 +578,7 @@ function runScan() {
 
 					if (statusData.status === "cancelled") {
 						outputDiv.innerHTML = '<strong>Scan cancelled.</strong>';
-						progressContent.innerHTML += highlightLog('Scan cancelled by user.') + '\n';
+						progressContent.insertAdjacentHTML('beforeend', highlightLog('Scan cancelled by user.') + '\n');
 						progressContent.scrollTop = progressContent.scrollHeight;
 						clearInterval(intervalId);
 						cleanup();
@@ -592,12 +592,12 @@ function runScan() {
 						// Show report inaccuracy button
 						document.getElementById("reportContainer").style.display = "block";
 
-						// Render cached logs if returned by the server (cache hit)
-						const progressContent = document.getElementById("resultProgressContent");
-						if (statusData.logs) {
-							const logLines = statusData.logs.split('\n').filter(l => l).map(l => highlightLog(l));
-							progressContent.innerHTML += logLines.join('\n') + '\n';
+						if (window.currentProgressStream) {
+							window.currentProgressStream.close();
+							window.currentProgressStream = null;
 						}
+
+						progressLog.complete(statusData.logs);
 
 						progressContent.scrollTop = progressContent.scrollHeight;
 
@@ -611,14 +611,8 @@ function runScan() {
 						logs: progressContent.innerHTML
 					});
 					if (!historySaved) {
-						progressContent.innerHTML += highlightLog('Scan completed, but this result could not be saved in browser history.') + '\n';
+						progressContent.insertAdjacentHTML('beforeend', highlightLog('Scan completed, but this result could not be saved in browser history.') + '\n');
 					}
-						
-						// Close progress stream if active
-						if (window.currentProgressStream) {
-							window.currentProgressStream.close();
-							window.currentProgressStream = null;
-						}
 						
 						cleanup();
 					}
@@ -630,7 +624,7 @@ function runScan() {
 					
 					// Add error message to progress output
 					const progressContent = document.getElementById("resultProgressContent");
-					progressContent.innerHTML += highlightLog(`Network Error: ${err.message}`) + '\n';
+					progressContent.insertAdjacentHTML('beforeend', highlightLog(`Network Error: ${err.message}`) + '\n');
 					progressContent.scrollTop = progressContent.scrollHeight;
 					
 					clearInterval(intervalId);
@@ -668,7 +662,7 @@ function cancelScan() {
 	scanButton.innerText = "Cancelling...";
 
 	const progressContent = document.getElementById("resultProgressContent");
-	progressContent.innerHTML += highlightLog('Cancelling scan...') + '\n';
+	progressContent.insertAdjacentHTML('beforeend', highlightLog('Cancelling scan...') + '\n');
 	progressContent.scrollTop = progressContent.scrollHeight;
 
 	fetch(`${API_BASE_URL}/cancel`, {
@@ -680,16 +674,54 @@ function cancelScan() {
 	});
 }
 
+function createProgressLog(container) {
+	const scanner = document.createElement('span');
+	container.appendChild(scanner);
+	const lines = new Map();
+
+	function insert(message, parent, before = null) {
+		const node = document.createElement('span');
+		node.innerHTML = highlightLog(message) + '\n';
+		parent.insertBefore(node, before);
+		return node;
+	}
+
+	return {
+		append(message, line) {
+			if (!message.trim()) return;
+			if (line) {
+				if (!lines.has(line)) lines.set(line, insert(message, scanner));
+			} else {
+				insert(message, container, scanner);
+			}
+		},
+		complete(logs) {
+			if (!logs) return;
+			const finalLines = logs.split(/\r?\n/);
+			let next = null;
+			// Line IDs preserve repeated text and recover gaps without replacing nodes.
+			for (let i = finalLines.length - 1; i >= 0; i--) {
+				if (!finalLines[i].trim()) continue;
+				if (!lines.has(i + 1)) lines.set(i + 1, insert(finalLines[i], scanner, next));
+				next = lines.get(i + 1);
+			}
+		}
+	};
+}
+
 function startProgressStream(taskId) {
 	const progressContent = document.getElementById("resultProgressContent");
+	const progressLog = createProgressLog(progressContent);
 
 	// Use Server-Sent Events for real-time progress updates
 	const eventSource = new EventSource(`${API_BASE_URL}/progress/${taskId}`);
 	
 	eventSource.onmessage = function(event) {
+		if (window.currentProgressStream !== eventSource) return;
 		const data = event.data;
 		if (data && data.trim()) {
-			progressContent.innerHTML += highlightLog(data) + '\n';
+			const match = /^scanner-([1-9]\d*)$/.exec(event.lastEventId || '');
+			progressLog.append(data, match ? Number(match[1]) : null);
 			progressContent.scrollTop = progressContent.scrollHeight;
 		}
 	};
@@ -701,6 +733,7 @@ function startProgressStream(taskId) {
 	
 	// Store reference to close later
 	window.currentProgressStream = eventSource;
+	return progressLog;
 }
 
 function openFeedbackModal() {

@@ -871,6 +871,30 @@ func TestCallgraphIntegration(t *testing.T) {
 
 func TestCgBinaryValidation(t *testing.T) {
 	cgBin := buildIntegrationCG(t)
+	t.Run("progress completion", func(t *testing.T) {
+		t.Setenv("GVS_AI", "0")
+		dir := t.TempDir()
+		repo := filepath.Join(dir, "repo")
+		gitFixture(t, dir, "clone", "--depth", "1", "--branch", "reachability-direct", testDataRepo, repo)
+		for _, algo := range []string{"rta", "vta", "cha", "static"} {
+			t.Run(algo, func(t *testing.T) {
+				cmd := exec.Command(cgBin, "-progress", "-algo", algo, "-library", fixtureLibrary,
+					"-symbols", "Danger", "-fixversion", "v1.1.0", repo)
+				var logs bytes.Buffer
+				cmd.Stderr = &logs
+				output, err := cmd.Output()
+				if err != nil {
+					t.Fatalf("scan failed: %v\n%s", err, &logs)
+				}
+				if !json.Valid(output) {
+					t.Fatalf("invalid scanner JSON: %s", output)
+				}
+				if count := strings.Count(logs.String(), "Progress: 1/1 jobs completed (100.0%)"); count != 1 {
+					t.Errorf("final progress appeared %d times, want 1:\n%s", count, &logs)
+				}
+			})
+		}
+	})
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module test\ngo 1.22.0\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -1210,8 +1234,12 @@ func TestCallgraphFixturesIntegration(t *testing.T) {
 							fixes = []string{"go get example.com/vulnerable@v1.1.0", "go mod tidy", "go mod vendor"}
 						}
 						assertUsedImport(t, out, ".", fixtureLibrary, tc.version, fixes, []string{"Danger"}, "", "")
-					} else if len(out.UsedImports) != 0 {
-						t.Errorf("unreachable symbol reported as used: %v", out.UsedImports)
+					} else if tc.scenario == "absent" || tc.scenario == "only-tests" {
+						if len(out.UsedImports) != 0 {
+							t.Errorf("absent package reported as present: %v", out.UsedImports)
+						}
+					} else {
+						assertUsedImport(t, out, ".", fixtureLibrary, tc.version, nil, []string{}, "", "")
 					}
 					if tc.scenario == "reflection" {
 						found := map[string]bool{}
@@ -1254,20 +1282,23 @@ func TestCallgraphFixturesIntegration(t *testing.T) {
 			if out.IsVulnerable != tc.status {
 				t.Errorf("status = %q, want %q", out.IsVulnerable, tc.status)
 			}
-			if len(out.UsedImports) != len(tc.modules) {
-				t.Errorf("used modules = %v", out.UsedImports)
-			}
 			unknowns := 0
 			for _, mod := range tc.modules {
 				symbols := []string{"Danger"}
 				var fixes []string
 				if mod.scenario == "unknown" {
-					symbols = []string{}
 					unknowns++
+					if _, ok := out.UsedImports[mod.dir]; ok {
+						t.Errorf("excluded imports reported as present in module %s", mod.dir)
+					}
+					continue
 				} else if mod.version == "v1.0.0" {
 					fixes = []string{"go get example.com/vulnerable@v1.1.0", "go mod tidy", "go mod vendor"}
 				}
 				assertUsedImport(t, out, mod.dir, fixtureLibrary, mod.version, fixes, symbols, "", "")
+			}
+			if len(out.UsedImports) != len(tc.modules)-unknowns {
+				t.Errorf("used modules = %v", out.UsedImports)
 			}
 			if len(out.Errors) != unknowns {
 				t.Errorf("errors = %v, want %d build constraint diagnostics", out.Errors, unknowns)
@@ -1286,6 +1317,56 @@ func TestCallgraphFixturesIntegration(t *testing.T) {
 			t.Fatalf("commit scan: %+v", out)
 		}
 	})
+}
+
+func TestCallgraphPackageIdentityIntegration(t *testing.T) {
+	startTestServer(t)
+	const library = "golang.org/x/net/dns/dnsmessage"
+	for _, tc := range []struct {
+		branch   string
+		external bool
+	}{
+		{"package-identity-go-bundled", false},
+		{"package-identity-external", true},
+	} {
+		t.Run(tc.branch, func(t *testing.T) {
+			for _, algo := range []string{"rta", "vta", "cha", "static"} {
+				t.Run(algo, func(t *testing.T) {
+					out := pollCallgraphManualResult(t, testDataRepo, tc.branch, library, "Parser.Answer", "v0.56.0", algo)
+					if len(out.Errors) != 0 {
+						t.Fatalf("scan errors: %v", out.Errors)
+					}
+					if !tc.external {
+						if out.IsVulnerable != "false" || len(out.UsedImports) != 0 || len(out.GraphPaths) != 0 {
+							t.Fatalf("Go's bundled parser was attributed to the external module: %+v", out)
+						}
+						return
+					}
+					if out.IsVulnerable != "true" {
+						t.Fatalf("external parser lost its finding: %+v", out)
+					}
+					details := out.UsedImports["."][library]
+					if details.CurrentVersion != "v0.26.0" || !slices.Contains(details.Symbols, "Parser.Answer") || len(details.FixCommands) == 0 {
+						t.Fatalf("external module metadata: %+v", details)
+					}
+					for _, url := range out.GraphPaths {
+						resp, err := integrationClient.Get(url)
+						if err != nil {
+							t.Fatal(err)
+						}
+						body, err := io.ReadAll(resp.Body)
+						resp.Body.Close()
+						if err != nil {
+							t.Fatal(err)
+						}
+						if bytes.Contains(body, []byte("vendor/golang.org/x/net/dns/dnsmessage")) {
+							t.Error("external finding points to Go's bundled parser")
+						}
+					}
+				})
+			}
+		})
+	}
 }
 
 type integrationTask struct {
@@ -1369,6 +1450,44 @@ func writeIntegrationWrapper(t *testing.T, dir, name, body string) {
 
 func TestCallgraphLifecycleIntegration(t *testing.T) {
 	startTestServer(t)
+	t.Run("progress line IDs", func(t *testing.T) {
+		repo, _ := newLifecycleRepo(t, "v1.0.0")
+		request := fixtureRequest(repo, "main", "rta")
+		request["symbol"] = "Safe"
+		id := submitIntegrationTask(t, request)
+		response, err := integrationClient.Get(testServerURL + "/progress/" + id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		stream, err := io.ReadAll(response.Body)
+		if err != nil || response.StatusCode != http.StatusOK {
+			t.Fatalf("progress stream: status=%d error=%v body=%s", response.StatusCode, err, stream)
+		}
+		task := awaitIntegrationTask(t, id)
+		if task.Status != StatusCompleted {
+			t.Fatalf("scan failed: %+v", task)
+		}
+		lines := strings.Split(task.Logs, "\n")
+		count := 0
+		for _, event := range strings.Split(string(stream), "\n\n") {
+			if !strings.HasPrefix(event, "id: scanner-") {
+				continue
+			}
+			fields := strings.SplitN(event, "\n", 2)
+			line, err := strconv.Atoi(strings.TrimPrefix(fields[0], "id: scanner-"))
+			if err != nil || line < 1 || line > len(lines) || len(fields) != 2 {
+				t.Fatalf("invalid event: %q", event)
+			}
+			if want := "data: " + strings.TrimSuffix(lines[line-1], "\r"); fields[1] != want {
+				t.Errorf("line %d: event=%q, want %q", line, fields[1], want)
+			}
+			count++
+		}
+		if count == 0 {
+			t.Fatal("no scanner line IDs received")
+		}
+	})
 	repo, commit := newLifecycleRepo(t, "v1.0.0")
 	request := fixtureRequest(repo, "main", "rta")
 	realCG, err := exec.LookPath("cg")
@@ -1562,14 +1681,15 @@ func TestCallgraphScanLogicIntegration(t *testing.T) {
 					if !strings.Contains(strings.Join(out.Errors, "\n"), "load") {
 						t.Errorf("missing package-load diagnostic: %v", out.Errors)
 					}
+					if len(out.UsedImports) != 0 {
+						t.Errorf("failed load must not establish package presence: %v", out.UsedImports)
+					}
+					return
 				} else if len(out.Errors) != 0 {
 					t.Errorf("errors: %v", out.Errors)
 				}
 				symbols := []string{"Danger"}
 				var fixes []string
-				if tc.status == "unknown" {
-					symbols = []string{}
-				}
 				if tc.status == "true" {
 					fixes = []string{"go get example.com/vulnerable@v1.1.0", "go mod tidy", "go mod vendor"}
 				}

@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -96,6 +98,39 @@ func TestHealthHandler(t *testing.T) {
 	}
 	if rec.Body.String() != "OK" {
 		t.Errorf("body = %q, want %q", rec.Body.String(), "OK")
+	}
+}
+
+func TestRequestLogUsesConnectionIP(t *testing.T) {
+	for _, tc := range []struct{ remote, ip string }{
+		{"192.0.2.10:54321", "192.0.2.10"},
+		{"[2001:db8::10]:54321", "2001:db8::10"},
+		{"192.0.2.10", "192.0.2.10"},
+	} {
+		t.Run(tc.remote, func(t *testing.T) {
+			var logs bytes.Buffer
+			previous := log.Writer()
+			log.SetOutput(&logs)
+			defer log.SetOutput(previous)
+			req := httptest.NewRequest(http.MethodGet, "/healthz?token=query-secret", nil)
+			req.RemoteAddr = tc.remote
+			req.Header.Set("X-Forwarded-For", "203.0.113.99")
+			req.Header.Set("X-Real-IP", "203.0.113.99")
+			req.Header.Set("Forwarded", "for=203.0.113.99")
+			rec := httptest.NewRecorder()
+			LogRequests(HealthHandler)(rec, req)
+			if rec.Code != http.StatusOK || rec.Body.String() != "OK" {
+				t.Fatalf("response changed: %d %s", rec.Code, rec.Body)
+			}
+			if !strings.Contains(logs.String(), `[API] remote_ip="`+tc.ip+`" method="GET" path="/healthz"`) {
+				t.Fatalf("missing connection IP: %s", &logs)
+			}
+			for _, excluded := range []string{"203.0.113.99", ":54321", "query-secret"} {
+				if strings.Contains(logs.String(), excluded) {
+					t.Fatalf("unexpected %q in request log: %s", excluded, &logs)
+				}
+			}
+		})
 	}
 }
 
@@ -248,9 +283,10 @@ func TestGetGraphCacheDir_Default(t *testing.T) {
 
 func TestProgressHandler_Stream(t *testing.T) {
 	taskID := "test-progress-stream"
-	ch := make(chan string, 2)
-	ch <- "step 1"
-	ch <- "step 2"
+	ch := make(chan progressEvent, 3)
+	ch <- progressEvent{text: "step 1", scannerLine: 1}
+	ch <- progressEvent{text: "step 2", scannerLine: 3}
+	ch <- progressEvent{text: "setup\ncontinued"}
 	close(ch)
 
 	progressMutex.Lock()
@@ -268,6 +304,9 @@ func TestProgressHandler_Stream(t *testing.T) {
 	ProgressHandler(rec, req)
 
 	body := rec.Body.String()
+	if want := "id: scanner-1\ndata: step 1\n\nid: scanner-3\ndata: step 2\n\nid:\ndata: setup\ndata: continued\n\n"; body != want {
+		t.Errorf("SSE body = %q, want %q", body, want)
+	}
 	if !strings.Contains(body, "data: step 1") {
 		t.Errorf("expected 'data: step 1' in body, got: %s", body)
 	}
@@ -330,7 +369,7 @@ func TestCancelHandler_TaskNotRunning(t *testing.T) {
 }
 
 func TestCancelHandler_Success(t *testing.T) {
-	_, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
 
 	taskMutex.Lock()
 	taskStore["running-task"] = &TaskResult{Status: StatusRunning}
@@ -369,7 +408,7 @@ func TestCancelHandler_Success(t *testing.T) {
 	taskMutex.Lock()
 	result := taskStore["running-task"]
 	taskMutex.Unlock()
-	if result.Status != StatusCancelled {
-		t.Errorf("task status = %q, want %q", result.Status, StatusCancelled)
+	if result.Status != StatusRunning || ctx.Err() != context.Canceled {
+		t.Errorf("cancel should signal worker and await its final result: status=%s, context=%v", result.Status, ctx.Err())
 	}
 }

@@ -6,10 +6,13 @@ VERSION = $(shell git describe --tags --long --dirty 2>/dev/null)
 IMAGE = quay.io/k37y/${NAME}:${VERSION}
 PORT ?= 8082
 ALGO ?= vta
-# Optional runtime environment file; credentials are never baked into the image.
+# Optional runtime environment file for storage, AI, MCP, and task settings; never baked into the image.
 AI_ENV_FILE ?= $(HOME)/.config/gvs/gvs.env
 AI_ENV_VARS = GVS_AI GVS_AI_PROVIDER GVS_AI_MODEL GVS_AI_API_KEY GVS_AI_BASE_URL \
               GVS_AI_PROJECT_ID GVS_AI_LOCATION GVS_AI_MAX_ITERATIONS GVS_AI_MAX_TOKENS GVS_AI_CONTEXT_TOKENS GVS_AI_TIMEOUT GVS_AI_PRICING
+# Forward explicitly exported settings; the server supplies defaults for unset variables.
+RUNTIME_ENV_VARS = $(AI_ENV_VARS) GVS_MCP GVS_MCP_ALLOWED_ORIGINS GVS_PUBLIC_URL \
+                   GVS_SCAN_TIMEOUT GVS_TASK_TTL GVS_DATA_DIR
 ADC_CREDS = $(HOME)/.config/gcloud/application_default_credentials.json
 PREFIX ?= /usr
 BINDIR ?= $(PREFIX)/bin
@@ -23,10 +26,12 @@ GROUPNAME ?= $(USERNAME)
 PODMAN_TEST_IMAGE ?= registry.access.redhat.com/ubi9/ubi
 # Keep build/module caches between disposable test containers.
 PODMAN_TEST_CACHE ?= gvs-test-cache
+# Optional local fixture checkout, mounted read-only for unpublished branch tests.
+GVS_TESTDATA_REPO ?=
 # Override to select packages, test names, or a different timeout.
 PODMAN_TEST_ARGS ?= -race -v -count=1 -timeout=120s ./...
-# Match the host integration suite, with an override for focused runs.
-PODMAN_INTEGRATION_TEST_ARGS ?= -race -v -count=1 -tags integration ./internal/api -run "TestCallgraph.*Integration|TestCgBinaryValidation" -timeout 45m
+# Match the host API/scanner and MCP integration suite, with an override for focused runs.
+PODMAN_INTEGRATION_TEST_ARGS ?= -race -v -count=1 -tags integration ./internal/api ./internal/mcp -run "TestCallgraph.*Integration|TestCgBinaryValidation|TestMCP.*Integration" -timeout 45m
 
 # Share the read-only checkout and persistent Go caches across both test targets.
 PODMAN_TEST_RUN = podman run --rm --security-opt label=disable --user 0 \
@@ -36,6 +41,11 @@ PODMAN_TEST_RUN = podman run --rm --security-opt label=disable --user 0 \
 	--env CGO_ENABLED=1 --env GOTOOLCHAIN=auto \
 	--env GOCACHE=/cache/build --env GOMODCACHE=/cache/mod \
 	--env GOFLAGS=-buildvcs=false
+
+ifneq ($(strip $(GVS_TESTDATA_REPO)),)
+PODMAN_TEST_RUN += --volume "$(abspath $(GVS_TESTDATA_REPO)):/testdata:ro" \
+	--env GVS_TESTDATA_REPO=/testdata
+endif
 
 RUN_OPTS := --security-opt label=disable \
             --rm --detach \
@@ -53,7 +63,7 @@ endif
 .PHONY: run
 
 run: gvs cg
-	./bin/gvs
+	PATH="$(CURDIR)/bin:$$PATH" ./bin/gvs
 
 .PHONY: test
 
@@ -71,7 +81,7 @@ test-podman:
 
 test-integration:
 	@echo "Running integration tests..."
-	go test -race -v -count=1 -tags integration ./internal/api -run "TestCallgraph.*Integration|TestCgBinaryValidation" -timeout 45m
+	go test -race -v -count=1 -tags integration ./internal/api ./internal/mcp -run "TestCallgraph.*Integration|TestCgBinaryValidation|TestMCP.*Integration" -timeout 45m
 
 # Install integration dependencies in UBI without requiring host development tools.
 .PHONY: test-integration-podman
@@ -123,7 +133,7 @@ image-run: image
 	if [ -f "$(AI_ENV_FILE)" ]; then \
 		set -- "$$@" --env-file "$(AI_ENV_FILE)"; \
 	fi; \
-	for name in $(AI_ENV_VARS); do \
+	for name in $(RUNTIME_ENV_VARS); do \
 		if printenv "$$name" >/dev/null; then \
 			set -- "$$@" --env "$$name"; \
 		fi; \
@@ -236,10 +246,16 @@ install-user: gvs cg
 	@if [ ! -f $(USER_CONFDIR)/gvs.env ]; then \
 		echo "# GVS configuration" > $(USER_CONFDIR)/gvs.env; \
 		echo "# GVS_PORT=8082" >> $(USER_CONFDIR)/gvs.env; \
+		echo "# GVS_DATA_DIR=/path/to/writable/gvs-data" >> $(USER_CONFDIR)/gvs.env; \
 		echo "# WORKER_COUNT=4" >> $(USER_CONFDIR)/gvs.env; \
 		echo "# ALGO=vta" >> $(USER_CONFDIR)/gvs.env; \
 		echo "# CORS_ALLOWED_ORIGINS=" >> $(USER_CONFDIR)/gvs.env; \
 		echo "# GVS_COUNTER_URL=" >> $(USER_CONFDIR)/gvs.env; \
+		echo "# GVS_MCP=1" >> $(USER_CONFDIR)/gvs.env; \
+		echo "# GVS_MCP_ALLOWED_ORIGINS=" >> $(USER_CONFDIR)/gvs.env; \
+		echo "# GVS_PUBLIC_URL=" >> $(USER_CONFDIR)/gvs.env; \
+		echo "# GVS_SCAN_TIMEOUT=30m" >> $(USER_CONFDIR)/gvs.env; \
+		echo "# GVS_TASK_TTL=24h" >> $(USER_CONFDIR)/gvs.env; \
 		echo "# GVS_AI=1" >> $(USER_CONFDIR)/gvs.env; \
 		echo "# GVS_AI_PROVIDER=openai-compatible" >> $(USER_CONFDIR)/gvs.env; \
 		echo "# GVS_AI_MODEL=" >> $(USER_CONFDIR)/gvs.env; \

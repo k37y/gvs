@@ -3,6 +3,7 @@ FROM registry.access.redhat.com/ubi9/go-toolset:1.23 AS builder
 WORKDIR /go/src/github.com/k37y/gvs
 COPY . .
 USER root
+ENV GOTOOLCHAIN=auto
 RUN go build -buildvcs=false -o /go/src/github.com/k37y/gvs/bin/gvs ./cmd/gvs
 RUN go build -buildvcs=false -o /go/src/github.com/k37y/gvs/bin/cg ./cmd/cg
 
@@ -19,14 +20,16 @@ ENV ALGO=${ALGO}
 ENV CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}
 ENV GVS_COUNTER_URL=${GVS_COUNTER_URL}
 ENV GOPATH=/go
+ENV GOTOOLCHAIN=auto
+ENV GOSUMDB=sum.golang.org
 ENV PATH=${PATH}:${GOPATH}/bin
 ENV PATH=${PATH}:/go/src/github.com/k37y/gvs/bin
-ENV INSTALL_PKGS="git golang gpgme-devel jq libseccomp-devel btrfs-progs-devel"
+ENV INSTALL_PKGS="git golang graphviz gpgme-devel jq libseccomp-devel btrfs-progs-devel"
 
 WORKDIR /go/src/github.com/k37y/gvs
 
-RUN yum install -y ${INSTALL_PKGS} && \
-    go install golang.org/x/vuln/cmd/govulncheck@latest && \
+RUN yum install -y ${INSTALL_PKGS}
+RUN go install golang.org/x/vuln/cmd/govulncheck@latest && \
     go install golang.org/x/tools/cmd/callgraph@latest && \
     go install golang.org/x/tools/cmd/digraph@latest
 

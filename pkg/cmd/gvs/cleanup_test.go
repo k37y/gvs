@@ -1,6 +1,7 @@
 package gvs
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -62,32 +63,105 @@ func TestGetDirSize_Empty(t *testing.T) {
 }
 
 func TestCleanupOldDirectories(t *testing.T) {
-	tempDir := os.TempDir()
+	tempDir := t.TempDir()
+	tests := []struct {
+		name   string
+		age    time.Duration
+		active bool
+		keep   bool
+	}{
+		{"cg-old", 2 * time.Hour, false, false},
+		{"gvc-old", 2 * time.Hour, false, false},
+		{"cg-active", 2 * time.Hour, true, true},
+		{"gvc-active", 2 * time.Hour, true, true},
+		{"cg-recent", time.Minute, false, true},
+		{"unrelated-old", 2 * time.Hour, false, true},
+	}
+	active := make(map[string]bool)
+	for _, tt := range tests {
+		dir := filepath.Join(tempDir, tt.name)
+		if err := os.Mkdir(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		modified := time.Now().Add(-tt.age)
+		if err := os.Chtimes(dir, modified, modified); err != nil {
+			t.Fatal(err)
+		}
+		active[dir] = tt.active
+	}
 
-	// Create a cg- dir with old timestamp
-	oldDir, err := os.MkdirTemp(tempDir, "cg-testcleanup-")
-	if err != nil {
+	cleanupOldDirectoriesIn(context.Background(), tempDir, func(dir string) bool { return active[dir] })
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := os.Stat(filepath.Join(tempDir, tt.name))
+			if tt.keep && err != nil {
+				t.Errorf("expected directory to be kept: %v", err)
+			}
+			if !tt.keep && !os.IsNotExist(err) {
+				t.Errorf("expected directory to be removed, stat error: %v", err)
+			}
+		})
+	}
+}
+
+func TestStartDirectoryCleanupWithContext(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("TMPDIR", tempDir)
+	dir := filepath.Join(tempDir, "cg-active")
+	if err := os.Mkdir(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	// Set mod time to 2 hours ago
-	twoHoursAgo := time.Now().Add(-2 * time.Hour)
-	os.Chtimes(oldDir, twoHoursAgo, twoHoursAgo)
-
-	// Create a cg- dir with recent timestamp (should NOT be deleted)
-	newDir, err := os.MkdirTemp(tempDir, "cg-testcleanup-")
-	if err != nil {
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(dir, old, old); err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(newDir)
 
-	cleanupOldDirectories()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		StartDirectoryCleanupWithContext(ctx, func(path string) bool {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			return path == dir
+		})
+	}()
 
-	if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
-		os.RemoveAll(oldDir) // cleanup on failure
-		t.Error("expected old cg- directory to be removed")
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not perform its initial pass")
 	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not stop when its context was cancelled")
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("active directory was not preserved: %v", err)
+	}
+}
 
-	if _, err := os.Stat(newDir); os.IsNotExist(err) {
-		t.Error("expected recent cg- directory to be kept")
+func TestCleanupOldDirectoriesCancelled(t *testing.T) {
+	tempDir := t.TempDir()
+	dir := filepath.Join(tempDir, "cg-old")
+	if err := os.Mkdir(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(dir, old, old); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cleanupOldDirectoriesIn(ctx, tempDir, nil)
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("cancelled cleanup removed a directory: %v", err)
 	}
 }
