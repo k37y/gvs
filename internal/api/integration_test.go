@@ -873,7 +873,9 @@ func TestCgBinaryValidation(t *testing.T) {
 	cgBin := buildIntegrationCG(t)
 	t.Run("progress completion", func(t *testing.T) {
 		t.Setenv("GVS_AI", "0")
-		repo, _ := newLifecycleRepo(t, "v1.0.0")
+		dir := t.TempDir()
+		repo := filepath.Join(dir, "repo")
+		gitFixture(t, dir, "clone", "--depth", "1", "--branch", "reachability-direct", testDataRepo, repo)
 		for _, algo := range []string{"rta", "vta", "cha", "static"} {
 			t.Run(algo, func(t *testing.T) {
 				cmd := exec.Command(cgBin, "-progress", "-algo", algo, "-library", fixtureLibrary,
@@ -1320,41 +1322,21 @@ func TestCallgraphFixturesIntegration(t *testing.T) {
 func TestCallgraphPackageIdentityIntegration(t *testing.T) {
 	startTestServer(t)
 	const library = "golang.org/x/net/dns/dnsmessage"
-	for _, external := range []bool{false, true} {
-		name := "go-bundled"
-		if external {
-			name = "repository-dependency"
-		}
-		t.Run(name, func(t *testing.T) {
-			dir := t.TempDir()
-			main := "package main\nimport \"net\"\nfunc main() { _, _ = net.LookupCNAME(\"example.org\") }\n"
-			if external {
-				main = "package main\nimport (\"net\"; \"golang.org/x/net/dns/dnsmessage\")\nfunc main() { _, _ = net.LookupCNAME(\"example.org\"); var p dnsmessage.Parser; p.Answer() }\n"
-			}
-			for file, source := range map[string]string{
-				"go.mod":                        "module example.com/app\n\ngo 1.22.0\nrequire golang.org/x/net v0.26.0\nreplace golang.org/x/net => ./dep\n",
-				"main.go":                       main,
-				"dep/go.mod":                    "module golang.org/x/net\n\ngo 1.22.0\n",
-				"dep/dns/dnsmessage/message.go": "package dnsmessage\ntype Parser struct{}\nfunc (Parser) Answer() {}\n",
-			} {
-				path := filepath.Join(dir, file)
-				if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(path, []byte(source), 0644); err != nil {
-					t.Fatal(err)
-				}
-			}
-			gitFixture(t, dir, "init", "-b", "main")
-			gitFixture(t, dir, "add", ".")
-			gitFixture(t, dir, "-c", "user.name=GVS Tests", "-c", "user.email=tests@example.com", "-c", "commit.gpgsign=false", "commit", "-m", "package identity fixture")
+	for _, tc := range []struct {
+		branch   string
+		external bool
+	}{
+		{"package-identity-go-bundled", false},
+		{"package-identity-external", true},
+	} {
+		t.Run(tc.branch, func(t *testing.T) {
 			for _, algo := range []string{"rta", "vta", "cha", "static"} {
 				t.Run(algo, func(t *testing.T) {
-					out := pollCallgraphManualResult(t, dir, "main", library, "Parser.Answer", "v0.56.0", algo)
+					out := pollCallgraphManualResult(t, testDataRepo, tc.branch, library, "Parser.Answer", "v0.56.0", algo)
 					if len(out.Errors) != 0 {
 						t.Fatalf("scan errors: %v", out.Errors)
 					}
-					if !external {
+					if !tc.external {
 						if out.IsVulnerable != "false" || len(out.UsedImports) != 0 || len(out.GraphPaths) != 0 {
 							t.Fatalf("Go's bundled parser was attributed to the external module: %+v", out)
 						}

@@ -26,6 +26,8 @@ GROUPNAME ?= $(USERNAME)
 PODMAN_TEST_IMAGE ?= registry.access.redhat.com/ubi9/ubi
 # Keep build/module caches between disposable test containers.
 PODMAN_TEST_CACHE ?= gvs-test-cache
+# Optional local fixture checkout, mounted read-only for unpublished branch tests.
+GVS_TESTDATA_REPO ?=
 # Override to select packages, test names, or a different timeout.
 PODMAN_TEST_ARGS ?= -race -v -count=1 -timeout=120s ./...
 # Match the host API/scanner and MCP integration suite, with an override for focused runs.
@@ -39,6 +41,11 @@ PODMAN_TEST_RUN = podman run --rm --security-opt label=disable --user 0 \
 	--env CGO_ENABLED=1 --env GOTOOLCHAIN=auto \
 	--env GOCACHE=/cache/build --env GOMODCACHE=/cache/mod \
 	--env GOFLAGS=-buildvcs=false
+
+ifneq ($(strip $(GVS_TESTDATA_REPO)),)
+PODMAN_TEST_RUN += --volume "$(abspath $(GVS_TESTDATA_REPO)):/testdata:ro" \
+	--env GVS_TESTDATA_REPO=/testdata
+endif
 
 RUN_OPTS := --security-opt label=disable \
             --rm --detach \
