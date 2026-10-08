@@ -704,6 +704,8 @@ No errors or issues were encountered during the scanning process.
 
 `UsedImports` is grouped by repository-relative module directory, then affected package path. It includes affected packages present in the loaded dependency graph, including transitive imports. Packages listed only in `go.mod` or `go.sum` are not considered present unless they are loaded for the analyzed build.
 
+Symbol matching uses the declaring package and function or receiver method identity. Repository dependencies retain their module identity, including when their source is under the repository's `vendor/` directory. Go's own bundled packages under `<GOROOT>/src/vendor/` are distinct: for example, `vendor/golang.org/x/net/dns/dnsmessage` does not count as usage of the external `golang.org/x/net/dns/dnsmessage` package or generate a `go get golang.org/x/net` fix. Standard-library findings are matched against the advisory's standard-library targets, such as `net`.
+
 | Completed analysis | `UsedImports` example | `IsVulnerable` |
 | --- | --- | --- |
 | No affected packages present | `null` | `"false"` |

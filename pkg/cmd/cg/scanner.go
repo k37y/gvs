@@ -1275,42 +1275,32 @@ func FindPathToSymbolExported(entry *callgraph.Node, pkg, symbol string, progres
 
 // matchesSymbol checks if the node's function matches the target symbol from the specified package
 func matchesSymbol(node *callgraph.Node, pkg, symbol string) bool {
-	if node.Func == nil {
+	if node == nil || node.Func == nil {
 		return false
 	}
 
-	funcStr := node.Func.String()
-
-	// FIRST: Verify the function belongs to the target package
-	// This prevents matching (*log.Logger).Writer when searching for logrus
-	if pkg != "" && !strings.Contains(funcStr, pkg) {
+	// SSA retains the declaring object for generic instances and method
+	// wrappers. Printed names can contain unrelated packages in type arguments
+	// or Go's distinct vendor/ packages, so they cannot establish identity.
+	obj := node.Func.Object()
+	path := objectPackage(obj)
+	if path == "" || (pkg != "" && path != pkg) {
 		return false
 	}
 
-	// Direct match
-	if funcStr == symbol {
+	name := symbolForObject(obj)
+	if symbol == name || symbol == path+"."+name {
 		return true
 	}
 
-	// Check if the function string contains the symbol
-	// This handles cases like "(pkg.Type).Method" matching "pkg.Type.Method"
-	if strings.Contains(funcStr, symbol) {
-		return true
-	}
-
-	// Handle receiver variations: (Type).Method, (*Type).Method
-	// The symbol might be "pkg.Method" but the function is "(pkg.Type).Method"
-	if strings.Contains(symbol, ".") {
-		parts := strings.Split(symbol, ".")
-		if len(parts) >= 2 {
-			methodName := parts[len(parts)-1]
-			pkgPrefix := strings.Join(parts[:len(parts)-1], ".")
-
-			// Check if function ends with the method name and contains the package
-			if strings.HasSuffix(funcStr, "."+methodName) && strings.Contains(funcStr, pkgPrefix) {
-				return true
+	if receiver, method, ok := strings.Cut(name, "."); ok {
+		recv := "(" + path + "." + receiver + ")"
+		if fn, ok := obj.(*types.Func); ok {
+			if _, pointer := types.Unalias(fn.Signature().Recv().Type()).(*types.Pointer); pointer {
+				recv = "(*" + path + "." + receiver + ")"
 			}
 		}
+		return symbol == recv+"."+method
 	}
 
 	return false
