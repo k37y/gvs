@@ -31,6 +31,8 @@ type AffectedImportsDetails struct {
 	FixedVersion  []string
 }
 
+// UsedImportsDetails describes a present affected package. Symbols and Paths
+// contain only affected symbols reached by the call graph.
 type UsedImportsDetails struct {
 	Symbols        []string            `json:"Symbols,omitempty"`
 	CurrentVersion string              `json:"CurrentVersion,omitempty"`

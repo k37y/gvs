@@ -1232,8 +1232,12 @@ func TestCallgraphFixturesIntegration(t *testing.T) {
 							fixes = []string{"go get example.com/vulnerable@v1.1.0", "go mod tidy", "go mod vendor"}
 						}
 						assertUsedImport(t, out, ".", fixtureLibrary, tc.version, fixes, []string{"Danger"}, "", "")
-					} else if len(out.UsedImports) != 0 {
-						t.Errorf("unreachable symbol reported as used: %v", out.UsedImports)
+					} else if tc.scenario == "absent" || tc.scenario == "only-tests" {
+						if len(out.UsedImports) != 0 {
+							t.Errorf("absent package reported as present: %v", out.UsedImports)
+						}
+					} else {
+						assertUsedImport(t, out, ".", fixtureLibrary, tc.version, nil, []string{}, "", "")
 					}
 					if tc.scenario == "reflection" {
 						found := map[string]bool{}
@@ -1276,20 +1280,23 @@ func TestCallgraphFixturesIntegration(t *testing.T) {
 			if out.IsVulnerable != tc.status {
 				t.Errorf("status = %q, want %q", out.IsVulnerable, tc.status)
 			}
-			if len(out.UsedImports) != len(tc.modules) {
-				t.Errorf("used modules = %v", out.UsedImports)
-			}
 			unknowns := 0
 			for _, mod := range tc.modules {
 				symbols := []string{"Danger"}
 				var fixes []string
 				if mod.scenario == "unknown" {
-					symbols = []string{}
 					unknowns++
+					if _, ok := out.UsedImports[mod.dir]; ok {
+						t.Errorf("excluded imports reported as present in module %s", mod.dir)
+					}
+					continue
 				} else if mod.version == "v1.0.0" {
 					fixes = []string{"go get example.com/vulnerable@v1.1.0", "go mod tidy", "go mod vendor"}
 				}
 				assertUsedImport(t, out, mod.dir, fixtureLibrary, mod.version, fixes, symbols, "", "")
+			}
+			if len(out.UsedImports) != len(tc.modules)-unknowns {
+				t.Errorf("used modules = %v", out.UsedImports)
 			}
 			if len(out.Errors) != unknowns {
 				t.Errorf("errors = %v, want %d build constraint diagnostics", out.Errors, unknowns)
@@ -1622,14 +1629,15 @@ func TestCallgraphScanLogicIntegration(t *testing.T) {
 					if !strings.Contains(strings.Join(out.Errors, "\n"), "load") {
 						t.Errorf("missing package-load diagnostic: %v", out.Errors)
 					}
+					if len(out.UsedImports) != 0 {
+						t.Errorf("failed load must not establish package presence: %v", out.UsedImports)
+					}
+					return
 				} else if len(out.Errors) != 0 {
 					t.Errorf("errors: %v", out.Errors)
 				}
 				symbols := []string{"Danger"}
 				var fixes []string
-				if tc.status == "unknown" {
-					symbols = []string{}
-				}
 				if tc.status == "true" {
 					fixes = []string{"go get example.com/vulnerable@v1.1.0", "go mod tidy", "go mod vendor"}
 				}

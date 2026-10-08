@@ -700,6 +700,22 @@ No errors or issues were encountered during the scanning process.
   }
 }
 ```
+### Package presence and symbol usage
+
+`UsedImports` is grouped by repository-relative module directory, then affected package path. It includes affected packages present in the loaded dependency graph, including transitive imports. Packages listed only in `go.mod` or `go.sum` are not considered present unless they are loaded for the analyzed build.
+
+| Completed analysis | `UsedImports` example | `IsVulnerable` |
+| --- | --- | --- |
+| No affected packages present | `null` | `"false"` |
+| Affected package present, no affected symbols reachable | `{".": {"example.com/lib": {"CurrentVersion": "v1.0.0"}}}` | `"false"` |
+| Affected symbols reachable | `{".": {"example.com/lib": {"CurrentVersion": "v1.0.0", "Symbols": ["Danger"]}}}` | `"true"` for an affected version; `"false"` for a fixed version |
+
+These examples assume no other affected packages or analysis gaps. `CurrentVersion` is included when available; for standard library packages it is the module's resolved Go toolchain version. Versioned replacements also include `ReplaceModule` and `ReplaceVersion`, including when no affected symbols are reachable. A present package with no available version or reachable symbols is represented as `{}`. Package presence alone does not generate fix commands or graphs.
+
+An omitted package indicates absence only within a successfully analyzed build configuration. Check `Errors` and the overall verdict for incomplete analysis; missing data from a failed load is not evidence of absence. The scanner can return `"unknown"`, and a validated vulnerable path in another module can still produce `"true"` despite other gaps.
+
+**Compatibility note:** `UsedImports` can now be nonempty even when no affected symbols are reachable. Consumers should use `IsVulnerable` for the verdict and inspect `Symbols` for detected affected-symbol usage, rather than treating package entries as evidence of reachable symbols.
+
 ## Branch and Commit Support
 
 The scanner supports both **branch names** and **commit hashes** for repository analysis:

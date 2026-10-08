@@ -415,10 +415,6 @@ func normalizeUsedImports(result *cg.Result) {
 				}
 			}
 			deduped := common.UniqueStrings(details.Symbols)
-			if len(deduped) == 0 && details.CurrentVersion == "" && details.ReplaceVersion == "" {
-				delete(pkgs, pkg)
-				continue
-			}
 			if len(deduped) > 0 {
 				sort.Strings(deduped)
 				details.Symbols = deduped

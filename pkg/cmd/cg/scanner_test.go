@@ -2164,6 +2164,130 @@ func TestWorkerKeepsEachJobStatus(t *testing.T) {
 	}
 }
 
+func TestWorkerStdlibPackagePresence(t *testing.T) {
+	t.Setenv("ALGO", "static")
+	dir := t.TempDir()
+	for name, source := range map[string]string{
+		"go.mod":  "module example.com/presence\n\ngo 1.22.0\n",
+		"main.go": "package main\nimport \"errors\"\nfunc main() { println(errors.New(\"example\").Error()) }\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(source), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result := &Result{
+		ScanConfig:          ScanConfig{Directory: dir},
+		GoToolchainVersions: map[string]string{".": "v1.22.0"},
+		AffectedImports:     map[string]AffectedImportsDetails{},
+	}
+	for _, pkg := range []string{"errors", "internal/reflectlite", "net"} {
+		result.AffectedImports[pkg] = AffectedImportsDetails{Type: "stdlib", FixedVersion: []string{"1.22.9"}}
+		res := (Job{Package: pkg, Symbols: []string{"Nonexistent"}, Dir: "."}).isVulnerable(result)
+		if res.IsVulnerable != "false" {
+			t.Errorf("%s verdict = %s: %v", pkg, res.IsVulnerable, result.Errors)
+		}
+		details, present := result.UsedImports["."][pkg]
+		if present != (pkg != "net") {
+			t.Errorf("%s presence = %v", pkg, present)
+		}
+		if present && (details.CurrentVersion != "v1.22.0" || len(details.Symbols) != 0 || len(details.FixCommands) != 0) {
+			t.Errorf("%s metadata = %+v", pkg, details)
+		}
+	}
+}
+
+func TestWorkerPackagePresence(t *testing.T) {
+	t.Setenv("ALGO", "static")
+	for _, tc := range []struct {
+		name, body, symbol, replacement, want string
+		present, broken                       bool
+	}{
+		{name: "absent", body: "func main() {}", symbol: "Danger", want: "false"},
+		{name: "present", body: "func main() { dep.Safe() }", symbol: "Danger", present: true, want: "false"},
+		{name: "reachable", body: "func main() { dep.Danger() }", symbol: "Danger", present: true, want: "true"},
+		{name: "unreachable replacement", body: "func main() { dep.Safe() }", symbol: "Danger", replacement: "v1.0.0", present: true, want: "false"},
+		{name: "fixed replacement", body: "func main() { dep.Danger() }", symbol: "Danger", replacement: "v1.1.0", present: true, want: "false"},
+		{name: "load failure", body: "func main() { missing() }", symbol: "Danger", broken: true, want: "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.Mkdir(filepath.Join(dir, "dep"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			main := "package main\n" + tc.body + "\n"
+			if tc.present {
+				main = "package main\nimport \"example.com/presence/dep\"\n" + tc.body + "\n"
+			}
+			for name, source := range map[string]string{
+				"go.mod":     "module example.com/presence\n\ngo 1.22.0\n",
+				"main.go":    main,
+				"dep/dep.go": "package dep\nfunc Safe() {}\nfunc Danger() {}\n",
+			} {
+				if name == "dep/dep.go" && !tc.present {
+					continue
+				}
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(source), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			const pkg = "example.com/presence/dep"
+			result := &Result{
+				ScanConfig: ScanConfig{Directory: dir},
+				AffectedImports: map[string]AffectedImportsDetails{
+					pkg: {Type: "non-stdlib", FixedVersion: []string{"v1.1.0"}},
+				},
+			}
+			// Supply resolved module versions without downloading a dependency.
+			if build := result.getSSABuild(dir); build != nil {
+				packages.Visit(build.loadedPkgs, nil, func(p *packages.Package) {
+					if p.PkgPath == pkg {
+						p.Module = &packages.Module{Path: "example.com/presence", Version: "v1.0.0"}
+						if tc.replacement != "" {
+							p.Module.Replace = &packages.Module{Path: p.Module.Path, Version: tc.replacement}
+						}
+					}
+				})
+			} else if !tc.broken {
+				t.Fatalf("load: %v", result.Errors)
+			}
+			jobs, results := make(chan Job, 1), make(chan *Result, 1)
+			jobs <- Job{Package: pkg, Symbols: []string{tc.symbol}, Dir: "."}
+			close(jobs)
+			var wg sync.WaitGroup
+			wg.Add(1)
+			Worker(jobs, results, &wg, result)
+			if got := (<-results).IsVulnerable; got != tc.want {
+				t.Errorf("verdict = %q, want %q", got, tc.want)
+			}
+			details, present := result.UsedImports["."][pkg]
+			if present != tc.present {
+				t.Fatalf("package presence = %v, want %v: %+v", present, tc.present, result.UsedImports)
+			}
+			if present {
+				if details.CurrentVersion != "v1.0.0" || details.ReplaceVersion != tc.replacement {
+					t.Errorf("version metadata: %+v", details)
+				}
+				wantReplacement := ""
+				if tc.replacement != "" {
+					wantReplacement = "example.com/presence"
+				}
+				if details.ReplaceModule != wantReplacement {
+					t.Errorf("replacement module = %q, want %q", details.ReplaceModule, wantReplacement)
+				}
+				if wantSymbols := strings.Contains(tc.body, "dep.Danger()"); (len(details.Symbols) > 0) != wantSymbols {
+					t.Errorf("symbols = %v, reachable = %v", details.Symbols, wantSymbols)
+				}
+				if (len(details.FixCommands) > 0) != (tc.want == "true") {
+					t.Errorf("unexpected fixes for verdict %s: %v", tc.want, details.FixCommands)
+				}
+			}
+			if tc.broken && len(result.Errors) == 0 {
+				t.Error("load failure must retain errors")
+			}
+		})
+	}
+}
+
 type failingAdvisoryTransport func(*http.Request) (*http.Response, error)
 
 func (f failingAdvisoryTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
