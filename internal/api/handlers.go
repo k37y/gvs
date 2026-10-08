@@ -22,7 +22,7 @@ var (
 	inProgress      bool
 	taskStore       = make(map[string]*TaskResult)
 	taskMutex       sync.Mutex
-	progressStreams = make(map[string]chan string)
+	progressStreams = make(map[string]chan progressEvent)
 	progressMutex   sync.Mutex
 	taskCancels     = make(map[string]context.CancelFunc)
 	taskCancelMutex sync.Mutex
@@ -221,7 +221,15 @@ func ProgressHandler(w http.ResponseWriter, r *http.Request) {
 				// Channel closed, end stream silently
 				return
 			}
-			fmt.Fprintf(w, "data: %s\n\n", message)
+			if message.scannerLine > 0 {
+				fmt.Fprintf(w, "id: scanner-%d\n", message.scannerLine)
+			} else {
+				fmt.Fprint(w, "id:\n")
+			}
+			for _, line := range strings.Split(message.text, "\n") {
+				fmt.Fprintf(w, "data: %s\n", line)
+			}
+			fmt.Fprint(w, "\n")
 			flusher.Flush()
 		case <-r.Context().Done():
 			// Client disconnected

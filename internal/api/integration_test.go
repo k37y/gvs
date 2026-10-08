@@ -1391,6 +1391,44 @@ func writeIntegrationWrapper(t *testing.T, dir, name, body string) {
 
 func TestCallgraphLifecycleIntegration(t *testing.T) {
 	startTestServer(t)
+	t.Run("progress line IDs", func(t *testing.T) {
+		repo, _ := newLifecycleRepo(t, "v1.0.0")
+		request := fixtureRequest(repo, "main", "rta")
+		request["symbol"] = "Safe"
+		id := submitIntegrationTask(t, request)
+		response, err := integrationClient.Get(testServerURL + "/progress/" + id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		stream, err := io.ReadAll(response.Body)
+		if err != nil || response.StatusCode != http.StatusOK {
+			t.Fatalf("progress stream: status=%d error=%v body=%s", response.StatusCode, err, stream)
+		}
+		task := awaitIntegrationTask(t, id)
+		if task.Status != StatusCompleted {
+			t.Fatalf("scan failed: %+v", task)
+		}
+		lines := strings.Split(task.Logs, "\n")
+		count := 0
+		for _, event := range strings.Split(string(stream), "\n\n") {
+			if !strings.HasPrefix(event, "id: scanner-") {
+				continue
+			}
+			fields := strings.SplitN(event, "\n", 2)
+			line, err := strconv.Atoi(strings.TrimPrefix(fields[0], "id: scanner-"))
+			if err != nil || line < 1 || line > len(lines) || len(fields) != 2 {
+				t.Fatalf("invalid event: %q", event)
+			}
+			if want := "data: " + strings.TrimSuffix(lines[line-1], "\r"); fields[1] != want {
+				t.Errorf("line %d: event=%q, want %q", line, fields[1], want)
+			}
+			count++
+		}
+		if count == 0 {
+			t.Fatal("no scanner line IDs received")
+		}
+	})
 	repo, commit := newLifecycleRepo(t, "v1.0.0")
 	request := fixtureRequest(repo, "main", "rta")
 	realCG, err := exec.LookPath("cg")

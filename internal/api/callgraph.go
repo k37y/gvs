@@ -93,7 +93,7 @@ func runCallgraph(ctx context.Context, id string, req CallgraphRequest, baseURL 
 	cmd := exec.CommandContext(ctx, "cg", callgraphArgs(req, cloneDir, graphDir)...)
 	cleanupScanner := configureScannerProcess(cmd)
 	cmd.WaitDelay = 5 * time.Second
-	output, logs, err := runCgWithProgressCapture(cmd, sendProgress)
+	output, logs, err := runCgWithProgressCapture(cmd, scannerProgress(id))
 	cleanupScanner()
 	result.Output, result.Logs = string(convertGraphPathsToURLs(output, baseURL)), string(logs)
 	if err != nil {

@@ -92,6 +92,35 @@ func TestRunCgWithProgressCapture(t *testing.T) {
 	}
 }
 
+func TestScannerProgressLineIDs(t *testing.T) {
+	const id = "scanner-line-ids"
+	ch := make(chan progressEvent, 1)
+	progressMutex.Lock()
+	progressStreams[id] = ch
+	progressMutex.Unlock()
+	t.Cleanup(func() {
+		progressMutex.Lock()
+		delete(progressStreams, id)
+		progressMutex.Unlock()
+	})
+	capture := progressCapture{sendProgress: scannerProgress(id)}
+	capture.Write([]byte("same\r\nsame\n")) // The full queue drops the second line.
+	if got := <-ch; got.scannerLine != 1 || got.text != "same" {
+		t.Fatalf("first event = %+v", got)
+	}
+	capture.Write([]byte("\npartial"))
+	if got := <-ch; got.scannerLine != 3 || got.text != "" {
+		t.Fatalf("blank line after dropped event = %+v", got)
+	}
+	capture.flush()
+	if got := <-ch; got.scannerLine != 4 || got.text != "partial" {
+		t.Fatalf("unterminated final line = %+v", got)
+	}
+	if got := capture.logs.String(); got != "same\r\nsame\n\npartial" {
+		t.Fatalf("captured logs changed: %q", got)
+	}
+}
+
 func TestRunCgWithProgressCaptureFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

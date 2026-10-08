@@ -283,9 +283,10 @@ func TestGetGraphCacheDir_Default(t *testing.T) {
 
 func TestProgressHandler_Stream(t *testing.T) {
 	taskID := "test-progress-stream"
-	ch := make(chan string, 2)
-	ch <- "step 1"
-	ch <- "step 2"
+	ch := make(chan progressEvent, 3)
+	ch <- progressEvent{text: "step 1", scannerLine: 1}
+	ch <- progressEvent{text: "step 2", scannerLine: 3}
+	ch <- progressEvent{text: "setup\ncontinued"}
 	close(ch)
 
 	progressMutex.Lock()
@@ -303,6 +304,9 @@ func TestProgressHandler_Stream(t *testing.T) {
 	ProgressHandler(rec, req)
 
 	body := rec.Body.String()
+	if want := "id: scanner-1\ndata: step 1\n\nid: scanner-3\ndata: step 2\n\nid:\ndata: setup\ndata: continued\n\n"; body != want {
+		t.Errorf("SSE body = %q, want %q", body, want)
+	}
 	if !strings.Contains(body, "data: step 1") {
 		t.Errorf("expected 'data: step 1' in body, got: %s", body)
 	}

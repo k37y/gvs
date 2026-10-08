@@ -141,7 +141,7 @@ func startTask(requestID, fingerprint string, work func(context.Context, string)
 	taskCancels[id] = cancel
 	taskCancelMutex.Unlock()
 	progressMutex.Lock()
-	progressStreams[id] = make(chan string, 100)
+	progressStreams[id] = make(chan progressEvent, 100)
 	progressMutex.Unlock()
 	inProgress = true
 	log.Printf("[Task %s] Accepted status=%s", id, task.Status)
@@ -420,7 +420,25 @@ func registerDirectory(dir string) func() {
 	return func() { taskMutex.Lock(); delete(activeDirectories, dir); taskMutex.Unlock() }
 }
 
+type progressEvent struct {
+	text        string
+	scannerLine int
+}
+
 func sendTaskProgress(id, message string) {
+	sendProgressEvent(id, progressEvent{text: message})
+}
+
+func scannerProgress(id string) func(string) {
+	line := 0
+	return func(message string) {
+		// Number captured lines before enqueueing so dropped events leave gaps.
+		line++
+		sendProgressEvent(id, progressEvent{text: message, scannerLine: line})
+	}
+}
+
+func sendProgressEvent(id string, message progressEvent) {
 	progressMutex.Lock()
 	defer progressMutex.Unlock()
 	if ch := progressStreams[id]; ch != nil {

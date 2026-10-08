@@ -7,7 +7,10 @@
 
 Find vulnerability status from **Git repository URL**, **Git branch/commit**, and **CVE ID**
 
-The web UI streams progress during a scan and replaces it with the complete scanner log on completion, including when loading a cached result.
+The web UI preserves live progress and setup messages on completion, using the
+complete scanner log to fill any gaps from interrupted streaming. Cached scans
+display the stored scanner log once. Scanner SSE events carry `scanner-N` IDs,
+where N is the one-based line number in the final log (including blank lines).
 
 ## Demo 1
 [!demo-1](https://github.com/user-attachments/assets/3b013256-368f-45b1-8cd3-897173a48814)
