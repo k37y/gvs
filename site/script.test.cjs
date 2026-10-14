@@ -5,10 +5,11 @@ const vm = require('node:vm');
 
 function setup(initial = '[]', quota = Infinity, unavailable = false) {
 	const values = new Map([['gvs-scan-history', initial]]);
+	const listeners = new Map();
 	let attempts = 0;
 	const context = vm.createContext({
 		window: {},
-		document: { addEventListener() {} },
+		document: { addEventListener(event, callback) { listeners.set(event, callback); } },
 		console: { warn() {} },
 		localStorage: {
 			getItem(key) {
@@ -28,8 +29,26 @@ function setup(initial = '[]', quota = Infinity, unavailable = false) {
 		}
 	});
 	vm.runInContext(readFileSync(`${__dirname}/script.js`, 'utf8'), context);
-	return { context, history: () => JSON.parse(values.get('gvs-scan-history')), attempts: () => attempts };
+	return { context, listeners, history: () => JSON.parse(values.get('gvs-scan-history')), attempts: () => attempts };
 }
+
+test('CVE validation accepts mixed case and still rejects malformed IDs', () => {
+	const app = setup();
+	const input = { value: '', validity: '', addEventListener() {}, setCustomValidity(message) { this.validity = message; } };
+	app.context.document.getElementById = id => id === 'cve' ? input : null;
+	vm.runInContext('FormHistoryManager.prototype.init = function() {}', app.context);
+	app.listeners.get('DOMContentLoaded')();
+	for (const value of ['CVE-2024-45338', 'cve-2024-45338', 'cVe-2024-45338', 'GO-2024-3333', 'go-2024-3333', 'gO-2024-3333', '']) {
+		input.value = value;
+		assert.equal(app.context.window.validateCVEInput(), true, value);
+		assert.equal(input.validity, '');
+	}
+	for (const value of ['cve-2024-123', 'go-2024-abcd', 'other-2024-3333']) {
+		input.value = value;
+		assert.equal(app.context.window.validateCVEInput(), false, value);
+		assert.notEqual(input.validity, '');
+	}
+});
 
 test('quota recovery removes oldest scans and preserves the newest full result', () => {
 	const old = JSON.stringify([{ repo: 'previous', logs: 'x'.repeat(200) }, { repo: 'oldest', logs: 'x'.repeat(200) }]);
@@ -116,7 +135,7 @@ test('completion preserves setup and existing nodes while recovering missing sca
 			if (!elements.has(id)) elements.set(id, new LogElement());
 			return elements.get(id);
 		};
-		for (const [id, value] of Object.entries({ repo: 'repo', branchOrCommit: 'main', cve: 'CVE-2026-1234', algo: 'rta' })) {
+		for (const [id, value] of Object.entries({ repo: 'https://example.com/Repo', branchOrCommit: 'Release', cve: 'cVe-2026-1234', algo: 'rta' })) {
 			app.context.document.getElementById(id).value = value;
 		}
 		app.context.window.validateCVEInput = () => true;
@@ -129,9 +148,17 @@ test('completion preserves setup and existing nodes while recovering missing sca
 			constructor() { stream = this; }
 			close() { this.closed = true; }
 		};
-		app.context.fetch = async url => ({ json: async () => url.endsWith('/status')
-			? { status: 'completed', output: {}, logs: scenario.logs ?? logs }
-			: { taskId: 'task' } });
+		app.context.fetch = async (url, options) => {
+			if (url.endsWith('/callgraph')) {
+				const body = JSON.parse(options.body);
+				assert.equal(body.cve, 'CVE-2026-1234');
+				assert.equal(body.repo, 'https://example.com/Repo');
+				assert.equal(body.branchOrCommit, 'Release');
+			}
+			return { json: async () => url.endsWith('/status')
+				? { status: 'completed', output: {}, logs: scenario.logs ?? logs }
+				: { taskId: 'task' } };
+		};
 		app.context.runScan();
 		await new Promise(setImmediate);
 		const panel = elements.get('resultProgressContent');

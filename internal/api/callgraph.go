@@ -28,6 +28,8 @@ type CallgraphRequest struct {
 }
 
 func StartCallgraph(req CallgraphRequest, baseURL string) (TaskSnapshot, error) {
+	req.CVE = strings.ToUpper(req.CVE)
+	req.Algo = strings.ToLower(req.Algo)
 	if req.Repo == "" || req.BranchOrCommit == "" {
 		return TaskSnapshot{}, &TaskError{"invalid_argument", "repo and branchOrCommit are required"}
 	}

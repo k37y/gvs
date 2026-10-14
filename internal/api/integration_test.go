@@ -738,6 +738,22 @@ func TestCallgraphIntegration(t *testing.T) {
 			algo:           "rta",
 			expected:       "true",
 		},
+		{
+			name:           "mixed case CVE and algorithm",
+			repo:           testDataRepo,
+			branchOrCommit: "vuln-single-range",
+			cve:            "cVe-2024-45338",
+			algo:           "RtA",
+			expected:       "true",
+		},
+		{
+			name:           "mixed case GOCVE and algorithm",
+			repo:           testDataRepo,
+			branchOrCommit: "vuln-single-range",
+			cve:            "gO-2024-3333",
+			algo:           "VtA",
+			expected:       "true",
+		},
 	}
 
 	for _, tt := range tests {
@@ -878,8 +894,8 @@ func TestCgBinaryValidation(t *testing.T) {
 		gitFixture(t, dir, "clone", "--depth", "1", "--branch", "reachability-direct", testDataRepo, repo)
 		for _, algo := range []string{"rta", "vta", "cha", "static"} {
 			t.Run(algo, func(t *testing.T) {
-				cmd := exec.Command(cgBin, "-progress", "-algo", algo, "-library", fixtureLibrary,
-					"-symbols", "Danger", "-fixversion", "v1.1.0", repo)
+				cmd := exec.Command(cgBin, "-progress", "-algo", strings.ToUpper(algo), "-library", fixtureLibrary,
+					"-symbols", "Danger", "-fixversion", "v1.1.0", "gO-2024-3333", repo)
 				var logs bytes.Buffer
 				cmd.Stderr = &logs
 				output, err := cmd.Output()
@@ -888,6 +904,10 @@ func TestCgBinaryValidation(t *testing.T) {
 				}
 				if !json.Valid(output) {
 					t.Fatalf("invalid scanner JSON: %s", output)
+				}
+				var result cgOutput
+				if err := json.Unmarshal(output, &result); err != nil || result.CVE != "GO-2024-3333" || result.GoCVE != "GO-2024-3333" {
+					t.Fatalf("unexpected normalized IDs: %s, error %v", output, err)
 				}
 				if count := strings.Count(logs.String(), "Progress: 1/1 jobs completed (100.0%)"); count != 1 {
 					t.Errorf("final progress appeared %d times, want 1:\n%s", count, &logs)
@@ -949,6 +969,7 @@ func TestCgBinaryValidation(t *testing.T) {
 func assertResponseContract(t *testing.T, output cgOutput, request map[string]interface{}) {
 	t.Helper()
 	cve, _ := request["cve"].(string)
+	cve = strings.ToUpper(cve)
 	if output.CVE != cve {
 		t.Errorf("CVE = %q, want %q", output.CVE, cve)
 	}

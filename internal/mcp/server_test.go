@@ -129,17 +129,20 @@ func TestHTTPToolsAndSubmission(t *testing.T) {
 			t.Fatalf("%s missing schema/annotations", tool.Name)
 		}
 	}
-	for _, algo := range []string{"rta", "vta", "cha", "static"} {
+	for _, algo := range []string{"rta", "vta", "cha", "static", "RTA", "VtA", "ChA", "StAtIc"} {
 		for _, manual := range []bool{false, true} {
 			name := "gvs_scan"
-			args := map[string]any{"repo": "https://github.com/openshift/cloud-network-config-controller", "branch": "release-4.20", "algo": algo, "requestId": "retry-key"}
+			args := map[string]any{"repo": "https://github.com/Example/Repo", "branch": "Release-4.20", "algo": algo, "requestId": "retry-key"}
 			if manual {
 				name = "gvs_manual_scan"
 				args["library"] = "google.golang.org/grpc"
 				args["symbol"] = "Server.Serve,Server.ServeHTTP"
 				args["fixedVersion"] = "v1.79.3"
 			} else {
-				args["cve"] = "GO-2026-4762"
+				args["cve"] = "gO-2026-4762"
+				if algo == "ChA" {
+					args["cve"] = "cVe-2026-33186"
+				}
 			}
 			result := callTool(t, s, name, args)
 			if result.IsError {
@@ -152,8 +155,11 @@ func TestHTTPToolsAndSubmission(t *testing.T) {
 			b.mu.Lock()
 			got, url := b.request, b.baseURL
 			b.mu.Unlock()
-			if got.Algo != algo || got.BranchOrCommit != "release-4.20" || got.RequestID != "retry-key" || url != base {
+			if got.Algo != strings.ToLower(algo) || got.Repo != args["repo"] || got.BranchOrCommit != "Release-4.20" || got.RequestID != "retry-key" || url != base {
 				t.Fatalf("forwarded = %+v, %s", got, url)
+			}
+			if !manual && got.CVE != strings.ToUpper(args["cve"].(string)) {
+				t.Fatalf("CVE = %q, want uppercase identifier", got.CVE)
 			}
 			if manual && (got.FixVersion != "v1.79.3" || got.Symbol != "Server.Serve,Server.ServeHTTP" || got.CVE != "") {
 				t.Fatalf("manual = %+v", got)

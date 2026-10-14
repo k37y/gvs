@@ -38,7 +38,7 @@ type readInput struct {
 	Cursor string `json:"cursor,omitempty"`
 }
 
-var vulnerabilityID = regexp.MustCompile(`^(CVE-[0-9]{4}-[0-9]{4,}|GO-[0-9]{4}-[0-9]{4,})$`)
+var vulnerabilityID = regexp.MustCompile(`^([Cc][Vv][Ee]-[0-9]{4}-[0-9]{4,}|[Gg][Oo]-[0-9]{4}-[0-9]{4,})$`)
 
 func (a *adapter) addTools(server *sdk.Server) {
 	addTool(server, &sdk.Tool{Name: "gvs_scan", Description: "Start a CVE or Go vulnerability call-graph scan of a Git repository. Returns immediately; scans may take several minutes. Wait pollAfterSeconds, then call gvs_status until completed, failed, or cancelled. Reuse requestId only for retries of the same submission. All four arguments, including algo, are required.", InputSchema: scanSchema(false), OutputSchema: outputSchema("submission"), Annotations: annotations(false, false, false, true)}, func(ctx context.Context, in scanInput) (*sdk.CallToolResult, error) {
@@ -95,6 +95,8 @@ func addTool[In any](server *sdk.Server, tool *sdk.Tool, fn func(context.Context
 }
 
 func (a *adapter) start(ctx context.Context, in api.CallgraphRequest) (*sdk.CallToolResult, error) {
+	in.CVE = strings.ToUpper(in.CVE)
+	in.Algo = strings.ToLower(in.Algo)
 	for name, value := range map[string]string{"repo": in.Repo, "branch": in.BranchOrCommit, "algo": in.Algo} {
 		if strings.TrimSpace(value) == "" {
 			return nil, invalidArgument(name + " must not be empty")
@@ -178,7 +180,7 @@ func scanSchema(manual bool) map[string]any {
 	properties := map[string]any{
 		"repo":      stringSchema("HTTP(S) Git repository URL."),
 		"branch":    stringSchema("Explicit branch name or commit hash."),
-		"algo":      map[string]any{"type": "string", "enum": []string{"rta", "vta", "cha", "static"}},
+		"algo":      map[string]any{"type": "string", "pattern": "^([Rr][Tt][Aa]|[Vv][Tt][Aa]|[Cc][Hh][Aa]|[Ss][Tt][Aa][Tt][Ii][Cc])$", "description": "Call graph algorithm: rta, vta, cha, or static (case-insensitive)."},
 		"requestId": map[string]any{"type": "string", "minLength": 1, "maxLength": 128, "description": "Optional idempotency key; reuse only when retrying the same scan arguments."},
 	}
 	if manual {
@@ -187,7 +189,7 @@ func scanSchema(manual bool) map[string]any {
 		properties["fixedVersion"] = stringSchema("Fixed version or fixed-version range accepted by cg.")
 		return objectSchema(properties, "repo", "branch", "library", "symbol", "fixedVersion", "algo")
 	}
-	properties["cve"] = map[string]any{"type": "string", "pattern": vulnerabilityID.String(), "description": "CVE or Go vulnerability identifier."}
+	properties["cve"] = map[string]any{"type": "string", "pattern": vulnerabilityID.String(), "description": "CVE or Go vulnerability identifier (case-insensitive)."}
 	return objectSchema(properties, "repo", "branch", "cve", "algo")
 }
 

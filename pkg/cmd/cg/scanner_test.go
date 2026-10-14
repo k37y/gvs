@@ -1622,7 +1622,7 @@ func TestSetupLibraryMode_Stdlib(t *testing.T) {
 	}
 }
 
-func TestSetupCVEMode_GoCVEDirect(t *testing.T) {
+func TestSetupModes_VulnerabilityIDCase(t *testing.T) {
 	vulnReport := VulnReport{
 		ID: "GO-2024-3333",
 		Affected: []Affected{
@@ -1638,7 +1638,15 @@ func TestSetupCVEMode_GoCVEDirect(t *testing.T) {
 	}
 	body, _ := json.Marshal(vulnReport)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		w.Write(body)
+		switch req.URL.Path {
+		case "/index/vulns.json":
+			fmt.Fprint(w, `[{"id":"GO-2024-3333","aliases":["CVE-2024-45338"]}]`)
+		case "/ID/GO-2024-3333.json":
+			w.Write(body)
+		default:
+			t.Errorf("unexpected vulnerability URL: %s", req.URL.Path)
+			http.NotFound(w, req)
+		}
 	}))
 	defer ts.Close()
 
@@ -1646,13 +1654,27 @@ func TestSetupCVEMode_GoCVEDirect(t *testing.T) {
 	defer func() { VulnsURL = origURL }()
 	VulnsURL = ts.URL
 
-	r := &Result{ScanConfig: ScanConfig{CVE: "GO-2024-3333", Directory: t.TempDir()}, IsVulnerable: "unknown"}
-	done := SetupCVEMode(r)
-	if done {
-		t.Errorf("expected done=false, errors: %v", r.Errors)
-	}
-	if r.GoCVE != "GO-2024-3333" {
-		t.Errorf("GoCVE = %q, want %q", r.GoCVE, "GO-2024-3333")
+	for _, id := range []string{"CVE-2024-45338", "cve-2024-45338", "cVe-2024-45338", "GO-2024-3333", "go-2024-3333", "gO-2024-3333"} {
+		for _, manual := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/manual=%t", id, manual), func(t *testing.T) {
+				r := &Result{ScanConfig: ScanConfig{CVE: id, HTTP: ts.Client()}, IsVulnerable: "unknown"}
+				var done bool
+				if manual {
+					done = SetupLibraryMode(r, "golang.org/x/net/html", "Parse", "v0.33.0")
+				} else {
+					done = SetupCVEMode(r)
+				}
+				if done || len(r.Errors) != 0 {
+					t.Fatalf("done=%t, errors: %v", done, r.Errors)
+				}
+				if r.CVE != strings.ToUpper(id) || r.GoCVE != "GO-2024-3333" {
+					t.Errorf("CVE = %q, GoCVE = %q", r.CVE, r.GoCVE)
+				}
+				if got := r.AffectedImports["golang.org/x/net/html"].Symbols; len(got) != 1 || got[0] != "Parse" {
+					t.Errorf("affected symbols = %v, want [Parse]", got)
+				}
+			})
+		}
 	}
 }
 

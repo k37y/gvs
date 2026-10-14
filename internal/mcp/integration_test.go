@@ -55,14 +55,14 @@ func TestMCPTasksIntegration(t *testing.T) {
 				repo := fmt.Sprintf("https://fixture.invalid/gvs-%d", time.Now().UnixNano())
 				request := api.CallgraphRequest{Repo: repo, BranchOrCommit: "fixture", Algo: algo}
 				name := "gvs_scan"
-				args := map[string]any{"repo": repo, "branch": "fixture", "algo": algo, "requestId": repo}
+				args := map[string]any{"repo": repo, "branch": "fixture", "algo": strings.ToUpper(algo), "requestId": repo}
 				if manual {
 					name = "gvs_manual_scan"
 					request.Library, request.Symbol, request.FixVersion = "example.com/lib", "Call,Other", "v1.2.3"
 					args["library"], args["symbol"], args["fixedVersion"] = request.Library, request.Symbol, request.FixVersion
 				} else {
 					request.CVE = "GO-2026-4762"
-					args["cve"] = request.CVE
+					args["cve"] = strings.ToLower(request.CVE)
 				}
 				fixture := map[string]any{"IsVulnerable": "true", "AIVerification": map[string]any{"IsVulnerable": "false", "confidence": "high", "evidence": []string{"pkg/signals/signals.go:32: cancel()"}, "usage": map[string]any{"input_tokens": 115001}}, "Errors": nil, "algo": algo, "GraphPaths": []string{"https://old.example/graph/fixture.svg"}}
 				cacheFixture(t, request, mustJSON(t, fixture), "cached complete logs")

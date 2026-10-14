@@ -231,7 +231,7 @@ document.addEventListener('DOMContentLoaded', function() {
 	const symbolInput = document.getElementById('symbol');
 	
 	window.validateCVEInput = function() {
-		const value = cveInput.value.trim();
+		const value = cveInput.value.trim().toUpperCase();
 		if (value === '') {
 			cveInput.setCustomValidity('');
 			return true;
@@ -417,7 +417,7 @@ function runScan() {
 
 	const repo = document.getElementById("repo").value.trim();
 	const branchOrCommit = document.getElementById("branchOrCommit").value.trim();
-	const cve = document.getElementById("cve").value.trim();
+	const cve = document.getElementById("cve").value.trim().toUpperCase();
 	const algo = document.getElementById("algo").value;
 	const graph = !!(cve || (library && symbol));
 	const outputDiv = document.getElementById("output");

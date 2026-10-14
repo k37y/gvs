@@ -175,6 +175,7 @@ func (r *Result) progress(msg string) {
 // SetupLibraryMode configures a Result for direct library/symbol scanning.
 // Returns true if the result has a terminal error and scanning should stop.
 func SetupLibraryMode(r *Result, library, symbols, fixversion string) bool {
+	r.CVE = strings.ToUpper(r.CVE)
 	if library == "" || symbols == "" || fixversion == "" {
 		r.Errors = append(r.Errors, "When using library mode, all three flags are required: -library, -symbols, and -fixversion")
 		return true
@@ -253,6 +254,7 @@ func SetupLibraryMode(r *Result, library, symbols, fixversion string) bool {
 // SetupCVEMode configures a Result by fetching vulnerability data from vuln.go.dev.
 // Returns true if the result has a terminal error and scanning should stop.
 func SetupCVEMode(r *Result) bool {
+	r.CVE = strings.ToUpper(r.CVE)
 	r.progress("Phase 1/6: Processing vulnerability identifier...")
 	if common.IsGOCVEID(r.CVE) {
 		r.GoCVE = r.CVE

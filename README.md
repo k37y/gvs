@@ -7,6 +7,11 @@
 
 Find vulnerability status from **Git repository URL**, **Git branch/commit**, and **CVE ID**
 
+CVE/Go vulnerability IDs and algorithm names accept any letter case in the CLI,
+web UI, API, and MCP tools. IDs are normalized to uppercase and algorithms to
+lowercase before lookup, caching, and request deduplication. Repository paths
+and branch/tag names preserve their case.
+
 The web UI preserves live progress and setup messages on completion, using the
 complete scanner log to fill any gaps from interrupted streaming. Cached scans
 display the stored scanner log once. Scanner SSE events carry `scanner-N` IDs,

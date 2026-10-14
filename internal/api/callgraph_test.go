@@ -70,7 +70,7 @@ func TestStartCallgraphValidation(t *testing.T) {
 }
 
 func TestStartCallgraphCachedResults(t *testing.T) {
-	for _, algo := range []string{"", "rta", "vta", "cha", "static"} {
+	for _, algo := range []string{"", "rta", "vta", "cha", "static", "RTA", "VtA", "ChA", "StAtIc"} {
 		for _, manual := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/manual=%t", algo, manual), func(t *testing.T) {
 				oldCacheDir := cacheDir
@@ -79,7 +79,7 @@ func TestStartCallgraphCachedResults(t *testing.T) {
 				prepareTaskTest(t)
 				graphDir := filepath.Join(cacheDir, "graph")
 				t.Setenv("GVS_GRAPH_CACHE", graphDir)
-				req := CallgraphRequest{Repo: "https://github.com/example/repo", BranchOrCommit: "release/1.0", CVE: "CVE-2024-45338", Algo: algo, RequestID: "cache-request"}
+				req := CallgraphRequest{Repo: "https://github.com/Example/Repo", BranchOrCommit: "Release/1.0", CVE: "cVe-2024-45338", Algo: algo, RequestID: "cache-request"}
 				if algo == "" {
 					req.RequestID = strings.Repeat("雪", 128)
 				}
@@ -87,6 +87,8 @@ func TestStartCallgraphCachedResults(t *testing.T) {
 					req.CVE, req.Library, req.Symbol, req.FixVersion = "", "golang.org/x/net/html", "Parse,ParseFragment", "v0.33.0"
 				}
 				normalized := req
+				normalized.CVE = strings.ToUpper(req.CVE)
+				normalized.Algo = strings.ToLower(req.Algo)
 				if normalized.Algo == "" {
 					normalized.Algo = "rta"
 				}
