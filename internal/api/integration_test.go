@@ -401,40 +401,41 @@ func TestCallgraphIntegration(t *testing.T) {
 	singleMainFiles := map[string][][]string{".": {{"main.go"}}}
 	xnetSymbols := []string{"Parse", "ParseWithOptions", "htmlIntegrationPoint", "inBodyIM", "inTableIM", "parseDoctype"}
 	// RTA includes package initialization and the types registered by net/http init.
+	// Match declaring identities, excluding substring matches, promoted methods
+	// from internal/http2, and pointer wrappers for value-receiver methods.
 	stdlibSymbols := []string{
 		"(*net/http.Client).Do", "(*net/http.Client).Get", "(*net/http.Cookie).String",
 		"(*net/http.Request).AddCookie", "(*net/http.Request).Write", "(*net/http.Response).Cookies",
 		"(*net/http.Transport).CancelRequest", "(*net/http.Transport).RoundTrip", "(*net/http.body).Close",
 		"(*net/http.body).Read", "(*net/http.bodyEOFSignal).Close", "(*net/http.bodyEOFSignal).Read",
-		"(*net/http.bodyLocked).Read", "(*net/http.bufioFlushWriter).Write", "(*net/http.cancelTimerBody).Close",
-		"(*net/http.cancelTimerBody).Read", "(*net/http.connectMethodKey).String", "(*net/http.gzipReader).Close",
-		"(*net/http.gzipReader).Read", "(*net/http.http2ClientConn).Close", "(*net/http.http2ClientConn).Ping",
-		"(*net/http.http2ClientConn).RoundTrip", "(*net/http.persistConn).Read", "(*net/http.persistConnWriter).ReadFrom",
-		"(*net/http.persistConnWriter).Write", "(*net/http.readTrackingBody).Close", "(*net/http.readTrackingBody).Read",
+		"(*net/http.cancelTimerBody).Close",
+		"(*net/http.cancelTimerBody).Read", "(*net/http.gzipReader).Close",
+		"(*net/http.gzipReader).Read",
+		"(*net/http.persistConn).Read",
+		"(*net/http.readTrackingBody).Close", "(*net/http.readTrackingBody).Read",
 		"(*net/http.readWriteCloserBody).Read", "(*net/http.socksDialer).DialWithConn", "(*net/http.socksUsernamePassword).Authenticate",
-		"(*net/http.stringWriter).WriteString", "(*net/http.transportReadFromServerError).Error", "(net/http.Header).Add",
+		"(net/http.Header).Add",
 		"(net/http.Header).Del", "(net/http.Header).Get", "(net/http.Header).Set",
 		"(net/http.Header).Write", "(net/http.bodyLocked).Read", "(net/http.bufioFlushWriter).Write",
-		"(net/http.connectMethodKey).String", "(net/http.http2ClientConn).Close", "(net/http.http2ClientConn).Ping",
+		"(net/http.connectMethodKey).String",
 		"(net/http.http2ClientConn).RoundTrip", "(net/http.persistConnWriter).ReadFrom", "(net/http.persistConnWriter).Write",
 		"(net/http.stringWriter).WriteString", "(net/http.transportReadFromServerError).Error", "CanonicalHeaderKey",
 		"Client.Do", "Client.Get", "Cookie.String",
-		"Error", "Get", "Head",
+		"Get",
 		"Header.Add", "Header.Del", "Header.Get",
 		"Header.Set", "Header.Write", "NewRequest",
 		"NewRequestWithContext", "ProxyFromEnvironment", "ReadResponse",
-		"Redirect", "Request.AddCookie", "Request.Write",
-		"Response.Cookies", "Serve", "SetCookie",
+		"Request.AddCookie", "Request.Write",
+		"Response.Cookies",
 		"Transport.CancelRequest", "Transport.RoundTrip", "body.Close",
 		"body.Read", "bodyEOFSignal.Close", "bodyEOFSignal.Read",
 		"bodyLocked.Read", "bufioFlushWriter.Write", "cancelTimerBody.Close",
-		"cancelTimerBody.Read", "chunkWriter.Write", "connectMethodKey.String",
-		"gzipReader.Close", "gzipReader.Read", "http2ClientConn.Close",
-		"http2ClientConn.Ping", "http2ClientConn.RoundTrip", "persistConn.Read",
+		"cancelTimerBody.Read", "connectMethodKey.String",
+		"gzipReader.Close", "gzipReader.Read",
+		"http2ClientConn.RoundTrip", "persistConn.Read",
 		"persistConnWriter.ReadFrom", "persistConnWriter.Write", "readTrackingBody.Close",
-		"readTrackingBody.Read", "readWriteCloserBody.Read", "response.Flush",
-		"response.FlushError", "response.Write", "response.WriteHeader",
-		"response.WriteString", "socksDialer.DialWithConn", "socksUsernamePassword.Authenticate",
+		"readTrackingBody.Read", "readWriteCloserBody.Read",
+		"socksDialer.DialWithConn", "socksUsernamePassword.Authenticate",
 		"stringWriter.WriteString", "transportReadFromServerError.Error",
 	}
 	grpcSymbols := []string{
@@ -1110,7 +1111,10 @@ func TestCallgraphMatrixIntegration(t *testing.T) {
 				t.Errorf("errors: %v", out.Errors)
 			}
 			dirs := []string{"."}
-			if branch == "multi-module" {
+			if branch == "vuln-build-constraint" {
+				// An excluded import does not establish package presence.
+				dirs = nil
+			} else if branch == "multi-module" {
 				dirs = []string{"svc-a", "svc-b"}
 			}
 			if len(out.UsedImports) != len(dirs) {
@@ -1139,11 +1143,7 @@ func TestCallgraphMatrixIntegration(t *testing.T) {
 				if replacement != "" {
 					replacementModule = "golang.org/x/net"
 				}
-				symbols := []string{"Parse"}
-				if want == "unknown" {
-					symbols = []string{}
-				}
-				assertUsedImport(t, out, dir, "golang.org/x/net/html", version, fixes, symbols, replacementModule, replacement)
+				assertUsedImport(t, out, dir, "golang.org/x/net/html", version, fixes, []string{"Parse"}, replacementModule, replacement)
 			}
 			assertAffectedImport(t, out, "golang.org/x/net/html", "non-stdlib", []string{"v0.33.0"})
 		})

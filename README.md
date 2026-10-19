@@ -384,7 +384,7 @@ can differ. Estimates cover received usage reports rather than the provider's fi
 
 Run unit tests with race detection using `make test`. If the host lacks CGO or a
 C compiler, use `make test-podman`. It runs the unit suite with CGO enabled in
-`registry.access.redhat.com/ubi9/ubi`, installing Go, GCC, and Git with `dnf`;
+`fedora:44`, installing Go, GCC, and Git with `dnf`;
 only Make and Podman are required on the host (with a running Podman machine on
 macOS). `GOTOOLCHAIN=auto` lets Go download a newer toolchain if required by
 `go.mod`. The first run needs network access for the image and toolchain; package
@@ -392,7 +392,7 @@ installation needs network access on each run. The repository is mounted
 read-only, and the `gvs-test-cache` Podman volume retains build, module, and
 downloaded toolchain caches. Container exit failures propagate to Make.
 
-Override `PODMAN_TEST_IMAGE` to use another compatible UBI base,
+Override `PODMAN_TEST_IMAGE` to use another compatible `dnf`-based image,
 `PODMAN_TEST_CACHE` to choose a different cache volume, or `PODMAN_TEST_ARGS` to
 select tests:
 
@@ -407,14 +407,11 @@ Run the API, scanner, and MCP integration suite with
 network access to GitHub and vuln.go.dev.
 
 Use `make test-integration-podman` when those tools or CGO are missing on the
-host. It uses the same UBI image and installs Go, GCC, Git, and Graphviz with
+host. It uses the same Fedora 44 image and installs Go, GCC, Git, and Graphviz with
 `dnf`, then runs the same integration suite with race detection and a 45-minute
 timeout. Go caches are shared with `test-podman`. Package installation and the
 suite's external services require network access.
 
-UBI's packaged Graphviz was observed to fail the scanner's SVG rendering command
-with `Graphviz not built with triangulation library`. Integration cases that
-render graphs can therefore fail even though Graphviz installs successfully.
 Use `PODMAN_INTEGRATION_TEST_ARGS` for focused runs:
 
 ```bash

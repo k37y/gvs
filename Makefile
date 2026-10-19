@@ -22,8 +22,8 @@ BINS = gvs cg
 USERNAME ?= gvs
 GROUPNAME ?= $(USERNAME)
 
-# Install test tools in plain UBI; Go selects the module's toolchain automatically.
-PODMAN_TEST_IMAGE ?= registry.access.redhat.com/ubi9/ubi
+# Install test tools in Fedora 44; Go selects the module's toolchain automatically.
+PODMAN_TEST_IMAGE ?= fedora:44
 # Keep build/module caches between disposable test containers.
 PODMAN_TEST_CACHE ?= gvs-test-cache
 # Optional local fixture checkout, mounted read-only for unpublished branch tests.
@@ -83,7 +83,7 @@ test-integration:
 	@echo "Running integration tests..."
 	go test -race -v -count=1 -tags integration ./internal/api ./internal/mcp -run "TestCallgraph.*Integration|TestCgBinaryValidation|TestMCP.*Integration" -timeout 45m
 
-# Install integration dependencies in UBI without requiring host development tools.
+# Install integration dependencies in Fedora without requiring host development tools.
 .PHONY: test-integration-podman
 
 test-integration-podman:
