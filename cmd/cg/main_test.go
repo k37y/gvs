@@ -86,3 +86,18 @@ func TestNormalizeUsedImportsKeepsSymbolPaths(t *testing.T) {
 		t.Errorf("module path overwritten: %v", second.Paths)
 	}
 }
+
+func TestNormalizeUsedImportsKeepsPresentPackages(t *testing.T) {
+	result := &cg.Result{UsedImports: map[string]map[string]cg.UsedImportsDetails{
+		".": {"net": {}, "example.com/lib": {CurrentVersion: "v1.0.0"}},
+	}}
+	normalizeUsedImports(result)
+	if len(result.UsedImports["."]) != 2 {
+		t.Fatalf("present packages removed: %v", result.UsedImports)
+	}
+	for pkg, details := range result.UsedImports["."] {
+		if len(details.Symbols) != 0 || len(details.Paths) != 0 || len(details.FixCommands) != 0 {
+			t.Errorf("presence alone added usage for %s: %+v", pkg, details)
+		}
+	}
+}

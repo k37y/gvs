@@ -12,6 +12,8 @@ Prioritize concrete findings about overapproximation and missed invocation. Trac
 
 Requested algorithm: `{{.algorithm}}`. Check Errors for failed loading, fallback, or incomplete analysis. `graph_modules` describes available module graphs; select the matching repository-relative module when using graph tools. An absent module graph cannot establish unreachability.
 
+`UsedImports` lists affected packages present in the loaded dependency graph, with available version metadata. Presence alone does not establish affected-symbol reachability. The scan context omits `Symbols`; use the supplied call traces for scanner-reported paths. An omitted package does not establish absence when loading or analysis is incomplete.
+
 The following are structured paths underlying the graph SVGs, with dispatch and call-site information. Compare these paths with source. SVG rendering itself is not being visually inspected; absent SVG files or paths do not establish absence of usage.
 
 No scanner-reported path means there is no path to classify as supported_path or suspected_false_positive. A scanner verdict of false is not a false-positive finding. When UsedImports is empty or null, investigate possible missed usage using available module graphs and source. Return findings=[] if no applicable finding is established, explaining the reviewed scope; use suspected_false_negative only for a source-backed missed path, or inconclusive for a specific unresolved question. Do not require an SVG or invent a graph_path. Absence of reported paths does not itself mean graph construction failed; check graph_modules and Errors.

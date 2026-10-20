@@ -1,0 +1,63 @@
+{
+  "AIVerification": {
+    "IsVulnerable": "false",
+    "confidence": "high",
+    "evidence": [
+      "cmd/cloud-network-config-controller/main.go:58: func main() { ... production entrypoint",
+      "cmd/cloud-network-config-controller/main.go:65: \tctx, cancelFunc := context.WithCancel(context.Background())",
+      "cmd/cloud-network-config-controller/main.go:68: \tstopCh := signals.SetupSignalHandler(cancelFunc)",
+      "pkg/signals/signals.go:19: func SetupSignalHandler(cancel context.CancelFunc) (stopCh <-chan struct{}) {",
+      "pkg/signals/signals.go:32: \t\tcancel()",
+      "Module check: google.golang.org/grpc v1.68.1 is present as an indirect dependency; vulnerable symbols are defined in vendor",
+      "cmd/cloud-network-config-controller/main.go:58: func main() {",
+      "Suspected false-positive path: module=.; target=google.golang.org/grpc.Server.Serve; The closure launched by SetupSignalHandler only invokes the captured context.CancelFunc (from context.WithCancel), not any grpc.Server method. Supported by inspect_dispatch showing the actual function value and file-level source.",
+      "cmd/cloud-network-config-controller/main.go:68: stopCh := signals.SetupSignalHandler(cancelFunc)",
+      "pkg/signals/signals.go:32: cancel()",
+      "cmd/cloud-network-config-controller/main.go:65: ctx, cancelFunc := context.WithCancel(context.Background())",
+      "pkg/signals/signals.go:32: \t\tcancel() (cancel() always calls the context cancellation function, not a grpc.Server method or method value.)",
+      "Suspected false-positive path: module=.; target=google.golang.org/grpc.Server.ServeHTTP; As above, the only target of the dynamic invocation in SetupSignalHandler$1 is the cancel function, so downstream edges to ServeHTTP are unreachable by this route.",
+      "Suspected false-positive path: module=.; target=google.golang.org/grpc.Server.handleStream; The closure origin at SetupSignalHandler$1 again points to cancel(), with all evidence that the cancel value cannot be a grpc.Server. Downstream dynamic dispatches are unreachable."
+    ],
+    "reasoning": "All investigated scanner paths to the affected grpc.Server methods in production entrypoints are false positives: the dynamic targets at the disputed call sites are proven by source and inspect_dispatch to be context cancellation functions, not affected grpc.Server methods. There is no evidence of dynamic or static invocation of any affected grpc.Server symbol in production scope, and no missed alternate paths were found. The vendor version is vulnerable, but no usage is established.",
+    "usage": {
+      "cache_read_tokens": 95744,
+      "cache_write_tokens": null,
+      "cost_usd": 0.108082,
+      "input_tokens": 115001,
+      "output_tokens": 2712
+    }
+  },
+  "AffectedImports": {
+    "google.golang.org/grpc": {
+      "FixedVersion": ["v1.79.3"],
+      "Symbols": ["Server.Serve", "Server.ServeHTTP", "Server.handleStream"],
+      "Type": "non-stdlib"
+    }
+  },
+  "Branch": "release-4.20",
+  "CVE": "CVE-2026-33186",
+  "Directory": "/tmp/cg-cloud-network-config-controller-456996634",
+  "Errors": null,
+  "Files": {".": [["cmd/cloud-network-config-controller/main.go"]]},
+  "GoCVE": "GO-2026-4762",
+  "GraphPaths": [
+    "http://10.74.129.37:9099/graph/CVE-2026-33186/cloud-network-config-controller/release-4.20/cha/google.golang.org-grpc-ptrgoogle-golang-org-grpc-Server-Serve.svg",
+    "http://10.74.129.37:9099/graph/CVE-2026-33186/cloud-network-config-controller/release-4.20/cha/google.golang.org-grpc-ptrgoogle-golang-org-grpc-Server-ServeHTTP.svg",
+    "http://10.74.129.37:9099/graph/CVE-2026-33186/cloud-network-config-controller/release-4.20/cha/google.golang.org-grpc-ptrgoogle-golang-org-grpc-Server-handleStream.svg",
+    "http://10.74.129.37:9099/graph/CVE-2026-33186/cloud-network-config-controller/release-4.20/cha/google.golang.org-grpc-Server-ServeHTTP.svg",
+    "http://10.74.129.37:9099/graph/CVE-2026-33186/cloud-network-config-controller/release-4.20/cha/google.golang.org-grpc-Server-handleStream.svg"
+  ],
+  "IsVulnerable": "true",
+  "Repository": "https://github.com/openshift/cloud-network-config-controller",
+  "UsedImports": {
+    ".": {
+      "google.golang.org/grpc": {
+        "CurrentVersion": "v1.68.1",
+        "FixCommands": ["go get google.golang.org/grpc@v1.79.3", "go mod tidy", "go mod vendor"],
+        "Symbols": ["(*google.golang.org/grpc.Server).Serve", "(*google.golang.org/grpc.Server).ServeHTTP", "(*google.golang.org/grpc.Server).handleStream", "Server.ServeHTTP", "Server.handleStream"]
+      }
+    }
+  },
+  "reflect": true,
+  "unsafe": false
+}

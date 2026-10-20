@@ -1,6 +1,7 @@
 package gvs
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -10,22 +11,39 @@ import (
 )
 
 func StartDirectoryCleanup() {
+	StartDirectoryCleanupWithContext(context.Background(), nil)
+}
+
+// StartDirectoryCleanupWithContext periodically removes old scan directories,
+// excluding directories reported as active by isActive. It stops when ctx ends.
+func StartDirectoryCleanupWithContext(ctx context.Context, isActive func(string) bool) {
 	log.Println("Starting directory cleanup routine")
 
 	// Run cleanup immediately on startup
-	cleanupOldDirectories()
+	cleanupOldDirectoriesIn(ctx, os.TempDir(), isActive)
 
 	// Run cleanup every hour
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		cleanupOldDirectories()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cleanupOldDirectoriesIn(ctx, os.TempDir(), isActive)
+		}
 	}
 }
 
 func cleanupOldDirectories() {
-	tempDir := os.TempDir()
+	cleanupOldDirectoriesIn(context.Background(), os.TempDir(), nil)
+}
+
+func cleanupOldDirectoriesIn(ctx context.Context, tempDir string, isActive func(string) bool) {
+	if ctx.Err() != nil {
+		return
+	}
 	cutoffTime := time.Now().Add(-1 * time.Hour)
 
 	entries, err := os.ReadDir(tempDir)
@@ -38,6 +56,9 @@ func cleanupOldDirectories() {
 	var totalSize int64
 
 	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return
+		}
 		if !entry.IsDir() {
 			continue
 		}
@@ -57,15 +78,20 @@ func cleanupOldDirectories() {
 
 		// Check if directory is older than 1 hour
 		if info.ModTime().Before(cutoffTime) {
+			if isActive != nil && isActive(dirPath) {
+				continue
+			}
 			// Calculate directory size before deletion
-			if size, err := getDirSize(dirPath); err == nil {
-				totalSize += size
+			size, _ := getDirSize(dirPath)
+			if ctx.Err() != nil {
+				return
 			}
 
 			// Remove the directory
 			if err := os.RemoveAll(dirPath); err != nil {
 				log.Printf("Failed to remove directory %s: %v", dirPath, err)
 			} else {
+				totalSize += size
 				log.Printf("Cleaned up old directory: %s (age: %v)", dirPath, time.Since(info.ModTime()).Round(time.Hour))
 				deletedCount++
 			}
