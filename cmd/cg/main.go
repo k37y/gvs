@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,7 +30,19 @@ import (
 
 var version string
 
+func versionFromBuildInfo(info *debug.BuildInfo) string {
+	if info != nil && info.Main.Version != "" {
+		return info.Main.Version
+	}
+	return "(devel)"
+}
+
 func main() {
+	if version == "" {
+		info, _ := debug.ReadBuildInfo()
+		version = versionFromBuildInfo(info)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

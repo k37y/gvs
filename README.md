@@ -810,6 +810,12 @@ make image-run
 $ go install github.com/k37y/gvs/cmd/gvs@main
 $ go install github.com/k37y/gvs/cmd/cg@main
 ```
+
+Run `cg -version` to print the binary version. Makefile builds use the
+linker-injected version; otherwise, `cg` uses the main module version embedded
+by Go, including the pseudo-version from `go install ...@main`. If no version
+metadata is available, it prints `(devel)`. Progress output uses the same version.
+
 ### ReflectionRisks
 1. Type (string)
 All 14 possible values:
