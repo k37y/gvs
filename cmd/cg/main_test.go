@@ -4,12 +4,34 @@ import (
 	"encoding/hex"
 	"github.com/k37y/gvs/pkg/cmd/cg"
 	"reflect"
+	"runtime/debug"
 	"strings"
 	"testing"
 
 	"golang.org/x/tools/go/callgraph"
 	"golang.org/x/tools/go/ssa"
 )
+
+func TestVersionFromBuildInfo(t *testing.T) {
+	tests := []struct {
+		name string
+		info *debug.BuildInfo
+		want string
+	}{
+		{"release", &debug.BuildInfo{Main: debug.Module{Version: "v0.0.6"}}, "v0.0.6"},
+		{"pseudo-version", &debug.BuildInfo{Main: debug.Module{Version: "v0.0.6-0.20261020034126-8cdac78485e8"}}, "v0.0.6-0.20261020034126-8cdac78485e8"},
+		{"local build", &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}}, "(devel)"},
+		{"empty metadata", &debug.BuildInfo{}, "(devel)"},
+		{"missing metadata", nil, "(devel)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := versionFromBuildInfo(tt.info); got != tt.want {
+				t.Errorf("versionFromBuildInfo() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestGenerateRandomFilename(t *testing.T) {
 	name := generateRandomFilename()
