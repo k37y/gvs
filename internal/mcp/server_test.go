@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/k37y/gvs/internal/api"
+	"github.com/k37y/gvs/internal/testutil/openapitest"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -62,11 +63,44 @@ func connectClient(t *testing.T, backend *fakeBackend) (*sdk.ClientSession, stri
 
 func callTool(t *testing.T, session *sdk.ClientSession, name string, args any) *sdk.CallToolResult {
 	t.Helper()
-	result, err := session.CallTool(context.Background(), &sdk.CallToolParams{Name: name, Arguments: args})
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	result, err := session.CallTool(ctx, &sdk.CallToolParams{Name: name, Arguments: args})
 	if err != nil {
 		t.Fatal(err)
 	}
+	schemaName := "MCPSubmissionOutput"
+	switch name {
+	case "gvs_status":
+		schemaName = "MCPStatusOutput"
+	case "gvs_read_result":
+		schemaName = "MCPChunkOutput"
+	case "gvs_scan", "gvs_manual_scan", "gvs_cancel":
+	default:
+		t.Fatalf("missing OpenAPI output schema for tool %q", name)
+	}
+	validateToolOutput(t, schemaName, result)
 	return result
+}
+
+func validateToolOutput(t *testing.T, schemaName string, result *sdk.CallToolResult) {
+	t.Helper()
+	openapitest.Validate(t, "MCPCallToolResult", result)
+	if result.StructuredContent != nil {
+		openapitest.Validate(t, schemaName, result.StructuredContent)
+	}
+	for _, content := range result.Content {
+		text, ok := content.(*sdk.TextContent)
+		if !ok {
+			t.Fatalf("unexpected tool content %T", content)
+		}
+		// SDK argument validation can return a plain-text error without structured
+		// content. Application results must retain and validate their exact JSON.
+		if result.IsError && result.StructuredContent == nil && !json.Valid([]byte(text.Text)) {
+			continue
+		}
+		openapitest.Validate(t, schemaName, json.RawMessage(text.Text))
+	}
 }
 
 func decodedResult(t *testing.T, result *sdk.CallToolResult) map[string]json.RawMessage {
@@ -106,6 +140,7 @@ func TestHTTPToolsAndSubmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	openapitest.Validate(t, "MCPListToolsResult", listed)
 	want := map[string][]string{"gvs_scan": {"repo", "branch", "cve", "algo"}, "gvs_manual_scan": {"repo", "branch", "library", "symbol", "fixedVersion", "algo"}, "gvs_status": {"taskId"}, "gvs_cancel": {"taskId"}, "gvs_read_result": {"taskId"}}
 	if len(listed.Tools) != len(want) {
 		t.Fatalf("tools = %d", len(listed.Tools))
@@ -354,19 +389,25 @@ func TestProtocolAndPublicURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
-		name, method, body string
-		want               int
+		name, method, body, schema string
+		want                       int
 	}{
-		{"initialize", "POST", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`, 200},
-		{"unknown tool", "POST", `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"missing","arguments":{}}}`, 200},
-		{"scan", "POST", `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"gvs_scan","arguments":{"repo":"https://example.com/repo","branch":"main","cve":"CVE-2026-33186","algo":"cha"}}}`, 200},
-		{"get", "GET", "", 405}, {"delete", "DELETE", "", 405},
+		{"initialize", "POST", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`, "MCPInitializeResult", 200},
+		{"discover", "POST", `{"jsonrpc":"2.0","id":4,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}`, "MCPDiscoverResult", 200},
+		{"tools list", "POST", `{"jsonrpc":"2.0","id":5,"method":"tools/list","params":{}}`, "MCPListToolsResult", 200},
+		{"unknown tool", "POST", `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"missing","arguments":{}}}`, "", 200},
+		{"scan", "POST", `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"gvs_scan","arguments":{"repo":"https://example.com/repo","branch":"main","cve":"CVE-2026-33186","algo":"cha"}}}`, "MCPCallToolResult", 200},
+		{"get", "GET", "", "", 405}, {"delete", "DELETE", "", "", 405},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := httptest.NewRequest(tc.method, "https://internal.example/mcp", strings.NewReader(tc.body))
 			r.Header.Set("Content-Type", "application/json")
 			r.Header.Set("Accept", "application/json, text/event-stream")
 			r.Header.Set("Mcp-Protocol-Version", "2025-11-25")
+			if tc.name == "discover" {
+				r.Header.Set("Mcp-Protocol-Version", "2026-07-28")
+				r.Header.Set("Mcp-Method", "server/discover")
+			}
 			r.Header.Set("Origin", "https://client.example")
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, r)
@@ -378,6 +419,18 @@ func TestProtocolAndPublicURL(t *testing.T) {
 			}
 			if tc.want == http.StatusOK && !strings.Contains(w.Header().Get("Content-Type"), "application/json") {
 				t.Fatalf("response type = %s", w.Header().Get("Content-Type"))
+			}
+			if tc.want == http.StatusOK {
+				openapitest.Validate(t, "MCPJSONRPCResponse", json.RawMessage(w.Body.Bytes()))
+				if tc.schema != "" {
+					var response struct {
+						Result json.RawMessage `json:"result"`
+					}
+					if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+						t.Fatal(err)
+					}
+					openapitest.Validate(t, tc.schema, response.Result)
+				}
 			}
 			if tc.name == "unknown tool" && !strings.Contains(w.Body.String(), `"error"`) {
 				t.Fatal("unknown tool did not produce a protocol error")

@@ -42,40 +42,60 @@ func TestTaskStatesAndToolErrors(t *testing.T) {
 			if !active(status) && string(out["output"]) != `"not JSON\n"` {
 				t.Fatalf("non-JSON output = %s", out["output"])
 			}
-			validateSchema(t, outputSchema("status"), result)
+			validateSchema(t, "status", result)
 			cancelled := callTool(t, s, "gvs_cancel", taskInput{TaskID: "task-1"})
-			validateSchema(t, outputSchema("submission"), cancelled)
+			validateSchema(t, "submission", cancelled)
 		})
 	}
 	for _, code := range []string{"scan_busy", "task_not_found", "task_not_ready", "task_not_running", "request_id_conflict", "server_stopping", "result_unavailable"} {
 		t.Run(code, func(t *testing.T) {
 			b := &fakeBackend{err: &api.TaskError{Code: code, Message: "test error"}}
 			s, _ := connectClient(t, b)
-			result := callTool(t, s, "gvs_status", taskInput{TaskID: "task-1"})
-			if !result.IsError {
-				t.Fatal("backend error was not a tool error")
+			for _, tool := range []struct {
+				name, kind string
+				args       any
+			}{
+				{"gvs_scan", "submission", scanInput{Repo: "https://fixture.invalid/repo", Branch: "main", CVE: "GO-2024-3333", Algo: "rta"}},
+				{"gvs_manual_scan", "submission", manualInput{Repo: "https://fixture.invalid/repo", Branch: "main", Library: "example.com/lib", Symbol: "Danger", FixedVersion: "v1.1.0", Algo: "rta"}},
+				{"gvs_status", "status", taskInput{TaskID: "task-1"}},
+				{"gvs_cancel", "submission", taskInput{TaskID: "task-1"}},
+				{"gvs_read_result", "chunk", readInput{TaskID: "task-1"}},
+			} {
+				t.Run(tool.name, func(t *testing.T) {
+					result := callTool(t, s, tool.name, tool.args)
+					if !result.IsError {
+						t.Fatal("backend error was not a tool error")
+					}
+					var out struct {
+						Error struct {
+							Code      string
+							Retryable bool
+						}
+					}
+					if err := json.Unmarshal([]byte(result.Content[0].(*sdk.TextContent).Text), &out); err != nil {
+						t.Fatal(err)
+					}
+					if out.Error.Code != code {
+						t.Fatalf("error = %+v", out)
+					}
+					if out.Error.Retryable != (code == "scan_busy" || code == "task_not_ready" || code == "server_stopping") {
+						t.Fatalf("retryability = %+v", out)
+					}
+					validateSchema(t, tool.kind, result)
+				})
 			}
-			var out struct {
-				Error struct {
-					Code      string
-					Retryable bool
-				}
-			}
-			json.Unmarshal([]byte(result.Content[0].(*sdk.TextContent).Text), &out)
-			if out.Error.Code != code {
-				t.Fatalf("error = %+v", out)
-			}
-			if out.Error.Retryable != (code == "scan_busy" || code == "task_not_ready" || code == "server_stopping") {
-				t.Fatalf("retryability = %+v", out)
-			}
-			validateSchema(t, outputSchema("status"), result)
 		})
 	}
 }
 
-func validateSchema(t *testing.T, schema any, result *sdk.CallToolResult) {
+func validateSchema(t *testing.T, kind string, result *sdk.CallToolResult) {
 	t.Helper()
-	data, err := json.Marshal(schema)
+	schemaName := map[string]string{"status": "MCPStatusOutput", "submission": "MCPSubmissionOutput", "chunk": "MCPChunkOutput"}[kind]
+	if schemaName == "" {
+		t.Fatalf("missing OpenAPI schema for result kind %q", kind)
+	}
+	validateToolOutput(t, schemaName, result)
+	data, err := json.Marshal(outputSchema(kind))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,6 +123,7 @@ func TestExpiredAndChangedResultCursors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	validateSchema(t, "chunk", first)
 	var chunk ResultChunk
 	json.Unmarshal([]byte(first.Content[0].(*sdk.TextContent).Text), &chunk)
 	if chunk.NextCursor == nil {
@@ -147,7 +168,7 @@ func TestResultLimitCountsBothRepresentations(t *testing.T) {
 			if !out.Result.Inline && len(out.Output) != 0 {
 				t.Fatal("external result retained output")
 			}
-			validateSchema(t, outputSchema("status"), result)
+			validateSchema(t, "status", result)
 		}
 	}
 }
@@ -212,7 +233,7 @@ func TestOversizedToolErrorsOverHTTP(t *testing.T) {
 			if strings.Contains(result.Content[0].(*sdk.TextContent).Text, large) {
 				t.Fatal("oversized original diagnostic was echoed")
 			}
-			validateSchema(t, outputSchema("submission"), result)
+			validateSchema(t, "submission", result)
 			if tc.backendErr == nil && b.starts != 0 {
 				t.Fatal("invalid schema reached backend")
 			}

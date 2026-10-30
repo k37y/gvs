@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/k37y/gvs/internal/testutil/openapitest"
 	"github.com/k37y/gvs/pkg/cmd/cg"
 )
 
@@ -184,13 +185,19 @@ func pollCallgraphRequest(t *testing.T, requestBody map[string]interface{}) cgOu
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		openapitest.Validate(t, "ErrorResponse", json.RawMessage(body))
 		t.Fatalf("Callgraph request failed with status %d: %s", resp.StatusCode, body)
 	}
 
 	var callgraphResp struct {
 		TaskID string `json:"taskId"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&callgraphResp); err != nil {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("Failed to read callgraph response: %v", err)
+	}
+	openapitest.Validate(t, "TaskAccepted", json.RawMessage(body))
+	if err := json.Unmarshal(body, &callgraphResp); err != nil {
 		t.Fatalf("Failed to decode callgraph response: %v", err)
 	}
 
@@ -229,6 +236,11 @@ func pollCallgraphRequest(t *testing.T, requestBody map[string]interface{}) cgOu
 		if err != nil {
 			t.Fatalf("Failed to read status response: %v", err)
 		}
+		if statusResp.StatusCode != http.StatusOK {
+			openapitest.Validate(t, "ErrorResponse", json.RawMessage(body))
+			t.Fatalf("Status request failed with status %d: %s", statusResp.StatusCode, body)
+		}
+		openapitest.Validate(t, "TaskStatusResponse", json.RawMessage(body))
 
 		if err := json.Unmarshal(body, &statusResult); err != nil {
 			t.Fatalf("Failed to decode status response: %v", err)
@@ -239,6 +251,7 @@ func pollCallgraphRequest(t *testing.T, requestBody map[string]interface{}) cgOu
 		}
 
 		if statusResult.Status == "completed" {
+			openapitest.Validate(t, "CGResult", statusResult.Output)
 			var output cgOutput
 			if err := json.Unmarshal(statusResult.Output, &output); err != nil {
 				t.Fatalf("Failed to parse output: %v", err)
@@ -906,6 +919,7 @@ func TestCgBinaryValidation(t *testing.T) {
 				if !json.Valid(output) {
 					t.Fatalf("invalid scanner JSON: %s", output)
 				}
+				openapitest.Validate(t, "CGResult", json.RawMessage(output))
 				var result cgOutput
 				if err := json.Unmarshal(output, &result); err != nil || result.CVE != "GO-2024-3333" || result.GoCVE != "GO-2024-3333" {
 					t.Fatalf("unexpected normalized IDs: %s, error %v", output, err)
@@ -1415,6 +1429,20 @@ func postIntegrationJSON(t *testing.T, endpoint string, body any, wantStatus int
 	if resp.StatusCode != wantStatus {
 		t.Fatalf("%s status = %d, want %d: %s", endpoint, resp.StatusCode, wantStatus, data)
 	}
+	schema := "ErrorResponse"
+	if resp.StatusCode == http.StatusOK {
+		switch endpoint {
+		case "/callgraph", "/scan":
+			schema = "TaskAccepted"
+		case "/status":
+			schema = "TaskStatusResponse"
+		case "/cancel":
+			schema = "CancelAcknowledgement"
+		default:
+			t.Fatalf("no response schema for %s", endpoint)
+		}
+	}
+	openapitest.Validate(t, schema, json.RawMessage(data))
 	if output != nil {
 		if err := json.Unmarshal(data, output); err != nil {
 			t.Fatalf("%s JSON: %v: %s", endpoint, err, data)
@@ -1445,6 +1473,11 @@ func awaitIntegrationTask(t *testing.T, id string) integrationTask {
 	waitIntegrationIdle(t)
 	// Re-read after the worker has exited to catch cancellation being overwritten.
 	postIntegrationJSON(t, "/status", map[string]string{"taskId": id}, http.StatusOK, &task)
+	// These tasks run the real cg binary; unlike generic task fixtures, any
+	// retained JSON output is a complete scanner result, even on cancellation.
+	if len(task.Output) != 0 {
+		openapitest.Validate(t, "CGResult", task.Output)
+	}
 	return task
 }
 

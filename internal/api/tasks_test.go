@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -13,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/k37y/gvs/internal/testutil/openapitest"
 )
 
 func prepareTaskTest(t *testing.T) {
@@ -101,6 +104,22 @@ func requireTaskError(t *testing.T, err error, code string) {
 	}
 }
 
+func validateTaskStatusContract(t *testing.T, id string) {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{"taskId": id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	StatusHandler(rec, httptest.NewRequest(http.MethodPost, "/status", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("task status = %d: %s", rec.Code, rec.Body)
+	}
+	// Task stdout is deliberately opaque: partial JSON and non-JSON output
+	// belong in the envelope, not in CGResult or ScanResult validation.
+	openapitest.Validate(t, "TaskStatusResponse", json.RawMessage(rec.Body.Bytes()))
+}
+
 func TestTaskIdempotentSubmission(t *testing.T) {
 	prepareTaskTest(t)
 	release, unblock := taskRelease(t)
@@ -186,6 +205,7 @@ func TestTaskTimeoutPreservesPartialResult(t *testing.T) {
 	if result.Output != "partial output" || result.Logs != "final logs" || !result.ResultAvailable {
 		t.Errorf("timeout discarded output or logs: %+v", result)
 	}
+	validateTaskStatusContract(t, task.TaskID)
 }
 
 func TestTaskCancellationWaitsForWorker(t *testing.T) {
@@ -223,6 +243,7 @@ func TestTaskCancellationWaitsForWorker(t *testing.T) {
 	if err != nil || result.Status != StatusCancelled || result.Output != `{"partial":true}` || result.Logs != "logs collected on exit" {
 		t.Fatalf("cancelled result = %+v, error %v", result, err)
 	}
+	validateTaskStatusContract(t, task.TaskID)
 	ack, err := CancelTask(task.TaskID)
 	if err != nil || ack.Status != StatusCancelled {
 		t.Fatalf("repeated terminal cancellation = %+v, error %v", ack, err)
@@ -364,6 +385,7 @@ func TestTaskResultImmutableAndExactJSON(t *testing.T) {
 	if string(fields["output"]) != output || string(fields["logs"]) != `"retained logs"` {
 		t.Fatalf("artifact lost exact output: %s", artifact)
 	}
+	validateTaskStatusContract(t, task.TaskID)
 	original := string(artifact)
 	artifact[0] = '!'
 	againArtifact, err := ReadTaskResult(task.TaskID)

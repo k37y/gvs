@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/k37y/gvs/internal/testutil/openapitest"
 )
 
 const reflectionNoiseFixture = `package sample
@@ -42,6 +44,7 @@ func TestReflectionOutputMeasurement(t *testing.T) {
 		t.Fatalf("want value reference and invocation, got %+v", risks)
 	}
 	for _, risk := range risks {
+		openapitest.Validate(t, "CGReflectionRisk", risk)
 		if risk.Symbol != "Println" || risk.Association != "target_linked" {
 			t.Fatalf("unexpected risk: %+v", risk)
 		}
@@ -111,6 +114,7 @@ func TestTypedDynamicCandidates(t *testing.T) {
 	risks := r.detectReflectionVulnerabilities("example.com/dynamic/target", dir, []string{"Parse", "Parser.Parse"}, paths)
 	kinds := map[string]int{}
 	for _, risk := range risks {
+		openapitest.Validate(t, "CGReflectionRisk", risk)
 		kinds[risk.Type]++
 		if risk.Association == "target_linked" && (risk.Package != "example.com/dynamic/target" || (risk.Symbol != "Parse" && risk.Symbol != "Parser.Parse")) {
 			t.Errorf("invented target: %+v", risk)
@@ -174,6 +178,7 @@ func TestReflectionAliasesAndIncompleteTypes(t *testing.T) {
 	risks := r.detectReflectionVulnerabilities("fmt", dir, []string{"Println"}, []string{"main.go"})
 	linked, unknown := 0, 0
 	for _, risk := range risks {
+		openapitest.Validate(t, "CGReflectionRisk", risk)
 		if risk.Association == "target_linked" {
 			linked++
 		}
@@ -191,6 +196,7 @@ func TestReflectionAliasesAndIncompleteTypes(t *testing.T) {
 	risks = r.detectReflectionVulnerabilities("fmt", dir, []string{"Println"}, []string{"broken.go"})
 	incomplete := false
 	for _, risk := range risks {
+		openapitest.Validate(t, "CGReflectionRisk", risk)
 		if risk.Type == "analysis_incomplete" && risk.Association == "unresolved" {
 			incomplete = true
 		}
@@ -252,6 +258,7 @@ func TestReflectionGapsRequireDynamicSource(t *testing.T) {
 			risks := r.detectReflectionVulnerabilities("fmt", dir, []string{"Println"}, []string{"main.go", "candidate.go"})
 			gap := false
 			for _, risk := range risks {
+				openapitest.Validate(t, "CGReflectionRisk", risk)
 				if risk.Type == "analysis_incomplete" {
 					gap = true
 					if !strings.Contains(risk.Location, "candidate.go:") {
