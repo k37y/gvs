@@ -1,0 +1,3794 @@
+{
+  "openapi": "3.1.0",
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "info": {
+    "title": "GVS API and cg output",
+    "version": "0.1.0",
+    "description": "Contract for the existing GVS HTTP server and cg CLI JSON output. REST submission endpoints return task IDs; poll /status and optionally consume /progress/{taskId}. The same task backend serves optional MCP tools. Only one scan runs at a time. Task state is in memory and does not survive restarts. GVS has no built-in authentication or per-user task isolation; deploy on a trusted network or behind an authenticated proxy. REST methods shown are intended client usage: existing REST handlers do not enforce HTTP methods. Unknown JSON request properties are ignored by REST decoding. CORS is controlled by CORS_ALLOWED_ORIGINS for REST and GVS_MCP_ALLOWED_ORIGINS for MCP; file routes do not use those middleware. CGResult is also the standalone JSON object written by cg to stdout, with CLI progress on stderr. This contract targets the GVS v0.1.0 release. This document is a repository artifact, not an automatically served /openapi.json endpoint."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8082",
+      "description": "Default local server; replace with your deployment URL."
+    }
+  ],
+  "tags": [
+    {
+      "name": "Scans",
+      "description": "Asynchronous govulncheck and callgraph submission."
+    },
+    {
+      "name": "Tasks",
+      "description": "Polling, cancellation, and live progress."
+    },
+    {
+      "name": "Service",
+      "description": "Liveness and conditional CORS preflight."
+    },
+    {
+      "name": "Files",
+      "description": "Static web UI and graph-cache downloads."
+    },
+    {
+      "name": "MCP",
+      "description": "Optional JSON-RPC Streamable HTTP endpoint and tool schemas."
+    }
+  ],
+  "paths": {
+    "/scan": {
+      "post": {
+        "tags": [
+          "Scans"
+        ],
+        "operationId": "startRepositoryScan",
+        "summary": "Start a repository-wide govulncheck scan",
+        "description": "Runs govulncheck across discovered Go modules. No CVE filter is applied. Scan failures are asynchronous task results, not submission HTTP errors.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScanRequest"
+              },
+              "example": {
+                "repo": "https://github.com/k37y/gvs-example-one",
+                "branchOrCommit": "main"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Task accepted or an existing idempotent task returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskAccepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScanBusy"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServerStopping"
+          }
+        }
+      },
+      "options": {
+        "tags": [
+          "Service"
+        ],
+        "operationId": "preflightStartRepositoryScan",
+        "summary": "Handle configured CORS preflight",
+        "description": "Only intercepted when CORS_ALLOWED_ORIGINS is configured. Otherwise the route handler runs normally; use the documented GET/POST method for application requests.",
+        "responses": {
+          "204": {
+            "$ref": "#/components/responses/Preflight"
+          },
+          "default": {
+            "description": "With CORS disabled, the underlying route handler determines the response as documented on its GET/POST operation."
+          }
+        }
+      }
+    },
+    "/callgraph": {
+      "post": {
+        "tags": [
+          "Scans"
+        ],
+        "operationId": "startCallgraphScan",
+        "summary": "Start CVE or manual-symbol callgraph analysis",
+        "description": "Returns HTTP 200 with a taskId (not 202 and not the scan result). Cached results still use the task lifecycle. Only one scan runs at a time across both submission routes and MCP.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallgraphRequest"
+              },
+              "example": {
+                "repo": "https://github.com/k37y/gvs-example-one",
+                "branchOrCommit": "main",
+                "cve": "CVE-2024-45338"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Task accepted or an existing idempotent task returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskAccepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "429": {
+            "$ref": "#/components/responses/ScanBusy"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServerStopping"
+          },
+          "409": {
+            "$ref": "#/components/responses/RequestConflict"
+          }
+        }
+      },
+      "options": {
+        "tags": [
+          "Service"
+        ],
+        "operationId": "preflightStartCallgraphScan",
+        "summary": "Handle configured CORS preflight",
+        "description": "Only intercepted when CORS_ALLOWED_ORIGINS is configured. Otherwise the route handler runs normally; use the documented GET/POST method for application requests.",
+        "responses": {
+          "204": {
+            "$ref": "#/components/responses/Preflight"
+          },
+          "default": {
+            "description": "With CORS disabled, the underlying route handler determines the response as documented on its GET/POST operation."
+          }
+        }
+      }
+    },
+    "/status": {
+      "post": {
+        "tags": [
+          "Tasks"
+        ],
+        "operationId": "getTaskStatus",
+        "summary": "Poll task status and available output",
+        "description": "Tasks live in memory; unknown or expired IDs return 404. Terminal tasks expire after GVS_TASK_TTL (default 24h). A failed or cancelled scan still returns HTTP 200 here, with its task status and error. Output and logs are absent until published by the worker.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskIDRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Current task status and any available output, error, and logs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskStatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/TaskNotFound"
+          }
+        }
+      },
+      "options": {
+        "tags": [
+          "Service"
+        ],
+        "operationId": "preflightGetTaskStatus",
+        "summary": "Handle configured CORS preflight",
+        "description": "Only intercepted when CORS_ALLOWED_ORIGINS is configured. Otherwise the route handler runs normally; use the documented GET/POST method for application requests.",
+        "responses": {
+          "204": {
+            "$ref": "#/components/responses/Preflight"
+          },
+          "default": {
+            "description": "With CORS disabled, the underlying route handler determines the response as documented on its GET/POST operation."
+          }
+        }
+      }
+    },
+    "/cancel": {
+      "post": {
+        "tags": [
+          "Tasks"
+        ],
+        "operationId": "cancelTask",
+        "summary": "Request cancellation of an active task",
+        "description": "An already cancelled task is acknowledged again. A completed or failed task cannot be cancelled and returns 400. Cancellation acknowledgment does not mean the worker has exited.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskIDRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Cancellation acknowledged.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelAcknowledgement"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/TaskNotFound"
+          }
+        }
+      },
+      "options": {
+        "tags": [
+          "Service"
+        ],
+        "operationId": "preflightCancelTask",
+        "summary": "Handle configured CORS preflight",
+        "description": "Only intercepted when CORS_ALLOWED_ORIGINS is configured. Otherwise the route handler runs normally; use the documented GET/POST method for application requests.",
+        "responses": {
+          "204": {
+            "$ref": "#/components/responses/Preflight"
+          },
+          "default": {
+            "description": "With CORS disabled, the underlying route handler determines the response as documented on its GET/POST operation."
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "tags": [
+          "Service"
+        ],
+        "operationId": "checkHealth",
+        "summary": "Check HTTP server liveness",
+        "description": "Returns OK without checking scanner dependencies, task capacity, or AI connectivity.",
+        "responses": {
+          "200": {
+            "description": "Server is responding.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string",
+                  "const": "OK"
+                }
+              }
+            }
+          }
+        }
+      },
+      "options": {
+        "tags": [
+          "Service"
+        ],
+        "operationId": "preflightCheckHealth",
+        "summary": "Handle configured CORS preflight",
+        "description": "Only intercepted when CORS_ALLOWED_ORIGINS is configured. Otherwise the route handler runs normally; use the documented GET/POST method for application requests.",
+        "responses": {
+          "204": {
+            "$ref": "#/components/responses/Preflight"
+          },
+          "default": {
+            "description": "With CORS disabled, the underlying route handler determines the response as documented on its GET/POST operation."
+          }
+        }
+      }
+    },
+    "/progress/{taskId}": {
+      "parameters": [
+        {
+          "name": "taskId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Task ID returned by /scan or /callgraph."
+        }
+      ],
+      "get": {
+        "tags": [
+          "Tasks"
+        ],
+        "operationId": "streamTaskProgress",
+        "summary": "Stream live task progress as SSE",
+        "description": "Connect while the task is active. Events use data: lines with no event name. Scanner log events use id: scanner-N (one-based captured stderr line number); other progress events send an empty id. Multiline messages use multiple data: lines. The stream closes silently when the worker exits. No replay, heartbeat, or Last-Event-ID support is provided. The bounded channel can drop messages, and concurrent subscribers compete for messages rather than receiving a broadcast. Use /status for authoritative results and captured logs. Terminal or unknown tasks have no stream and return 404.",
+        "responses": {
+          "200": {
+            "description": "Live SSE text stream.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-cache"
+                }
+              }
+            },
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "id:\ndata: Cloning repository...\n\nid: scanner-1\ndata: Building call graph...\n\n"
+              }
+            }
+          },
+          "400": {
+            "description": "Missing task ID (request to /progress/).",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Progress stream not found.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Response writer does not support streaming.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "options": {
+        "tags": [
+          "Service"
+        ],
+        "operationId": "preflightStreamTaskProgress",
+        "summary": "Handle configured CORS preflight",
+        "description": "Only intercepted when CORS_ALLOWED_ORIGINS is configured. Otherwise the route handler runs normally; use the documented GET/POST method for application requests.",
+        "responses": {
+          "204": {
+            "$ref": "#/components/responses/Preflight"
+          },
+          "default": {
+            "description": "With CORS disabled, the underlying route handler determines the response as documented on its GET/POST operation."
+          }
+        }
+      }
+    },
+    "/": {
+      "get": {
+        "tags": [
+          "Files"
+        ],
+        "operationId": "getWebUI",
+        "summary": "Get the web UI",
+        "description": "Serves site/index.html from the server working directory. These file routes do not use the REST CORS middleware. Standard conditional and byte-range requests are handled by net/http.FileServer.",
+        "responses": {
+          "200": {
+            "description": "File content or directory listing.",
+            "headers": {
+              "Last-Modified": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "HTTP date when available."
+              },
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string",
+                  "const": "bytes"
+                }
+              }
+            },
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "Partial file content requested with Range.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "301": {
+            "$ref": "#/components/responses/FileRedirect"
+          },
+          "304": {
+            "$ref": "#/components/responses/NotModified"
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidFileRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/FileForbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/FileNotFound"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "416": {
+            "$ref": "#/components/responses/RangeNotSatisfiable"
+          },
+          "500": {
+            "$ref": "#/components/responses/FileError"
+          }
+        }
+      },
+      "head": {
+        "tags": [
+          "Files"
+        ],
+        "operationId": "getWebUIHeaders",
+        "summary": "Get file response headers without a body",
+        "description": "Same file and conditional/range behavior as GET, without a response body.",
+        "responses": {
+          "200": {
+            "description": "File headers; no body."
+          },
+          "206": {
+            "description": "Partial content headers; no body."
+          },
+          "301": {
+            "description": "Canonical path redirect; Location identifies the destination."
+          },
+          "304": {
+            "description": "Not modified."
+          },
+          "400": {
+            "description": "Invalid file request."
+          },
+          "403": {
+            "description": "File access denied."
+          },
+          "404": {
+            "description": "File or directory not found."
+          },
+          "412": {
+            "description": "HTTP precondition failed."
+          },
+          "416": {
+            "description": "Requested range cannot be satisfied."
+          },
+          "500": {
+            "description": "File serving error."
+          }
+        }
+      }
+    },
+    "/{assetPath}": {
+      "parameters": [
+        {
+          "name": "assetPath",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Relative file path; may include multiple slash-separated segments."
+        }
+      ],
+      "get": {
+        "tags": [
+          "Files"
+        ],
+        "operationId": "getStaticAsset",
+        "summary": "Get a static web asset",
+        "description": "Serves files under ./site. assetPath represents a relative path that can contain slash-separated segments; OpenAPI path templates do not formally model catch-all routing. Concrete API and graph routes take precedence. This is not an API result endpoint. These file routes do not use the REST CORS middleware. Standard conditional and byte-range requests are handled by net/http.FileServer.",
+        "responses": {
+          "200": {
+            "description": "File content or directory listing.",
+            "headers": {
+              "Last-Modified": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "HTTP date when available."
+              },
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string",
+                  "const": "bytes"
+                }
+              }
+            },
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "Partial file content requested with Range.",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "301": {
+            "$ref": "#/components/responses/FileRedirect"
+          },
+          "304": {
+            "$ref": "#/components/responses/NotModified"
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidFileRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/FileForbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/FileNotFound"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "416": {
+            "$ref": "#/components/responses/RangeNotSatisfiable"
+          },
+          "500": {
+            "$ref": "#/components/responses/FileError"
+          }
+        }
+      },
+      "head": {
+        "tags": [
+          "Files"
+        ],
+        "operationId": "getStaticAssetHeaders",
+        "summary": "Get file response headers without a body",
+        "description": "Same file and conditional/range behavior as GET, without a response body.",
+        "responses": {
+          "200": {
+            "description": "File headers; no body."
+          },
+          "206": {
+            "description": "Partial content headers; no body."
+          },
+          "301": {
+            "description": "Canonical path redirect; Location identifies the destination."
+          },
+          "304": {
+            "description": "Not modified."
+          },
+          "400": {
+            "description": "Invalid file request."
+          },
+          "403": {
+            "description": "File access denied."
+          },
+          "404": {
+            "description": "File or directory not found."
+          },
+          "412": {
+            "description": "HTTP precondition failed."
+          },
+          "416": {
+            "description": "Requested range cannot be satisfied."
+          },
+          "500": {
+            "description": "File serving error."
+          }
+        }
+      }
+    },
+    "/graph/": {
+      "get": {
+        "tags": [
+          "Files"
+        ],
+        "operationId": "listGraphs",
+        "summary": "Get the graph directory",
+        "description": "Serves the graph-cache root using the Go file server, including directory listings. Requests to /graph without a trailing slash are redirected here. These file routes do not use the REST CORS middleware. Standard conditional and byte-range requests are handled by net/http.FileServer.",
+        "responses": {
+          "200": {
+            "description": "File content or directory listing.",
+            "headers": {
+              "Last-Modified": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "HTTP date when available."
+              },
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string",
+                  "const": "bytes"
+                }
+              }
+            },
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "Partial file content requested with Range.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "301": {
+            "$ref": "#/components/responses/FileRedirect"
+          },
+          "304": {
+            "$ref": "#/components/responses/NotModified"
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidFileRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/FileForbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/FileNotFound"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "416": {
+            "$ref": "#/components/responses/RangeNotSatisfiable"
+          },
+          "500": {
+            "$ref": "#/components/responses/FileError"
+          }
+        }
+      },
+      "head": {
+        "tags": [
+          "Files"
+        ],
+        "operationId": "listGraphsHeaders",
+        "summary": "Get file response headers without a body",
+        "description": "Same file and conditional/range behavior as GET, without a response body.",
+        "responses": {
+          "200": {
+            "description": "File headers; no body."
+          },
+          "206": {
+            "description": "Partial content headers; no body."
+          },
+          "301": {
+            "description": "Canonical path redirect; Location identifies the destination."
+          },
+          "304": {
+            "description": "Not modified."
+          },
+          "400": {
+            "description": "Invalid file request."
+          },
+          "403": {
+            "description": "File access denied."
+          },
+          "404": {
+            "description": "File or directory not found."
+          },
+          "412": {
+            "description": "HTTP precondition failed."
+          },
+          "416": {
+            "description": "Requested range cannot be satisfied."
+          },
+          "500": {
+            "description": "File serving error."
+          }
+        }
+      }
+    },
+    "/graph/{graphPath}": {
+      "parameters": [
+        {
+          "name": "graphPath",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Relative file path; may include multiple slash-separated segments."
+        }
+      ],
+      "get": {
+        "tags": [
+          "Files"
+        ],
+        "operationId": "getGraph",
+        "summary": "Download a graph artifact",
+        "description": "Serves graph-cache files, normally SVGs whose URLs are returned in CGResult.GraphPaths. graphPath represents the complete relative path, usually CVE/repository/branch/algorithm/file.svg, and can contain slashes; OpenAPI cannot formally express this catch-all. Directory paths may return HTML listings or redirects. These file routes do not use the REST CORS middleware. Standard conditional and byte-range requests are handled by net/http.FileServer.",
+        "responses": {
+          "200": {
+            "description": "File content or directory listing.",
+            "headers": {
+              "Last-Modified": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "HTTP date when available."
+              },
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string",
+                  "const": "bytes"
+                }
+              }
+            },
+            "content": {
+              "image/svg+xml": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "Partial file content requested with Range.",
+            "content": {
+              "image/svg+xml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "301": {
+            "$ref": "#/components/responses/FileRedirect"
+          },
+          "304": {
+            "$ref": "#/components/responses/NotModified"
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidFileRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/FileForbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/FileNotFound"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "416": {
+            "$ref": "#/components/responses/RangeNotSatisfiable"
+          },
+          "500": {
+            "$ref": "#/components/responses/FileError"
+          }
+        }
+      },
+      "head": {
+        "tags": [
+          "Files"
+        ],
+        "operationId": "getGraphHeaders",
+        "summary": "Get file response headers without a body",
+        "description": "Same file and conditional/range behavior as GET, without a response body.",
+        "responses": {
+          "200": {
+            "description": "File headers; no body."
+          },
+          "206": {
+            "description": "Partial content headers; no body."
+          },
+          "301": {
+            "description": "Canonical path redirect; Location identifies the destination."
+          },
+          "304": {
+            "description": "Not modified."
+          },
+          "400": {
+            "description": "Invalid file request."
+          },
+          "403": {
+            "description": "File access denied."
+          },
+          "404": {
+            "description": "File or directory not found."
+          },
+          "412": {
+            "description": "HTTP precondition failed."
+          },
+          "416": {
+            "description": "Requested range cannot be satisfied."
+          },
+          "500": {
+            "description": "File serving error."
+          }
+        }
+      }
+    },
+    "/progress/": {
+      "get": {
+        "tags": [
+          "Tasks"
+        ],
+        "operationId": "missingProgressTask",
+        "summary": "Reject a progress request without a task ID",
+        "responses": {
+          "400": {
+            "description": "Missing task ID.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "options": {
+        "tags": [
+          "Service"
+        ],
+        "operationId": "preflightMissingProgressTask",
+        "summary": "Handle configured CORS preflight",
+        "responses": {
+          "204": {
+            "$ref": "#/components/responses/Preflight"
+          },
+          "400": {
+            "description": "Missing task ID when CORS is disabled.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mcp": {
+      "summary": "Optional MCP Streamable HTTP endpoint",
+      "description": "Registered only with GVS_MCP=1; otherwise explicitly returns 404 rather than falling through to the static site. Default transport is Stateless:true, JSONResponse:true with 1 MiB request bodies, no event store and no persistent session IDs. GET and DELETE are unsupported by default. Origin protection is explicit allowlisting; SDK DNS-rebinding protection additionally rejects a non-loopback Host when the local connection address is loopback. This is not a general Host allowlist for non-loopback connections. OPTIONS bypasses the SDK Host check. No cross-origin credentials flag is sent.",
+      "parameters": [
+        {
+          "name": "Origin",
+          "in": "header",
+          "schema": {
+            "type": "string"
+          },
+          "description": "Optional. If present, must be exactly one explicit HTTP(S) origin listed in GVS_MCP_ALLOWED_ORIGINS. No wildcard, null, path, query, fragment, or credentials. Scheme and lowercase host:port are compared; default ports are not normalized. With the default empty allowlist, all Origin-bearing requests are rejected; non-browser requests omitting Origin remain allowed."
+        }
+      ],
+      "post": {
+        "summary": "Exchange MCP JSON-RPC messages",
+        "operationId": "postMcp",
+        "tags": [
+          "MCP"
+        ],
+        "description": "Optional stateless Streamable HTTP transport, not a REST resource. Ordinary calls return application/json; accepted notifications and responses return HTTP 202 without a body. Each HTTP POST has an ephemeral session. Legacy initialization is supported but not required before independent calls. Normal tools are asynchronous scan-control operations: submit, poll every five seconds, then retrieve all result chunks. Modern 2026-07-28 calls require per-request metadata and Mcp-Method/Mcp-Name headers; current browser CORS preflight does not allow those two modern headers, so use a legacy protocol in browsers or a non-browser client. subscriptions/listen is an SDK POST SSE exception even with JSONResponse:true. No API authentication or authorization middleware is installed; Authorization is merely CORS-allowlisted.",
+        "parameters": [
+          {
+            "name": "Accept",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "application/json, text/event-stream",
+            "description": "Must accept both JSON and SSE even for normal JSON responses. SDK accepts application/* plus text/*, or */*, and ignores media parameters including q."
+          },
+          {
+            "name": "Mcp-Protocol-Version",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional for legacy requests; transport defaults to 2025-03-26 when absent. Supported: 2024-11-05, 2025-03-26, 2025-06-18, 2025-11-25, 2026-07-28. Modern calls require matching params._meta[\"io.modelcontextprotocol/protocolVersion\"]. Unsupported versions fail."
+          },
+          {
+            "name": "Mcp-Method",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required for 2026-07-28 requests/notifications and must equal the JSON-RPC method. Not checked for older versions. Not allowed by current browser CORS preflight allowlist."
+          },
+          {
+            "name": "Mcp-Name",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required for modern tools/call, prompts/get, resources/read; equals tool/prompt name or resource URI. Not allowed by current browser CORS preflight allowlist."
+          },
+          {
+            "name": "Mcp-Session-Id",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Ignored in default stateless mode; server does not issue a session ID. This is not a taskId."
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must be omitted on POST; any presence causes HTTP 400. CORS allowlisting this name does not enable stream resumption."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MCPPostBody"
+              },
+              "examples": {
+                "status": {
+                  "value": {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                      "name": "gvs_status",
+                      "arguments": {
+                        "taskId": "task-id-from-submission"
+                      }
+                    }
+                  }
+                },
+                "listTools": {
+                  "value": {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/list",
+                    "params": {}
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON-RPC response. Legacy protocol errors normally retain HTTP 200. Application tool errors also retain HTTP 200 with result.isError:true. subscriptions/listen instead uses SSE event: message frames containing JSON-RPC notifications/responses.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MCPResponseBody"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "POST subscriptions/listen only. SSE message events carry JSON-RPC messages. First notification acknowledges accepted subscriptions. No resumable event store is configured."
+                }
+              }
+            },
+            "headers": {
+              "Vary": {
+                "$ref": "#/components/headers/MCPVary"
+              },
+              "Access-Control-Allow-Origin": {
+                "$ref": "#/components/headers/MCPAccessControlAllowOrigin"
+              },
+              "Access-Control-Expose-Headers": {
+                "$ref": "#/components/headers/MCPAccessControlExposeHeaders"
+              },
+              "Cache-Control": {
+                "$ref": "#/components/headers/MCPCacheControl"
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted notification(s) or client response(s); empty body. Client responses are syntactically accepted but no persistent server-initiated call exists across requests.",
+            "headers": {
+              "Vary": {
+                "$ref": "#/components/headers/MCPVary"
+              },
+              "Access-Control-Allow-Origin": {
+                "$ref": "#/components/headers/MCPAccessControlAllowOrigin"
+              },
+              "Access-Control-Expose-Headers": {
+                "$ref": "#/components/headers/MCPAccessControlExposeHeaders"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/MCPError400"
+          },
+          "403": {
+            "$ref": "#/components/responses/MCPError403"
+          },
+          "404": {
+            "$ref": "#/components/responses/MCPError404"
+          },
+          "413": {
+            "description": "HTTP request body exceeds 1048576 bytes.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "headers": {
+              "Vary": {
+                "$ref": "#/components/headers/MCPVary"
+              },
+              "Access-Control-Allow-Origin": {
+                "$ref": "#/components/headers/MCPAccessControlAllowOrigin"
+              },
+              "Access-Control-Expose-Headers": {
+                "$ref": "#/components/headers/MCPAccessControlExposeHeaders"
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type is not application/json (parameters such as charset are accepted).",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "headers": {
+              "Vary": {
+                "$ref": "#/components/headers/MCPVary"
+              },
+              "Access-Control-Allow-Origin": {
+                "$ref": "#/components/headers/MCPAccessControlAllowOrigin"
+              },
+              "Access-Control-Expose-Headers": {
+                "$ref": "#/components/headers/MCPAccessControlExposeHeaders"
+              }
+            }
+          },
+          "500": {
+            "description": "SDK connection/stream setup failure.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "headers": {
+              "Vary": {
+                "$ref": "#/components/headers/MCPVary"
+              },
+              "Access-Control-Allow-Origin": {
+                "$ref": "#/components/headers/MCPAccessControlAllowOrigin"
+              },
+              "Access-Control-Expose-Headers": {
+                "$ref": "#/components/headers/MCPAccessControlExposeHeaders"
+              }
+            }
+          }
+        }
+      },
+      "options": {
+        "summary": "Check MCP browser preflight",
+        "operationId": "optionsMcp",
+        "tags": [
+          "MCP"
+        ],
+        "description": "Handled by the GVS wrapper before SDK host/protocol/media checks. Origin checks still apply. Does not create an MCP session.",
+        "parameters": [
+          {
+            "name": "Access-Control-Request-Method",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Omit/empty or POST only; any other nonempty value returns 405."
+          },
+          {
+            "name": "Access-Control-Request-Headers",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated names, case-insensitive: Content-Type, Accept, Authorization, Mcp-Protocol-Version, Mcp-Session-Id, Last-Event-Id. Any other name returns 403. Mcp-Method and Mcp-Name are not allowlisted."
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Preflight accepted; empty body.",
+            "headers": {
+              "Vary": {
+                "$ref": "#/components/headers/MCPVary"
+              },
+              "Access-Control-Allow-Origin": {
+                "$ref": "#/components/headers/MCPAccessControlAllowOrigin"
+              },
+              "Access-Control-Expose-Headers": {
+                "$ref": "#/components/headers/MCPAccessControlExposeHeaders"
+              },
+              "Access-Control-Allow-Methods": {
+                "$ref": "#/components/headers/MCPAccessControlAllowMethods"
+              },
+              "Access-Control-Allow-Headers": {
+                "$ref": "#/components/headers/MCPAccessControlAllowHeaders"
+              }
+            }
+          },
+          "403": {
+            "description": "Origin rejected or requested header not allowed.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "headers": {
+              "Vary": {
+                "$ref": "#/components/headers/MCPVary"
+              },
+              "Access-Control-Allow-Origin": {
+                "$ref": "#/components/headers/MCPAccessControlAllowOrigin"
+              },
+              "Access-Control-Expose-Headers": {
+                "$ref": "#/components/headers/MCPAccessControlExposeHeaders"
+              }
+            }
+          },
+          "405": {
+            "description": "Requested preflight method is nonempty and not POST. This wrapper response does not add an Allow header.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "headers": {
+              "Vary": {
+                "$ref": "#/components/headers/MCPVary"
+              },
+              "Access-Control-Allow-Origin": {
+                "$ref": "#/components/headers/MCPAccessControlAllowOrigin"
+              },
+              "Access-Control-Expose-Headers": {
+                "$ref": "#/components/headers/MCPAccessControlExposeHeaders"
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/MCPError404"
+          }
+        }
+      },
+      "x-mcp-methods": {
+        "initialize": {
+          "description": "Legacy handshake (versions before 2026-07-28). Server name is gvs and version is the GVS build version. Stateless requests do not preserve negotiated session state; send the desired protocol header on later requests. Removed for new-protocol calls.",
+          "params": {
+            "$ref": "#/components/schemas/MCPInitializeParams"
+          },
+          "result": {
+            "$ref": "#/components/schemas/MCPInitializeResult"
+          }
+        },
+        "notifications/initialized": {
+          "description": "Legacy initialized notification; accepted with HTTP 202 and no body. No persistent session is created."
+        },
+        "ping": {
+          "description": "Legacy liveness call returning an empty object. Removed for new-protocol calls."
+        },
+        "server/discover": {
+          "description": "Available only with 2026-07-28 per-request metadata and headers; replaces legacy initialization.",
+          "params": {
+            "type": "object",
+            "properties": {
+              "_meta": {
+                "$ref": "#/components/schemas/MCPMeta"
+              }
+            },
+            "required": [
+              "_meta"
+            ]
+          },
+          "result": {
+            "$ref": "#/components/schemas/MCPDiscoverResult"
+          }
+        },
+        "tools/list": {
+          "description": "Lists the five GVS tools and their JSON input/output schemas.",
+          "params": {
+            "$ref": "#/components/schemas/MCPListParams"
+          },
+          "result": {
+            "$ref": "#/components/schemas/MCPListToolsResult"
+          }
+        },
+        "tools/call": {
+          "description": "Calls a named GVS tool. Unknown tool names are protocol errors; invalid tool arguments may yield text-only isError results.",
+          "params": {
+            "$ref": "#/components/schemas/MCPCallToolParams"
+          },
+          "result": {
+            "$ref": "#/components/schemas/MCPCallToolResult"
+          }
+        },
+        "resources/list": {
+          "description": "SDK method is available, but GVS registers no resources and advertises no resources capability.",
+          "params": {
+            "$ref": "#/components/schemas/MCPListParams"
+          },
+          "result": {
+            "$ref": "#/components/schemas/MCPListResourcesResult"
+          }
+        },
+        "resources/templates/list": {
+          "description": "No registered resource templates.",
+          "params": {
+            "$ref": "#/components/schemas/MCPListParams"
+          },
+          "result": {
+            "$ref": "#/components/schemas/MCPListResourceTemplatesResult"
+          }
+        },
+        "resources/read": {
+          "description": "No registered resources; returns JSON-RPC resource-not-found error, not a task artifact. Retrieve task results with gvs_read_result instead.",
+          "params": {
+            "$ref": "#/components/schemas/MCPReadResourceParams"
+          }
+        },
+        "resources/subscribe": {
+          "description": "Legacy SDK method returns method-not-found because GVS has no SubscribeHandler; removed in new protocol."
+        },
+        "resources/unsubscribe": {
+          "description": "Legacy SDK method returns method-not-found because GVS has no UnsubscribeHandler; removed in new protocol."
+        },
+        "prompts/list": {
+          "description": "No registered prompts; empty list.",
+          "params": {
+            "$ref": "#/components/schemas/MCPListParams"
+          },
+          "result": {
+            "$ref": "#/components/schemas/MCPListPromptsResult"
+          }
+        },
+        "prompts/get": {
+          "description": "No registered prompts; unknown prompt is JSON-RPC invalid params."
+        },
+        "completion/complete": {
+          "description": "No completion handler; valid-shaped calls return method-not-found, malformed params may return invalid params."
+        },
+        "logging/setLevel": {
+          "description": "Legacy SDK log-level setting exists but logging capability is disabled and ephemeral session settings do not persist. Removed for new-protocol calls."
+        },
+        "notifications/cancelled": {
+          "description": "SDK request cancellation notification; a separate stateless POST cannot cancel another request/session or a background GVS scan. Use gvs_cancel for scans."
+        },
+        "notifications/progress": {
+          "description": "SDK notification accepted; GVS configures no progress-notification handler."
+        },
+        "notifications/roots/list_changed": {
+          "description": "Legacy SDK notification accepted; GVS configures no roots-list-change handler."
+        },
+        "subscriptions/listen": {
+          "description": "SDK POST SSE exception to JSONResponse:true. Intended for 2026-07-28; request notifications.toolsListChanged to hold an acknowledged stream open. GVS does not dynamically change tools and does not offer scan-progress/resource subscriptions. GET streams and Last-Event-ID resumption remain unsupported. For modern requests disconnect cancels the listener.",
+          "params": {
+            "$ref": "#/components/schemas/MCPSubscriptionsListenParams"
+          },
+          "firstNotification": {
+            "method": "notifications/subscriptions/acknowledged",
+            "params": {
+              "$ref": "#/components/schemas/MCPSubscriptionAcknowledgedParams"
+            }
+          }
+        }
+      },
+      "x-mcp-tools": {
+        "gvs_scan": {
+          "inputSchema": {
+            "$ref": "#/components/schemas/MCPScanInput"
+          },
+          "structuredOutputSchema": {
+            "$ref": "#/components/schemas/MCPSubmissionOutput"
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": true
+          }
+        },
+        "gvs_manual_scan": {
+          "inputSchema": {
+            "$ref": "#/components/schemas/MCPManualScanInput"
+          },
+          "structuredOutputSchema": {
+            "$ref": "#/components/schemas/MCPSubmissionOutput"
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": true
+          }
+        },
+        "gvs_status": {
+          "inputSchema": {
+            "$ref": "#/components/schemas/MCPTaskInput"
+          },
+          "structuredOutputSchema": {
+            "$ref": "#/components/schemas/MCPStatusOutput"
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          }
+        },
+        "gvs_cancel": {
+          "inputSchema": {
+            "$ref": "#/components/schemas/MCPTaskInput"
+          },
+          "structuredOutputSchema": {
+            "$ref": "#/components/schemas/MCPSubmissionOutput"
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": true,
+            "openWorldHint": false
+          },
+          "description": "Cancellation is asynchronous and repeated requests are harmless; continue gvs_status polling until cancelled. Completed/failed tasks cannot be cancelled."
+        },
+        "gvs_read_result": {
+          "inputSchema": {
+            "$ref": "#/components/schemas/MCPReadResultInput"
+          },
+          "structuredOutputSchema": {
+            "$ref": "#/components/schemas/MCPChunkOutput"
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          },
+          "description": "Reads terminal task artifact containing available output/error/logs. Follow nextCursor until eof and concatenate content to recover full JSON."
+        }
+      },
+      "x-mcp-configuration": {
+        "enabledWhen": "GVS_MCP=1",
+        "allowedOrigins": "GVS_MCP_ALLOWED_ORIGINS (comma-separated explicit origins; empty by default)",
+        "publicURL": "GVS_PUBLIC_URL controls URLs used by the shared task backend; does not enable MCP or relax Origin/Host checks.",
+        "stateless": true,
+        "jsonResponse": true,
+        "maxRequestBodyBytes": 1048576,
+        "applicationToolResultLimitBytes": 65536,
+        "maxChunkContentBytes": 16384,
+        "supportedProtocolVersions": [
+          "2026-07-28",
+          "2025-11-25",
+          "2025-06-18",
+          "2025-03-26",
+          "2024-11-05"
+        ]
+      },
+      "x-mcp-limitations": [
+        "No persistent session, GET SSE, Last-Event-ID resumption, resource/prompt registrations, progress stream for scan tasks, or server-to-client sampling/elicitation integration.",
+        "POST subscriptions/listen is inherited from the vendored SDK and does support SSE; only tool-list-change subscriptions can be accepted.",
+        "Current CORS header allowlist prevents ordinary modern-protocol browser preflights using required Mcp-Method/Mcp-Name headers.",
+        "Contract describes default SDK compatibility settings. MCPGODEBUG=allowsessionsinstateless=1 restores legacy session-header behavior and DELETE no-op handling; other SDK compatibility flags can alter serialization/errors."
+      ],
+      "get": {
+        "summary": "Reject unsupported MCP GET",
+        "operationId": "getMcpUnsupported",
+        "tags": [
+          "MCP"
+        ],
+        "description": "No GET transport is enabled. HEAD responses have no body. Origin and SDK Host/protocol checks precede method rejection. Default stateless transport allows only POST; OPTIONS is handled separately by the GVS wrapper.",
+        "responses": {
+          "405": {
+            "description": "Method Not Allowed.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "headers": {
+              "Allow": {
+                "$ref": "#/components/headers/MCPAllow"
+              },
+              "Vary": {
+                "$ref": "#/components/headers/MCPVary"
+              },
+              "Access-Control-Allow-Origin": {
+                "$ref": "#/components/headers/MCPAccessControlAllowOrigin"
+              },
+              "Access-Control-Expose-Headers": {
+                "$ref": "#/components/headers/MCPAccessControlExposeHeaders"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/MCPError400"
+          },
+          "403": {
+            "$ref": "#/components/responses/MCPError403"
+          },
+          "404": {
+            "$ref": "#/components/responses/MCPError404"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Reject unsupported MCP DELETE",
+        "operationId": "deleteMcpUnsupported",
+        "tags": [
+          "MCP"
+        ],
+        "description": "No DELETE transport is enabled. HEAD responses have no body. Origin and SDK Host/protocol checks precede method rejection. Default stateless transport allows only POST; OPTIONS is handled separately by the GVS wrapper.",
+        "responses": {
+          "405": {
+            "description": "Method Not Allowed.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "headers": {
+              "Allow": {
+                "$ref": "#/components/headers/MCPAllow"
+              },
+              "Vary": {
+                "$ref": "#/components/headers/MCPVary"
+              },
+              "Access-Control-Allow-Origin": {
+                "$ref": "#/components/headers/MCPAccessControlAllowOrigin"
+              },
+              "Access-Control-Expose-Headers": {
+                "$ref": "#/components/headers/MCPAccessControlExposeHeaders"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/MCPError400"
+          },
+          "403": {
+            "$ref": "#/components/responses/MCPError403"
+          },
+          "404": {
+            "$ref": "#/components/responses/MCPError404"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Human-readable error; REST errors do not include a machine-readable code."
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "TaskAccepted": {
+        "type": "object",
+        "properties": {
+          "taskId": {
+            "type": "string",
+            "description": "Opaque task identifier. New tasks use 32 lowercase hexadecimal characters."
+          }
+        },
+        "required": [
+          "taskId"
+        ]
+      },
+      "TaskIDRequest": {
+        "type": "object",
+        "properties": {
+          "taskId": {
+            "type": "string",
+            "description": "Identifier returned by a submission.",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "taskId"
+        ]
+      },
+      "TaskStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "running",
+          "completed",
+          "failed",
+          "cancelled"
+        ]
+      },
+      "TaskStatusResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/TaskStatus"
+          },
+          "output": {
+            "description": "Present when the worker has nonempty stdout or cached output. The task layer preserves any valid JSON value, including partial objects, arrays, scalars, and null; it does not validate the scanner's result structure. Non-JSON stdout is returned as a string. Failed or cancelled tasks can retain partial output. Complete callgraph and repository scan results should be validated separately against CGResult and ScanResult respectively. The x-complete-result-schemas extension identifies those schemas but does not constrain this transport envelope.",
+            "x-complete-result-schemas": {
+              "callgraph": {
+                "$ref": "#/components/schemas/CGResult"
+              },
+              "scan": {
+                "$ref": "#/components/schemas/ScanResult"
+              }
+            }
+          },
+          "error": {
+            "type": "string",
+            "description": "Present when the worker reports an error."
+          },
+          "logs": {
+            "type": "string",
+            "description": "Captured scanner stderr, including progress; omitted when empty."
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "CancelAcknowledgement": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "cancelled"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "description": "Acknowledges a cancellation request; the worker publishes terminal task status after it exits. Poll /status to observe completion."
+      },
+      "ScanRequest": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "Git repository URL or clone source."
+          },
+          "branchOrCommit": {
+            "type": "string",
+            "description": "Branch name or commit hash (7–40 hexadecimal characters trigger commit checkout)."
+          },
+          "cve": {
+            "type": "string",
+            "description": "Accepted for compatibility but ignored by the govulncheck scan, which checks all known vulnerabilities."
+          }
+        },
+        "description": "The handler accepts a JSON object without synchronous required-field validation. Supply repo and branchOrCommit for a useful scan; cloning and scanning errors are reported asynchronously via /status."
+      },
+      "CallgraphRequest": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "Git repository URL or clone source.",
+            "minLength": 1
+          },
+          "branchOrCommit": {
+            "type": "string",
+            "description": "Branch name or commit hash (7–40 hexadecimal characters trigger commit checkout).",
+            "minLength": 1
+          },
+          "cve": {
+            "type": "string",
+            "description": "CVE or Go vulnerability ID; normalized to uppercase. Required unless all manual scan fields are nonempty. Manual fields override advisory symbol lookup."
+          },
+          "library": {
+            "type": "string",
+            "description": "Affected package import path for manual scanning."
+          },
+          "symbol": {
+            "type": "string",
+            "description": "Comma-separated affected symbols for manual scanning. The REST field is singular: symbol."
+          },
+          "fixversion": {
+            "type": "string",
+            "description": "Manual fixed version or comma-separated introduced:fixed ranges."
+          },
+          "algo": {
+            "type": "string",
+            "description": "Case-insensitive algorithm. Omitted or empty selects rta.",
+            "pattern": "^([rR][tT][aA]|[vV][tT][aA]|[cC][hH][aA]|[sS][tT][aA][tT][iI][cC])?$",
+            "default": "rta"
+          },
+          "requestId": {
+            "type": "string",
+            "description": "Optional idempotency key. Reusing a nonempty key with the same normalized arguments returns the existing task; different arguments return 409. Keys expire with their tasks. Empty disables deduplication.",
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "repo",
+          "branchOrCommit"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "anyOf": [
+                {
+                  "required": [
+                    "library"
+                  ],
+                  "properties": {
+                    "library": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                },
+                {
+                  "required": [
+                    "symbol"
+                  ],
+                  "properties": {
+                    "symbol": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                },
+                {
+                  "required": [
+                    "fixversion"
+                  ],
+                  "properties": {
+                    "fixversion": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "then": {
+              "required": [
+                "library",
+                "symbol",
+                "fixversion"
+              ],
+              "properties": {
+                "library": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "symbol": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "fixversion": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "else": {
+              "required": [
+                "cve"
+              ],
+              "properties": {
+                "cve": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        ]
+      },
+      "CGResult": {
+        "type": "object",
+        "description": "JSON result written to stdout by cg, including early-return scan errors. Field names are case-sensitive. IsVulnerable is the scanner verdict, not a JSON boolean; the optional AI assessment is independent and does not replace it. Internal call-graph nodes, mutexes, toolchain caches, configuration callbacks and raw AI audit structures are not serialized.",
+        "additionalProperties": false,
+        "required": [
+          "IsVulnerable",
+          "UsedImports",
+          "Files",
+          "AffectedImports",
+          "GoCVE",
+          "Repository",
+          "Branch",
+          "Errors",
+          "unsafe",
+          "reflect"
+        ],
+        "properties": {
+          "CVE": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Supplied vulnerability identifier, uppercased during setup. May be a CVE identifier, a Go vulnerability identifier, or invalid input echoed in an error result. Omitted when empty, including manual scans without an identifier.",
+            "examples": [
+              "CVE-2024-45338",
+              "GO-2024-3333"
+            ]
+          },
+          "Directory": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Local directory scanned, as supplied to cg. Omitted when empty. API-triggered scans can expose a temporary checkout path.",
+            "examples": [
+              "/workspace/repository"
+            ]
+          },
+          "IsVulnerable": {
+            "$ref": "#/components/schemas/CGVerdict",
+            "description": "Scanner verdict after call-graph and version analysis. A true worker result takes precedence over unknown; a scan with no processed jobs remains unknown. Reflection-risk candidates alone do not change this verdict."
+          },
+          "UsedImports": {
+            "$ref": "#/components/schemas/CGUsedImports"
+          },
+          "Files": {
+            "$ref": "#/components/schemas/CGFiles"
+          },
+          "AffectedImports": {
+            "$ref": "#/components/schemas/CGAffectedImports"
+          },
+          "GoCVE": {
+            "type": "string",
+            "description": "Resolved Go vulnerability identifier, MANUAL-SCAN for a manual scan without a supplied identifier, an empty string when unresolved, or Invalid input format for rejected identifier syntax. This field is always present and is not constrained to a GO identifier.",
+            "examples": [
+              "GO-2024-3333",
+              "MANUAL-SCAN",
+              "Invalid input format",
+              ""
+            ]
+          },
+          "Repository": {
+            "type": "string",
+            "description": "Git origin remote as returned by git. It can use HTTPS, SSH or Git's scp-like syntax, and is empty if unavailable or discovery did not run.",
+            "examples": [
+              "https://github.com/example/repository.git",
+              "git@github.com:example/repository.git",
+              ""
+            ]
+          },
+          "Branch": {
+            "type": "string",
+            "description": "Git branch name or short commit hash for detached HEAD; HEAD may be retained if commit lookup fails. Empty if unavailable or discovery did not run.",
+            "examples": [
+              "main",
+              "a1b2c3d",
+              "HEAD",
+              ""
+            ]
+          },
+          "Errors": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Accumulated scanner, discovery, graph-generation or AI-verification errors. Always present; a nil Go slice is serialized as null. Errors can coexist with useful partial results."
+          },
+          "unsafe": {
+            "type": "boolean",
+            "description": "Whether repository source inspection detected the unsafe package. This is an informational flag, not proof of vulnerable execution."
+          },
+          "reflect": {
+            "type": "boolean",
+            "description": "Whether repository source inspection detected the reflect package. This is an informational flag, not proof of vulnerable execution."
+          },
+          "reflection_risks": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/CGReflectionRisk"
+            },
+            "description": "Target-linked dynamic-use evidence and unresolved dynamic operations. Omitted when nil or empty; candidates do not establish runtime reachability or vulnerability."
+          },
+          "GraphPaths": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string"
+            },
+            "description": "Paths to generated call-graph SVG files in CLI output. HTTP callgraph results rewrite these to downloadable /graph/ URLs using GVS_PUBLIC_URL or the request host and scheme. Omitted when no graph files were generated."
+          },
+          "AIVerification": {
+            "$ref": "#/components/schemas/CGAIVerification",
+            "description": "Public AI assessment, omitted when no assessment is available. Its custom JSON marshaler publishes only the five documented fields, not the internal graph or dynamic findings."
+          }
+        },
+        "examples": [
+          {
+            "Directory": "/workspace/repository",
+            "IsVulnerable": "true",
+            "UsedImports": {
+              ".": {
+                "golang.org/x/net/html": {
+                  "Symbols": [
+                    "Parse"
+                  ],
+                  "CurrentVersion": "v0.32.0",
+                  "FixCommands": [
+                    "go get golang.org/x/net@v0.33.0",
+                    "go mod tidy",
+                    "go mod vendor"
+                  ]
+                }
+              }
+            },
+            "Files": {
+              ".": [
+                [
+                  "cmd/app/main.go"
+                ]
+              ]
+            },
+            "AffectedImports": {
+              "golang.org/x/net/html": {
+                "Symbols": [
+                  "Parse"
+                ],
+                "Type": "non-stdlib",
+                "FixedVersion": [
+                  "v0.33.0"
+                ]
+              }
+            },
+            "GoCVE": "MANUAL-SCAN",
+            "Repository": "https://github.com/example/repository.git",
+            "Branch": "main",
+            "Errors": null,
+            "unsafe": false,
+            "reflect": false
+          },
+          {
+            "CVE": "NOT-A-CVE",
+            "Directory": "/workspace/repository",
+            "IsVulnerable": "unknown",
+            "UsedImports": null,
+            "Files": null,
+            "AffectedImports": null,
+            "GoCVE": "Invalid input format",
+            "Repository": "",
+            "Branch": "",
+            "Errors": [
+              "Invalid input format. Please provide either a CVE ID (CVE-YYYY-NNNN) or GOCVE ID (GO-YYYY-NNNN)"
+            ],
+            "unsafe": false,
+            "reflect": false
+          }
+        ]
+      },
+      "CGVerdict": {
+        "type": "string",
+        "enum": [
+          "true",
+          "false",
+          "unknown"
+        ],
+        "description": "Three-state vulnerability verdict encoded as a JSON string, never as a JSON boolean."
+      },
+      "CGConfidence": {
+        "type": "string",
+        "enum": [
+          "high",
+          "medium",
+          "low"
+        ],
+        "description": "Confidence label used by reflection-risk records and the validated AI assessment."
+      },
+      "CGUsedImports": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "description": "Map from scanned module directory to its present affected packages. Module directory keys normally are relative to Directory, with . for its root module. Null when the Go map was never initialized. A present package does not imply an affected symbol was reached.",
+        "additionalProperties": {
+          "$ref": "#/components/schemas/CGUsedImportsByPackage"
+        }
+      },
+      "CGUsedImportsByPackage": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "description": "Map from affected Go package import path to dependency and reached-symbol details. A nil inner Go map serializes as null.",
+        "additionalProperties": {
+          "$ref": "#/components/schemas/CGUsedImportDetails"
+        }
+      },
+      "CGUsedImportDetails": {
+        "type": "object",
+        "description": "Details for a present affected package. All fields use omitempty, so an empty object is valid. Symbols contains only affected symbols reached by the call graph; the internal Paths field is never emitted.",
+        "additionalProperties": false,
+        "properties": {
+          "Symbols": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string"
+            },
+            "description": "Reached affected symbol names; omitted when no affected symbols were reached.",
+            "examples": [
+              [
+                "Parse",
+                "ParseFragment"
+              ]
+            ]
+          },
+          "CurrentVersion": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Detected version of the affected dependency or Go toolchain. Omitted if empty.",
+            "examples": [
+              "v0.32.0",
+              "go1.23.1"
+            ]
+          },
+          "ReplaceModule": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Replacement module path when a versioned replacement was detected. Omitted if empty."
+          },
+          "ReplaceVersion": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Version of the replacement module. Omitted if empty."
+          },
+          "FixCommands": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string"
+            },
+            "description": "Suggested shell commands to address the affected version. cg reports these commands but does not execute them; omitted if no suggestions are available.",
+            "examples": [
+              [
+                "go get golang.org/x/net@v0.33.0",
+                "go mod tidy",
+                "go mod vendor"
+              ]
+            ]
+          }
+        }
+      },
+      "CGFiles": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "description": "Map from module directory to groups of discovered non-test Go files in directories containing package main. Module keys normally are relative to Directory, with . for the root module; individual file paths are relative to their module. Null before discovery initializes the map.",
+        "additionalProperties": {
+          "$ref": "#/components/schemas/CGFileGroups"
+        },
+        "examples": [
+          {
+            ".": [
+              [
+                "cmd/app/main.go",
+                "cmd/app/options.go"
+              ]
+            ],
+            "library": null
+          }
+        ]
+      },
+      "CGFileGroups": {
+        "type": [
+          "array",
+          "null"
+        ],
+        "description": "Groups of Go source paths for a module, one group per discovered main-package directory. Null when the module has no discovered main-package file groups.",
+        "items": {
+          "$ref": "#/components/schemas/CGFileGroup"
+        }
+      },
+      "CGFileGroup": {
+        "type": [
+          "array",
+          "null"
+        ],
+        "description": "Go source paths relative to the containing module. The underlying slice permits null when nil.",
+        "items": {
+          "type": "string"
+        }
+      },
+      "CGAffectedImports": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "description": "Map from affected package import path to advisory or manual-scan symbol and fixed-version information. Presence does not establish that the package or symbol is used. Null when no map was initialized.",
+        "additionalProperties": {
+          "$ref": "#/components/schemas/CGAffectedImportDetails"
+        }
+      },
+      "CGAffectedImportDetails": {
+        "type": "object",
+        "description": "Public fields of AffectedImportsDetails. Internal advisory versionRanges are unexported and not serialized.",
+        "additionalProperties": false,
+        "required": [
+          "Symbols",
+          "Type",
+          "FixedVersion"
+        ],
+        "properties": {
+          "Symbols": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Affected symbols obtained from the advisory or manual input; a nil slice is null.",
+            "examples": [
+              [
+                "Parse",
+                "ParseFragment"
+              ]
+            ]
+          },
+          "Type": {
+            "type": "string",
+            "enum": [
+              "stdlib",
+              "non-stdlib"
+            ],
+            "description": "Whether the affected package belongs to the Go standard library. Both CVE-based and manual setup use these exact values."
+          },
+          "FixedVersion": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Fixed-version strings or human-readable introduced/fixed ranges. Entries are not guaranteed to be plain semantic versions. Null if no fixed-version slice is available.",
+            "examples": [
+              [
+                "v0.33.0"
+              ],
+              [
+                "Introduced in 0 and fixed in 2.7.26",
+                "Introduced in 2.9.13 and fixed in 2.11.14"
+              ]
+            ]
+          }
+        }
+      },
+      "CGReflectionRisk": {
+        "type": "object",
+        "description": "Typed reflection, registry or unsafe-use candidate. Records target linkage or an unresolved dynamic operation, not a proven runtime call or vulnerability.",
+        "additionalProperties": false,
+        "required": [
+          "association",
+          "type",
+          "confidence",
+          "location",
+          "evidence"
+        ],
+        "properties": {
+          "association": {
+            "type": "string",
+            "enum": [
+              "target_linked",
+              "unresolved"
+            ],
+            "description": "Whether typed evidence links this observation to an affected symbol or the target remains unresolved."
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "reflection_call",
+              "method_lookup",
+              "value_of",
+              "function_registry",
+              "unsafe_pointer",
+              "analysis_incomplete"
+            ],
+            "description": "Dynamic-use candidate category emitted by the reflection scanner."
+          },
+          "confidence": {
+            "$ref": "#/components/schemas/CGConfidence"
+          },
+          "location": {
+            "type": "string",
+            "description": "Source position. Current producers emit file:line:column, including file:1:1 for incomplete analysis; do not treat it as a URI.",
+            "examples": [
+              "/workspace/repository/main.go:12:3"
+            ]
+          },
+          "evidence": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Explanations of the observation. The field is always serialized; a nil slice is null."
+          },
+          "symbol": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact affected symbol when linked; omitted when empty."
+          },
+          "package": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Defining package of the linked affected symbol; omitted when empty."
+          }
+        },
+        "examples": [
+          {
+            "association": "unresolved",
+            "type": "analysis_incomplete",
+            "confidence": "low",
+            "location": "/workspace/repository/main.go:1:1",
+            "evidence": [
+              "Package has type errors; dynamic targets may be missing; affected target unresolved"
+            ]
+          }
+        ]
+      },
+      "CGAIVerification": {
+        "type": "object",
+        "description": "Custom-marshaled public AI assessment. Exactly these five fields are emitted. Graph and dynamic findings are folded into narrative evidence and reasoning; provider, model, coverage, uncertainties, graph_analysis and dynamic_analysis are not public JSON fields.",
+        "additionalProperties": false,
+        "required": [
+          "IsVulnerable",
+          "confidence",
+          "evidence",
+          "reasoning",
+          "usage"
+        ],
+        "properties": {
+          "IsVulnerable": {
+            "$ref": "#/components/schemas/CGVerdict",
+            "description": "Validated AI assessment, independent of CGResult.IsVulnerable. It can disagree with the scanner or remain unknown when evidence or audit coverage is incomplete."
+          },
+          "confidence": {
+            "$ref": "#/components/schemas/CGConfidence"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Deduplicated narrative evidence including summaries of graph and dynamic findings. The custom marshaler always creates a non-null array, which can be empty."
+          },
+          "reasoning": {
+            "type": "string",
+            "description": "Assessment explanation with remaining distinct uncertainty or validation gaps appended when applicable."
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CGAIUsage"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Token accounting and estimated USD cost. This property is required by the custom marshaler even when its value is null."
+          }
+        },
+        "examples": [
+          {
+            "IsVulnerable": "unknown",
+            "confidence": "low",
+            "evidence": [
+              "Verifier: required graph/source evidence was incomplete"
+            ],
+            "reasoning": "The available evidence did not establish a complete verdict.",
+            "usage": {
+              "input_tokens": 1000,
+              "output_tokens": 20,
+              "cache_read_tokens": 600,
+              "cache_write_tokens": null,
+              "cost_usd": null
+            }
+          }
+        ]
+      },
+      "CGAIUsage": {
+        "type": "object",
+        "description": "Public AI usage totals across requests and investigations. All five keys are required, but each counter and cost can be null when unavailable. Request counts, completeness flags, detailed cost categories and pricing rates are internal and are not emitted here.",
+        "additionalProperties": false,
+        "required": [
+          "input_tokens",
+          "output_tokens",
+          "cache_read_tokens",
+          "cache_write_tokens",
+          "cost_usd"
+        ],
+        "properties": {
+          "input_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Reported input-token total, including cache reads and cache writes. Null when no usage report supplied the input/output totals; a non-null total can still be partial if some requests omitted usage."
+          },
+          "output_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Reported output-token total. Null when no usage report supplied the input/output totals; a non-null total can still be partial."
+          },
+          "cache_read_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Reported cached-input read-token total. Null distinguishes an unreported counter from a reported zero."
+          },
+          "cache_write_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Reported cache-creation/write-token total. Null distinguishes an unreported counter from a reported zero."
+          },
+          "cost_usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Estimated total cost in USD using configured per-million-token rates. Null when pricing is absent, required usage or pricing data is incomplete, or a finite total cannot be calculated. This scalar is the only cost field in public result JSON; the detailed AICost breakdown is progress output only."
+          }
+        }
+      },
+      "ScanResult": {
+        "type": "object",
+        "description": "Reduced govulncheck result produced by the completed /scan workflow. This is not raw SARIF or raw process stdout. A module whose execution or SARIF parsing fails is excluded from output. The workflow still sets success to true after the loop, even if modules failed; consult exit_code and task progress. The Go ScanResponse.error field is not populated by this producer; task failures are reported by the surrounding task response instead.",
+        "additionalProperties": false,
+        "required": [
+          "success",
+          "exit_code",
+          "output"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "const": true,
+            "description": "Always true in this completed-workflow result; it does not guarantee that every module scan succeeded."
+          },
+          "exit_code": {
+            "type": "integer",
+            "enum": [
+              0,
+              1,
+              3
+            ],
+            "description": "Maximum normalized exit code across module scans: 0 for successful executions, 1 for execution failures, 3 for a govulncheck vulnerability exit. Failures other than exit 3 are normalized to 1, and a 3 can therefore mask a 1 from another module."
+          },
+          "output": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ScanModuleResult"
+            },
+            "description": "Successfully parsed per-module reductions. Null if none were appended. Although ScanResponse.output has omitempty, this producer assigns a typed slice to an interface, so even a nil slice is serialized as the required output: null."
+          }
+        },
+        "examples": [
+          {
+            "success": true,
+            "exit_code": 0,
+            "output": [
+              {
+                "directory": "repository",
+                "results": null
+              }
+            ]
+          },
+          {
+            "success": true,
+            "exit_code": 1,
+            "output": null
+          }
+        ]
+      },
+      "ScanModuleResult": {
+        "type": "object",
+        "description": "Reduced findings from a module with successfully parsed govulncheck SARIF output.",
+        "additionalProperties": false,
+        "required": [
+          "directory",
+          "results"
+        ],
+        "properties": {
+          "directory": {
+            "type": "string",
+            "description": "Repository basename for the root module, or repository basename joined to the nested module's relative path.",
+            "examples": [
+              "repository",
+              "repository/tools"
+            ]
+          },
+          "results": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ScanFinding"
+            },
+            "description": "Findings from all SARIF runs for this module. Null when no results were appended, not an omitted key."
+          }
+        }
+      },
+      "ScanFinding": {
+        "type": "object",
+        "description": "Only the SARIF ruleId and message.text survive the /scan reduction. The public message is a string, not the nested SARIF message object.",
+        "additionalProperties": false,
+        "required": [
+          "ruleId",
+          "message"
+        ],
+        "properties": {
+          "ruleId": {
+            "type": "string",
+            "description": "SARIF result rule identifier as provided by govulncheck."
+          },
+          "message": {
+            "type": "string",
+            "description": "Text extracted from SARIF result.message.text."
+          }
+        }
+      },
+      "MCPRequestID": {
+        "type": [
+          "string",
+          "integer"
+        ],
+        "description": "Use a non-null string or integer ID for calls. SDK coerces JSON numeric IDs to int64; fractional IDs should not be used."
+      },
+      "MCPMeta": {
+        "type": "object",
+        "properties": {
+          "io.modelcontextprotocol/protocolVersion": {
+            "type": "string"
+          },
+          "io.modelcontextprotocol/clientCapabilities": {
+            "type": "object"
+          },
+          "io.modelcontextprotocol/clientInfo": {
+            "$ref": "#/components/schemas/MCPImplementation"
+          },
+          "io.modelcontextprotocol/serverInfo": {
+            "$ref": "#/components/schemas/MCPImplementation"
+          },
+          "io.modelcontextprotocol/subscriptionId": {
+            "$ref": "#/components/schemas/MCPRequestID"
+          }
+        },
+        "description": "Extensible MCP metadata. For 2026-07-28 calls protocolVersion and clientCapabilities are required; clientInfo is optional. The protocolVersion must equal Mcp-Protocol-Version."
+      },
+      "MCPImplementation": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "websiteUrl": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version"
+        ]
+      },
+      "MCPJSONRPCRequest": {
+        "type": "object",
+        "properties": {
+          "jsonrpc": {
+            "const": "2.0"
+          },
+          "id": {
+            "$ref": "#/components/schemas/MCPRequestID"
+          },
+          "method": {
+            "type": "string"
+          },
+          "params": {
+            "type": "object"
+          }
+        },
+        "description": "JSON-RPC call. Available methods and typed params/results are described by /mcp x-mcp-methods; they are not REST paths.",
+        "required": [
+          "jsonrpc",
+          "id",
+          "method"
+        ]
+      },
+      "MCPJSONRPCNotification": {
+        "type": "object",
+        "properties": {
+          "jsonrpc": {
+            "const": "2.0"
+          },
+          "id": {
+            "type": "null"
+          },
+          "method": {
+            "type": "string"
+          },
+          "params": {
+            "type": "object"
+          }
+        },
+        "description": "JSON-RPC notification; omit id (the decoder also treats null as no ID). Only notification methods may omit the ID.",
+        "required": [
+          "jsonrpc",
+          "method"
+        ]
+      },
+      "MCPJSONRPCError": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {}
+        },
+        "required": [
+          "code",
+          "message"
+        ]
+      },
+      "MCPJSONRPCSuccess": {
+        "type": "object",
+        "properties": {
+          "jsonrpc": {
+            "const": "2.0"
+          },
+          "id": {
+            "$ref": "#/components/schemas/MCPRequestID"
+          },
+          "result": {}
+        },
+        "required": [
+          "jsonrpc",
+          "id",
+          "result"
+        ]
+      },
+      "MCPJSONRPCFailure": {
+        "type": "object",
+        "properties": {
+          "jsonrpc": {
+            "const": "2.0"
+          },
+          "id": {
+            "$ref": "#/components/schemas/MCPRequestID"
+          },
+          "error": {
+            "$ref": "#/components/schemas/MCPJSONRPCError"
+          }
+        },
+        "description": "ID echoes the request when known; the SDK omits id when no valid ID is available (rather than serializing null).",
+        "required": [
+          "jsonrpc",
+          "error"
+        ]
+      },
+      "MCPJSONRPCResponse": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/MCPJSONRPCSuccess"
+          },
+          {
+            "$ref": "#/components/schemas/MCPJSONRPCFailure"
+          }
+        ]
+      },
+      "MCPJSONRPCMessage": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/MCPJSONRPCRequest"
+          },
+          {
+            "$ref": "#/components/schemas/MCPJSONRPCNotification"
+          },
+          {
+            "$ref": "#/components/schemas/MCPJSONRPCResponse"
+          }
+        ]
+      },
+      "MCPPostBody": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/MCPJSONRPCMessage"
+          },
+          {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MCPJSONRPCMessage"
+            },
+            "minItems": 1
+          }
+        ],
+        "description": "Single message, or nonempty batch only for versions older than 2025-06-18 (also when version header is absent and defaults to 2025-03-26). Maximum HTTP request body is 1048576 bytes."
+      },
+      "MCPResponseBody": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/MCPJSONRPCResponse"
+          },
+          {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MCPJSONRPCMessage"
+            },
+            "minItems": 1
+          }
+        ],
+        "description": "Single JSON-RPC response normally; legacy batch requests produce an array. The SDK may also aggregate multiple messages into an array."
+      },
+      "MCPCapabilities": {
+        "type": "object",
+        "properties": {
+          "tools": {
+            "type": "object",
+            "properties": {
+              "listChanged": {
+                "const": true
+              }
+            },
+            "required": [
+              "listChanged"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "description": "Actual inferred GVS capability set. No resources, prompts, logging, completions, sampling, or elicitation capability is registered.",
+        "required": [
+          "tools"
+        ],
+        "additionalProperties": false
+      },
+      "MCPInitializeParams": {
+        "type": "object",
+        "properties": {
+          "protocolVersion": {
+            "type": "string"
+          },
+          "capabilities": {
+            "type": "object"
+          },
+          "clientInfo": {
+            "$ref": "#/components/schemas/MCPImplementation"
+          },
+          "_meta": {
+            "$ref": "#/components/schemas/MCPMeta"
+          }
+        },
+        "required": [
+          "protocolVersion",
+          "capabilities",
+          "clientInfo"
+        ]
+      },
+      "MCPInitializeResult": {
+        "type": "object",
+        "properties": {
+          "protocolVersion": {
+            "type": "string"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/MCPCapabilities"
+          },
+          "serverInfo": {
+            "$ref": "#/components/schemas/MCPImplementation"
+          },
+          "instructions": {
+            "type": "string"
+          },
+          "_meta": {
+            "$ref": "#/components/schemas/MCPMeta"
+          }
+        },
+        "required": [
+          "protocolVersion",
+          "capabilities",
+          "serverInfo"
+        ]
+      },
+      "MCPDiscoverResult": {
+        "type": "object",
+        "properties": {
+          "ttlMs": {
+            "type": "integer",
+            "const": 0
+          },
+          "cacheScope": {
+            "const": "public"
+          },
+          "resultType": {
+            "const": "complete"
+          },
+          "_meta": {
+            "$ref": "#/components/schemas/MCPMeta"
+          },
+          "supportedVersions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/MCPCapabilities"
+          },
+          "instructions": {
+            "type": "string"
+          }
+        },
+        "description": "2026-07-28 discovery. Server identity is in _meta[\"io.modelcontextprotocol/serverInfo\"], not a top-level serverInfo property.",
+        "required": [
+          "supportedVersions",
+          "capabilities",
+          "ttlMs",
+          "cacheScope"
+        ]
+      },
+      "MCPListParams": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string"
+          },
+          "_meta": {
+            "$ref": "#/components/schemas/MCPMeta"
+          }
+        }
+      },
+      "MCPToolDefinition": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "inputSchema": {
+            "type": "object"
+          },
+          "outputSchema": {
+            "type": "object"
+          },
+          "annotations": {
+            "type": "object",
+            "properties": {
+              "readOnlyHint": {
+                "type": "boolean"
+              },
+              "destructiveHint": {
+                "type": "boolean"
+              },
+              "idempotentHint": {
+                "type": "boolean"
+              },
+              "openWorldHint": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "readOnlyHint",
+              "destructiveHint",
+              "idempotentHint",
+              "openWorldHint"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "name",
+          "inputSchema",
+          "outputSchema",
+          "annotations",
+          "description"
+        ],
+        "additionalProperties": false
+      },
+      "MCPListToolsResult": {
+        "type": "object",
+        "properties": {
+          "ttlMs": {
+            "type": "integer",
+            "const": 0
+          },
+          "cacheScope": {
+            "const": "public"
+          },
+          "resultType": {
+            "const": "complete"
+          },
+          "_meta": {
+            "$ref": "#/components/schemas/MCPMeta"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MCPToolDefinition"
+            }
+          },
+          "nextCursor": {
+            "type": "string"
+          }
+        },
+        "description": "Five registered tools; default page size fits all five. nextCursor is omitted on the final page. resultType and serverInfo metadata are added for the new protocol.",
+        "required": [
+          "tools",
+          "ttlMs",
+          "cacheScope"
+        ]
+      },
+      "MCPListResourcesResult": {
+        "type": "object",
+        "properties": {
+          "ttlMs": {
+            "type": "integer",
+            "const": 0
+          },
+          "cacheScope": {
+            "const": "public"
+          },
+          "resultType": {
+            "const": "complete"
+          },
+          "_meta": {
+            "$ref": "#/components/schemas/MCPMeta"
+          },
+          "resources": {
+            "type": "array",
+            "items": {},
+            "maxItems": 0
+          },
+          "nextCursor": {
+            "type": "string"
+          }
+        },
+        "description": "No GVS entries are registered. A normal list request returns an empty array, not null; invalid cursors can fail.",
+        "required": [
+          "resources",
+          "ttlMs",
+          "cacheScope"
+        ]
+      },
+      "MCPListResourceTemplatesResult": {
+        "type": "object",
+        "properties": {
+          "ttlMs": {
+            "type": "integer",
+            "const": 0
+          },
+          "cacheScope": {
+            "const": "public"
+          },
+          "resultType": {
+            "const": "complete"
+          },
+          "_meta": {
+            "$ref": "#/components/schemas/MCPMeta"
+          },
+          "resourceTemplates": {
+            "type": "array",
+            "items": {},
+            "maxItems": 0
+          },
+          "nextCursor": {
+            "type": "string"
+          }
+        },
+        "description": "No GVS entries are registered. A normal list request returns an empty array, not null; invalid cursors can fail.",
+        "required": [
+          "resourceTemplates",
+          "ttlMs",
+          "cacheScope"
+        ]
+      },
+      "MCPListPromptsResult": {
+        "type": "object",
+        "properties": {
+          "ttlMs": {
+            "type": "integer",
+            "const": 0
+          },
+          "cacheScope": {
+            "const": "public"
+          },
+          "resultType": {
+            "const": "complete"
+          },
+          "_meta": {
+            "$ref": "#/components/schemas/MCPMeta"
+          },
+          "prompts": {
+            "type": "array",
+            "items": {},
+            "maxItems": 0
+          },
+          "nextCursor": {
+            "type": "string"
+          }
+        },
+        "description": "No GVS entries are registered. A normal list request returns an empty array, not null; invalid cursors can fail.",
+        "required": [
+          "prompts",
+          "ttlMs",
+          "cacheScope"
+        ]
+      },
+      "MCPScanInput": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "HTTP(S) Git repository URL.",
+            "minLength": 1
+          },
+          "branch": {
+            "type": "string",
+            "description": "Explicit branch or commit hash.",
+            "minLength": 1
+          },
+          "algo": {
+            "type": "string",
+            "description": "Required, case-insensitive.",
+            "pattern": "^([Rr][Tt][Aa]|[Vv][Tt][Aa]|[Cc][Hh][Aa]|[Ss][Tt][Aa][Tt][Ii][Cc])$"
+          },
+          "requestId": {
+            "type": "string",
+            "description": "Optional idempotency key; reuse only for identical scan arguments.",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "cve": {
+            "type": "string",
+            "pattern": "^([Cc][Vv][Ee]-[0-9]{4}-[0-9]{4,}|[Gg][Oo]-[0-9]{4}-[0-9]{4,})$"
+          }
+        },
+        "required": [
+          "repo",
+          "branch",
+          "cve",
+          "algo"
+        ],
+        "additionalProperties": false
+      },
+      "MCPManualScanInput": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "HTTP(S) Git repository URL.",
+            "minLength": 1
+          },
+          "branch": {
+            "type": "string",
+            "description": "Explicit branch or commit hash.",
+            "minLength": 1
+          },
+          "algo": {
+            "type": "string",
+            "description": "Required, case-insensitive.",
+            "pattern": "^([Rr][Tt][Aa]|[Vv][Tt][Aa]|[Cc][Hh][Aa]|[Ss][Tt][Aa][Tt][Ii][Cc])$"
+          },
+          "requestId": {
+            "type": "string",
+            "description": "Optional idempotency key; reuse only for identical scan arguments.",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "library": {
+            "type": "string",
+            "description": "Affected Go import path.",
+            "minLength": 1
+          },
+          "symbol": {
+            "type": "string",
+            "description": "Affected symbol or comma-separated symbols.",
+            "minLength": 1
+          },
+          "fixedVersion": {
+            "type": "string",
+            "description": "Fixed version or range accepted by cg.",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "repo",
+          "branch",
+          "library",
+          "symbol",
+          "fixedVersion",
+          "algo"
+        ],
+        "additionalProperties": false
+      },
+      "MCPTaskInput": {
+        "type": "object",
+        "properties": {
+          "taskId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "taskId"
+        ],
+        "additionalProperties": false
+      },
+      "MCPReadResultInput": {
+        "type": "object",
+        "properties": {
+          "taskId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "cursor": {
+            "type": "string",
+            "description": "Opaque nextCursor; omit or use empty string for the first chunk."
+          }
+        },
+        "required": [
+          "taskId"
+        ],
+        "additionalProperties": false
+      },
+      "MCPToolError": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "retryable": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "retryable"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "description": "Application tool failure. retryable is true only for scan_busy, task_not_ready, or server_stopping; this is structuredContent with isError:true, not a JSON-RPC error.",
+        "required": [
+          "error"
+        ],
+        "additionalProperties": false
+      },
+      "MCPSubmission": {
+        "type": "object",
+        "properties": {
+          "taskId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "completed",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "pollAfterSeconds": {
+            "type": "integer",
+            "const": 5
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "description": "pollAfterSeconds and message are omitted for terminal tasks. Active tasks are polled every five seconds. Disconnect does not cancel a scan; use gvs_cancel.",
+        "required": [
+          "taskId",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "MCPSummary": {
+        "type": "object",
+        "properties": {
+          "scannerVerdict": {
+            "enum": [
+              "true",
+              "false",
+              "unknown",
+              null
+            ]
+          },
+          "aiVerdict": {
+            "enum": [
+              "true",
+              "false",
+              "unknown",
+              null
+            ]
+          },
+          "aiConfidence": {
+            "enum": [
+              "high",
+              "medium",
+              "low",
+              null
+            ]
+          },
+          "verdictsDisagree": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "description": "Separate scanner and AI assessments, never a combined safety verdict. Fields are present and null when unavailable/unrecognized; disagreement is null unless both verdicts are known.",
+        "required": [
+          "scannerVerdict",
+          "aiVerdict",
+          "aiConfidence",
+          "verdictsDisagree"
+        ],
+        "additionalProperties": false
+      },
+      "MCPResultDelivery": {
+        "type": "object",
+        "properties": {
+          "available": {
+            "type": "boolean"
+          },
+          "inline": {
+            "type": "boolean"
+          },
+          "totalBytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "externalFields": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "output",
+                "error",
+                "logs"
+              ]
+            }
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "description": "totalBytes is the full stored artifact size and is omitted when unavailable. If available and not inline, follow gvs_read_result cursors; externalized output/error/logs are omitted from status rather than truncated.",
+        "required": [
+          "available",
+          "inline"
+        ],
+        "additionalProperties": false
+      },
+      "MCPStatusResult": {
+        "type": "object",
+        "properties": {
+          "taskId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "completed",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "pollAfterSeconds": {
+            "type": "integer",
+            "const": 5
+          },
+          "message": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "cached": {
+            "type": "boolean"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/MCPSummary"
+          },
+          "output": {
+            "description": "Parsed JSON of task output, normally CGResult, but any JSON value is preserved; non-JSON output becomes a JSON string. Omitted when empty or externalized.",
+            "x-typical-schema": {
+              "$ref": "#/components/schemas/CGResult"
+            }
+          },
+          "error": {
+            "type": "string"
+          },
+          "logs": {
+            "type": "string"
+          },
+          "result": {
+            "$ref": "#/components/schemas/MCPResultDelivery"
+          }
+        },
+        "description": "Optional timestamps and summary are omitted, not null. Empty error/logs/output are omitted. A failed scan is an ordinary successful status tool result, not isError:true.",
+        "required": [
+          "taskId",
+          "status",
+          "createdAt",
+          "updatedAt",
+          "cached",
+          "result"
+        ],
+        "additionalProperties": false
+      },
+      "MCPResultChunk": {
+        "type": "object",
+        "properties": {
+          "taskId": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string",
+            "description": "UTF-8-safe fragment of the immutable result JSON; concatenate in order. At most 16384 UTF-8 bytes per chunk, reduced if needed to fit the complete tool result bound."
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "eof": {
+            "type": "boolean"
+          }
+        },
+        "description": "nextCursor is explicitly null at EOF. Cursors are signed, task/digest/offset-bound and replayable; task/result expiry or server restart invalidates them.",
+        "required": [
+          "taskId",
+          "content",
+          "nextCursor",
+          "eof"
+        ],
+        "additionalProperties": false
+      },
+      "MCPSubmissionOutput": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/MCPSubmission"
+          },
+          {
+            "$ref": "#/components/schemas/MCPToolError"
+          }
+        ]
+      },
+      "MCPStatusOutput": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/MCPStatusResult"
+          },
+          {
+            "$ref": "#/components/schemas/MCPToolError"
+          }
+        ]
+      },
+      "MCPChunkOutput": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/MCPResultChunk"
+          },
+          {
+            "$ref": "#/components/schemas/MCPToolError"
+          }
+        ]
+      },
+      "MCPTextContent": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "const": "text"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "text"
+        ],
+        "additionalProperties": false
+      },
+      "MCPCallToolResult": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MCPTextContent"
+            }
+          },
+          "structuredContent": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MCPSubmission"
+              },
+              {
+                "$ref": "#/components/schemas/MCPStatusResult"
+              },
+              {
+                "$ref": "#/components/schemas/MCPResultChunk"
+              },
+              {
+                "$ref": "#/components/schemas/MCPToolError"
+              }
+            ]
+          },
+          "isError": {
+            "type": "boolean"
+          },
+          "_meta": {
+            "$ref": "#/components/schemas/MCPMeta"
+          },
+          "resultType": {
+            "const": "complete"
+          }
+        },
+        "description": "Application responses contain one text block holding JSON identical to structuredContent. Successful isError:false is omitted. Application failures have isError:true. SDK argument-schema failures may be text-only without structuredContent. GVS bounds serialized tool results to 65536 bytes before any later SDK protocol metadata additions. New-protocol responses add resultType and server identity metadata.",
+        "required": [
+          "content"
+        ]
+      },
+      "MCPCallToolParams": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "name": {
+                "const": "gvs_scan"
+              },
+              "arguments": {
+                "$ref": "#/components/schemas/MCPScanInput"
+              },
+              "_meta": {
+                "$ref": "#/components/schemas/MCPMeta"
+              }
+            },
+            "required": [
+              "name",
+              "arguments"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "name": {
+                "const": "gvs_manual_scan"
+              },
+              "arguments": {
+                "$ref": "#/components/schemas/MCPManualScanInput"
+              },
+              "_meta": {
+                "$ref": "#/components/schemas/MCPMeta"
+              }
+            },
+            "required": [
+              "name",
+              "arguments"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "name": {
+                "const": "gvs_status"
+              },
+              "arguments": {
+                "$ref": "#/components/schemas/MCPTaskInput"
+              },
+              "_meta": {
+                "$ref": "#/components/schemas/MCPMeta"
+              }
+            },
+            "required": [
+              "name",
+              "arguments"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "name": {
+                "const": "gvs_cancel"
+              },
+              "arguments": {
+                "$ref": "#/components/schemas/MCPTaskInput"
+              },
+              "_meta": {
+                "$ref": "#/components/schemas/MCPMeta"
+              }
+            },
+            "required": [
+              "name",
+              "arguments"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "name": {
+                "const": "gvs_read_result"
+              },
+              "arguments": {
+                "$ref": "#/components/schemas/MCPReadResultInput"
+              },
+              "_meta": {
+                "$ref": "#/components/schemas/MCPMeta"
+              }
+            },
+            "required": [
+              "name",
+              "arguments"
+            ]
+          }
+        ]
+      },
+      "MCPNotificationSubscriptions": {
+        "type": "object",
+        "properties": {
+          "toolsListChanged": {
+            "type": "boolean"
+          },
+          "promptsListChanged": {
+            "type": "boolean"
+          },
+          "resourcesListChanged": {
+            "type": "boolean"
+          },
+          "resourceSubscriptions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "description": "GVS can agree only to toolsListChanged; other requested categories are not supported and are omitted from the acknowledgment."
+      },
+      "MCPSubscriptionsListenParams": {
+        "type": "object",
+        "properties": {
+          "notifications": {
+            "$ref": "#/components/schemas/MCPNotificationSubscriptions"
+          },
+          "_meta": {
+            "$ref": "#/components/schemas/MCPMeta"
+          }
+        },
+        "required": [
+          "notifications"
+        ]
+      },
+      "MCPSubscriptionAcknowledgedParams": {
+        "type": "object",
+        "properties": {
+          "notifications": {
+            "$ref": "#/components/schemas/MCPNotificationSubscriptions"
+          },
+          "_meta": {
+            "$ref": "#/components/schemas/MCPMeta"
+          }
+        },
+        "description": "First SSE message is notifications/subscriptions/acknowledged, with subscription ID metadata. Accepted toolsListChanged holds the stream open until disconnection; GVS does not dynamically modify the tool list.",
+        "required": [
+          "notifications"
+        ]
+      },
+      "MCPReadResourceParams": {
+        "type": "object",
+        "properties": {
+          "uri": {
+            "type": "string"
+          },
+          "_meta": {
+            "$ref": "#/components/schemas/MCPMeta"
+          }
+        },
+        "required": [
+          "uri"
+        ]
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Malformed request JSON, invalid arguments, or a task that cannot be cancelled.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "TaskNotFound": {
+        "description": "Task ID is unknown, expired, or lost after a server restart.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "ScanBusy": {
+        "description": "Another scan is active across REST and MCP. The message suggests retrying after 5 seconds; no Retry-After header is set.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "RequestConflict": {
+        "description": "requestId was already used with different scan arguments.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "ServerStopping": {
+        "description": "Server is shutting down and cannot accept a new task.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "InternalError": {
+        "description": "Internal task configuration or submission error.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "FileNotFound": {
+        "description": "File or directory not found.",
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "Preflight": {
+        "description": "When CORS_ALLOWED_ORIGINS is configured, OPTIONS returns 204 even for a disallowed or absent Origin. Allow headers appear only for allowed origins. With CORS disabled, OPTIONS falls through to the normal handler instead.",
+        "headers": {
+          "Access-Control-Allow-Origin": {
+            "description": "Matching configured origin, or *; omitted for a disallowed origin.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          "Access-Control-Allow-Methods": {
+            "schema": {
+              "type": "string",
+              "const": "GET, POST, OPTIONS"
+            }
+          },
+          "Access-Control-Allow-Headers": {
+            "schema": {
+              "type": "string",
+              "const": "Content-Type, Authorization"
+            }
+          },
+          "Access-Control-Max-Age": {
+            "schema": {
+              "type": "string",
+              "const": "86400"
+            }
+          }
+        }
+      },
+      "FileRedirect": {
+        "description": "Canonical path redirect.",
+        "headers": {
+          "Location": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "NotModified": {
+        "description": "Not modified; no body."
+      },
+      "InvalidFileRequest": {
+        "description": "Invalid file request.",
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "FileForbidden": {
+        "description": "File access denied.",
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "PreconditionFailed": {
+        "description": "HTTP precondition failed."
+      },
+      "RangeNotSatisfiable": {
+        "description": "Requested byte range cannot be satisfied.",
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "FileError": {
+        "description": "File serving error.",
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "MCPError400": {
+        "description": "Malformed/empty payload, invalid/unsupported protocol or method/notification shape, missing Accept media types, any Last-Event-ID on POST, forbidden modern batching, or protocol metadata/header mismatch. Most transport failures are plain text. Modern invalid params/unsupported protocol and header mismatch failures can be JSON-RPC errors.",
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          },
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/MCPJSONRPCFailure"
+            }
+          }
+        },
+        "headers": {
+          "Vary": {
+            "$ref": "#/components/headers/MCPVary"
+          },
+          "Access-Control-Allow-Origin": {
+            "$ref": "#/components/headers/MCPAccessControlAllowOrigin"
+          },
+          "Access-Control-Expose-Headers": {
+            "$ref": "#/components/headers/MCPAccessControlExposeHeaders"
+          }
+        }
+      },
+      "MCPError403": {
+        "description": "Origin absent from allowlist, invalid/multiple Origin values, or SDK loopback listener Host protection rejects Host. No authentication challenge is implemented.",
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
+        "headers": {
+          "Vary": {
+            "$ref": "#/components/headers/MCPVary"
+          },
+          "Access-Control-Allow-Origin": {
+            "$ref": "#/components/headers/MCPAccessControlAllowOrigin"
+          },
+          "Access-Control-Expose-Headers": {
+            "$ref": "#/components/headers/MCPAccessControlExposeHeaders"
+          }
+        }
+      },
+      "MCPError404": {
+        "description": "When GVS_MCP is not exactly 1: plain-text 404 page not found for every method, before MCP/CORS processing. When enabled, modern method-not-found uses JSON-RPC HTTP 404; a closing ephemeral session can also produce plain-text 404.",
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          },
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/MCPJSONRPCFailure"
+            }
+          }
+        }
+      }
+    },
+    "headers": {
+      "MCPVary": {
+        "description": "Origin on enabled endpoint; OPTIONS also adds Access-Control-Request-Method and Access-Control-Request-Headers.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "MCPAccessControlAllowOrigin": {
+        "description": "Echoes the permitted incoming Origin only; omitted for requests without Origin.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "MCPAccessControlExposeHeaders": {
+        "description": "Mcp-Session-Id, Mcp-Protocol-Version when Origin is accepted; neither implies session support.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "MCPCacheControl": {
+        "description": "no-cache, no-transform for dispatched calls.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "MCPAllow": {
+        "schema": {
+          "const": "POST"
+        }
+      },
+      "MCPAccessControlAllowMethods": {
+        "schema": {
+          "const": "POST, OPTIONS"
+        }
+      },
+      "MCPAccessControlAllowHeaders": {
+        "schema": {
+          "const": "Content-Type, Accept, Authorization, Mcp-Protocol-Version, Mcp-Session-Id, Last-Event-Id"
+        }
+      }
+    }
+  }
+}

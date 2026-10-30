@@ -431,6 +431,22 @@ for validating fixture changes in a local checkout.
 The MCP integration cases exercise submission, polling, cancellation, and result
 retrieval through the HTTP client without live AI requests.
 
+Output contracts are validated against `openapi.json` in both test targets:
+
+- `make test` resolves the component schemas, checks rejection of incompatible
+  output, and validates existing AI, usage, reflection, task, and MCP fixtures.
+  The `/scan` cases feed raw SARIF fixtures through the real reducer; they do
+  not invoke a live govulncheck scan.
+- `make test-integration` validates raw CLI/API results before typed decoding,
+  including failure and cancellation envelopes. It also runs an uncached,
+  successful MCP scan of a disposable local Git repository and compares its
+  inline result with the reconstructed artifact and REST output.
+
+The existing GitHub Actions workflow runs both targets. The shared validator is
+in `internal/testutil/openapitest`; pass `json.RawMessage` for captured wire JSON
+so decoding cannot hide unexpected fields. These checks cover exercised output
+variants, not every possible field combination or SDK protocol method.
+
 Scans compare dependency versions selected by Go, including transitive upgrades.
 Incomplete package loading produces an unknown result. A reachable symbol in a
 versioned replacement from a different module also produces unknown, because
@@ -612,11 +628,53 @@ Unknown task IDs, invalid arguments, busy submissions, and invalid cursors retur
 MCP tool errors. Native MCP Tasks, stdio transport, durable tasks, progress
 subscriptions, and local-directory scans are outside this interface.
 
+### OpenAPI JSON contract
+
+[`openapi.json`](openapi.json) is the OpenAPI 3.1 contract for the HTTP server
+and the JSON written by `cg`. It covers `/scan`, `/callgraph`, `/status`,
+`/cancel`, `/healthz`, `/progress/{taskId}`, graph downloads, static web assets,
+and the optional `/mcp` transport. Requests, responses, errors, CORS preflight,
+SSE framing, and nullable/omitted output fields follow the current handlers.
+The document is a repository artifact; the server does not automatically serve
+it at `/openapi.json`.
+
+Import the file into OpenAPI 3.1-compatible tooling and set the server URL for
+your deployment. MCP is JSON-RPC over one HTTP endpoint, not a separate REST
+route per tool: its method catalog and five tool contracts are under
+`paths["/mcp"].x-mcp-methods` and `x-mcp-tools`, with reusable component schemas.
+
+`components.schemas.CGResult` describes standalone `cg` stdout and the
+callgraph result embedded in `/status.output`. `ScanResult` describes the
+reduced govulncheck result from `/scan`. Scanner and AI verdicts remain separate
+strings (`"true"`, `"false"`, or `"unknown"`), not JSON booleans.
+
+The task transport preserves **any valid JSON value** in `output`, including
+partial objects and `null`; non-JSON stdout is returned as a string. Validating
+`TaskStatusResponse` therefore checks the envelope, not the scanner payload.
+For a complete scan result, also validate `output` against `CGResult` or
+`ScanResult`, according to the submitted scan type. The
+`x-complete-result-schemas` extension on the status `output` field identifies
+those schemas for tooling; it is not a JSON Schema validation keyword.
+
+To extract a standalone JSON Schema for validating saved `cg` output, retain
+the referenced components:
+
+```bash
+jq '{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/components/schemas/CGResult",
+  "components": {"schemas": .components.schemas}
+}' openapi.json > cg-result.schema.json
+```
+
+Keep the contract in sync when changing route registration, request validation,
+serialized result types, custom JSON marshalers, or MCP transport/tool behavior.
+
 ### Sample API request and response of callgraph path
 ```bash
 $ curl --request POST \
        --header "Content-Type: application/json" \
-       --data '{"repo": "https://github.com/k37y/gvs-example-one", "branch": "main", "cve": "CVE-2024-45338"}' \
+       --data '{"repo": "https://github.com/k37y/gvs-example-one", "branchOrCommit": "main", "cve": "CVE-2024-45338"}' \
        http://localhost:8082/callgraph | jq .
 ```
 ```bash

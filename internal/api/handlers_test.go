@@ -7,8 +7,15 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/k37y/gvs/internal/testutil/openapitest"
 )
 
 func TestConvertGraphPathsToURLs(t *testing.T) {
@@ -137,6 +144,7 @@ func TestRequestLogUsesConnectionIP(t *testing.T) {
 func TestWriteJSONError(t *testing.T) {
 	rec := httptest.NewRecorder()
 	writeJSONError(rec, http.StatusBadRequest, "bad input")
+	openapitest.Validate(t, "ErrorResponse", json.RawMessage(rec.Body.Bytes()))
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
@@ -159,6 +167,7 @@ func TestStatusHandler_MissingTaskID(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	StatusHandler(rec, req)
+	openapitest.Validate(t, "ErrorResponse", json.RawMessage(rec.Body.Bytes()))
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
@@ -170,6 +179,7 @@ func TestStatusHandler_InvalidJSON(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	StatusHandler(rec, req)
+	openapitest.Validate(t, "ErrorResponse", json.RawMessage(rec.Body.Bytes()))
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
@@ -181,6 +191,7 @@ func TestStatusHandler_UnknownTask(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	StatusHandler(rec, req)
+	openapitest.Validate(t, "ErrorResponse", json.RawMessage(rec.Body.Bytes()))
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
@@ -204,6 +215,7 @@ func TestStatusHandler_KnownTask(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	StatusHandler(rec, req)
+	openapitest.Validate(t, "TaskStatusResponse", json.RawMessage(rec.Body.Bytes()))
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -226,6 +238,7 @@ func TestScanHandler_InvalidJSON(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	ScanHandler(rec, req)
+	openapitest.Validate(t, "ErrorResponse", json.RawMessage(rec.Body.Bytes()))
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
@@ -237,6 +250,7 @@ func TestCallgraphHandler_InvalidJSON(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	CallgraphHandler(rec, req)
+	openapitest.Validate(t, "ErrorResponse", json.RawMessage(rec.Body.Bytes()))
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
@@ -320,6 +334,7 @@ func TestCancelHandler_MissingTaskID(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	CancelHandler(rec, req)
+	openapitest.Validate(t, "ErrorResponse", json.RawMessage(rec.Body.Bytes()))
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
@@ -331,6 +346,7 @@ func TestCancelHandler_InvalidJSON(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	CancelHandler(rec, req)
+	openapitest.Validate(t, "ErrorResponse", json.RawMessage(rec.Body.Bytes()))
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
@@ -342,6 +358,7 @@ func TestCancelHandler_UnknownTask(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	CancelHandler(rec, req)
+	openapitest.Validate(t, "ErrorResponse", json.RawMessage(rec.Body.Bytes()))
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
@@ -362,6 +379,7 @@ func TestCancelHandler_TaskNotRunning(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	CancelHandler(rec, req)
+	openapitest.Validate(t, "ErrorResponse", json.RawMessage(rec.Body.Bytes()))
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
@@ -392,6 +410,7 @@ func TestCancelHandler_Success(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	CancelHandler(rec, req)
+	openapitest.Validate(t, "CancelAcknowledgement", json.RawMessage(rec.Body.Bytes()))
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -410,5 +429,126 @@ func TestCancelHandler_Success(t *testing.T) {
 	taskMutex.Unlock()
 	if result.Status != StatusRunning || ctx.Err() != context.Canceled {
 		t.Errorf("cancel should signal worker and await its final result: status=%s, context=%v", result.Status, ctx.Err())
+	}
+}
+
+func TestScanHandlerReducedResults(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("govulncheck fixture uses a POSIX shell")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("local repository fixture requires git: %v", err)
+	}
+	// Feed SARIF into the real repository workflow, not an already-reduced
+	// ScanResult. This covers reduction and serialization without a live scan.
+	const findings = `{"version":"2.1.0","runs":[{"results":[{"ruleId":"GO-2024-1234","message":{"text":"vulnerable call"}}]},{"results":[{"ruleId":"GO-2024-5678","message":{"text":"second finding"}}]}]}`
+	for _, tc := range []struct {
+		name       string
+		sarif      string
+		exitCode   string
+		wantExit   int
+		wantOutput string
+	}{
+		{"findings", findings, "3", 3, `[{"directory":"repository","results":[{"ruleId":"GO-2024-1234","message":"vulnerable call"},{"ruleId":"GO-2024-5678","message":"second finding"}]}]`},
+		{"no findings", `{"version":"2.1.0","runs":[{"results":[]}]}`, "0", 0, `[{"directory":"repository","results":null}]`},
+		{"execution failure", findings, "2", 1, `null`},
+		{"invalid SARIF", `not JSON`, "0", 0, `null`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prepareTaskTest(t)
+			t.Setenv("GVS_DATA_DIR", t.TempDir())
+			t.Setenv("TMPDIR", t.TempDir())
+			repo := filepath.Join(t.TempDir(), "repository")
+			if err := os.Mkdir(repo, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module example.com/scanfixture\n\ngo 1.22\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			for _, args := range [][]string{
+				{"init", "-b", "main"},
+				{"add", "go.mod"},
+				{"-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "-m", "fixture"},
+			} {
+				cmd := exec.Command("git", args...)
+				cmd.Dir = repo
+				if data, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("git %v: %v\n%s", args, err, data)
+				}
+			}
+			bin := t.TempDir()
+			if err := os.WriteFile(filepath.Join(bin, "govulncheck"), []byte("#!/bin/sh\nprintf '%s' \"$GVS_TEST_SARIF\"\nexit \"$GVS_TEST_SCAN_EXIT\"\n"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("GVS_TEST_SARIF", tc.sarif)
+			t.Setenv("GVS_TEST_SCAN_EXIT", tc.exitCode)
+			t.Setenv("GIT_TERMINAL_PROMPT", "0")
+			// Register after environment/cache cleanup so the worker exits first,
+			// including when an assertion below fails.
+			t.Cleanup(func() {
+				taskCancelMutex.Lock()
+				for _, cancel := range taskCancels {
+					cancel()
+				}
+				taskCancelMutex.Unlock()
+				waitTaskWorkers(t)
+			})
+			request, err := json.Marshal(map[string]string{"repo": repo, "branchOrCommit": "main"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec := httptest.NewRecorder()
+			ScanHandler(rec, httptest.NewRequest(http.MethodPost, "/scan", bytes.NewReader(request)))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("submission = %d %s", rec.Code, rec.Body)
+			}
+			openapitest.Validate(t, "TaskAccepted", json.RawMessage(rec.Body.Bytes()))
+			var accepted struct {
+				TaskID string `json:"taskId"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &accepted); err != nil {
+				t.Fatal(err)
+			}
+			waitTaskWorkers(t)
+			statusRequest, err := json.Marshal(map[string]string{"taskId": accepted.TaskID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			status := httptest.NewRecorder()
+			StatusHandler(status, httptest.NewRequest(http.MethodPost, "/status", bytes.NewReader(statusRequest)))
+			if status.Code != http.StatusOK {
+				t.Fatalf("status = %d %s", status.Code, status.Body)
+			}
+			openapitest.Validate(t, "TaskStatusResponse", json.RawMessage(status.Body.Bytes()))
+			var result struct {
+				Status TaskStatus      `json:"status"`
+				Output json.RawMessage `json:"output"`
+			}
+			if err := json.Unmarshal(status.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.Status != StatusCompleted {
+				t.Fatalf("scan did not complete: %s", status.Body)
+			}
+			openapitest.Validate(t, "ScanResult", result.Output)
+			var reduced struct {
+				ExitCode int             `json:"exit_code"`
+				Output   json.RawMessage `json:"output"`
+			}
+			if err := json.Unmarshal(result.Output, &reduced); err != nil {
+				t.Fatal(err)
+			}
+			var got, want any
+			if err := json.Unmarshal(reduced.Output, &got); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(tc.wantOutput), &want); err != nil {
+				t.Fatal(err)
+			}
+			if reduced.ExitCode != tc.wantExit || !reflect.DeepEqual(got, want) {
+				t.Errorf("reduced result = %s, want exit %d and output %s", result.Output, tc.wantExit, tc.wantOutput)
+			}
+		})
 	}
 }

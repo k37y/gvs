@@ -22,6 +22,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/k37y/gvs/internal/testutil/openapitest"
 	"golang.org/x/tools/go/callgraph"
 	"golang.org/x/tools/go/callgraph/cha"
 	"golang.org/x/tools/go/ssa"
@@ -1082,6 +1083,7 @@ func TestVerifyWithAgent(t *testing.T) {
 				return tt.output, tt.err
 			})
 			verifyWithAgent(context.Background(), r, repo, aiConfig{Provider: "fake", Model: "test"}, agent)
+			openapitest.Validate(t, "CGResult", r)
 			if r.IsVulnerable != "true" {
 				t.Fatal("scanner verdict was overwritten")
 			}
@@ -1093,10 +1095,6 @@ func TestVerifyWithAgent(t *testing.T) {
 			}
 			if r.AIVerification == nil || r.AIVerification.IsVulnerable != "false" || r.AIVerification.Provider != "fake" || r.AIVerification.Model != "test" {
 				t.Fatalf("unexpected assessment: %+v", r.AIVerification)
-			}
-			data, err := json.Marshal(r)
-			if err != nil || !strings.Contains(string(data), `"AIVerification"`) || strings.Contains(string(data), "ClaudeVerification") {
-				t.Fatalf("unexpected JSON: %s (%v)", data, err)
 			}
 		})
 	}
@@ -2147,22 +2145,7 @@ func TestAIUsageCosts(t *testing.T) {
 					t.Fatal("cached input charged twice")
 				}
 			}
-			data, err := json.Marshal(out)
-			if err != nil || !strings.Contains(string(data), `"input_tokens":`) || !strings.Contains(string(data), `"cost_usd":`) {
-				t.Fatalf("bad JSON: %s / %v", data, err)
-			}
-			var fields map[string]json.RawMessage
-			if err := json.Unmarshal(data, &fields); err != nil {
-				t.Fatal(err)
-			}
-			if len(fields) != 5 {
-				t.Fatalf("usage must have five fields: %s", data)
-			}
-			for _, name := range []string{"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd"} {
-				if _, ok := fields[name]; !ok {
-					t.Fatalf("missing %s: %s", name, data)
-				}
-			}
+			openapitest.Validate(t, "CGAIUsage", out)
 			if out.CostUSD != out.Cost.Total {
 				t.Fatal("JSON cost differs from calculated total")
 			}
@@ -2172,6 +2155,7 @@ func TestAIUsageCosts(t *testing.T) {
 	if empty.Input != nil || empty.Output != nil || empty.Cost.Total != nil || empty.Complete {
 		t.Fatal("missing usage treated as zero")
 	}
+	openapitest.Validate(t, "CGAIUsage", empty)
 	zero := int64(0)
 	tracker := verificationUsageLog{requests: 1}
 	tracker.record(&verificationTokenUsage{CacheRead: &zero, CacheWrite: &zero})
@@ -2208,6 +2192,7 @@ func TestAIUsageJSONOnFailedAssessment(t *testing.T) {
 			if usage.Input == nil || usage.Output == nil || usage.CacheRead == nil || usage.CacheWrite == nil || usage.Requests != 2 || *usage.Input != 2000 || *usage.Output != 40 || *usage.CacheRead != 1200 || *usage.CacheWrite != 600 || len(result.Errors) == 0 || result.AIVerification.IsVulnerable != "unknown" {
 				t.Fatalf("bad failure usage: %+v / %+v", usage, result.Errors)
 			}
+			openapitest.Validate(t, "CGAIVerification", result.AIVerification)
 			// A second investigation adds to the same provider totals.
 			if _, err := agent.Run(context.Background(), "Assess", nil); err != nil {
 				t.Fatal(err)
@@ -2365,14 +2350,7 @@ func TestCompactAIVerificationJSON(t *testing.T) {
 	if err := json.Unmarshal(data, &result); err != nil {
 		t.Fatal(err)
 	}
-	if len(result.AI) != 5 {
-		t.Fatalf("expected five public fields: %s", data)
-	}
-	for _, field := range []string{"IsVulnerable", "confidence", "evidence", "reasoning", "usage"} {
-		if _, ok := result.AI[field]; !ok {
-			t.Fatalf("missing %s", field)
-		}
-	}
+	openapitest.Validate(t, "CGAIVerification", result.AI)
 	var reasoning string
 	json.Unmarshal(result.AI["reasoning"], &reasoning)
 	if !strings.Contains(reasoning, a.Reasoning) || strings.Count(reasoning, "Deployment configuration is unavailable") != 1 || !strings.Contains(reasoning, "Callback registration depends on runtime input") {
@@ -2402,6 +2380,7 @@ func TestCompactAIVerificationPreservesFailedCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	openapitest.Validate(t, "CGAIVerification", json.RawMessage(data))
 	text := string(data)
 	for _, want := range []string{`"IsVulnerable":"unknown"`, `"confidence":"low"`, "provider unavailable", "1 of 1 reflection risk candidates remain unreviewed", `"usage":null`} {
 		if !strings.Contains(text, want) {
@@ -4423,6 +4402,7 @@ func TestVerificationDiscoversReflectionWithoutScannerCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	openapitest.Validate(t, "CGAIVerification", json.RawMessage(data))
 	for _, want := range []string{"Suspected missed invocation", "Dynamic usage (reflection, supported, graph=missing)", "helper.go:4"} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("missing public finding %q: %s", want, data)
